@@ -5,6 +5,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.services.llm.ollama_client import OllamaCloudClient
+from app.services.llm.model_selector import AgentModelSelector
 from app.services.prompts.registry import PromptTemplateService
 
 
@@ -19,10 +20,23 @@ class AgentContext:
     memory_context: list[dict[str, Any]]
 
 
+def _parse_signal_from_text(text: str) -> str:
+    lowered = text.lower()
+    if any(keyword in lowered for keyword in ['bullish', 'haussier', 'hausse']):
+        return 'bullish'
+    if any(keyword in lowered for keyword in ['bearish', 'baissier', 'baisse']):
+        return 'bearish'
+    return 'neutral'
+
+
 class TechnicalAnalystAgent:
     name = 'technical-analyst'
 
-    def run(self, ctx: AgentContext) -> dict[str, Any]:
+    def __init__(self) -> None:
+        self.llm = OllamaCloudClient()
+        self.model_selector = AgentModelSelector()
+
+    def run(self, ctx: AgentContext, db: Session | None = None) -> dict[str, Any]:
         m = ctx.market_snapshot
         if m.get('degraded'):
             return {'signal': 'neutral', 'score': 0.0, 'reason': 'Market data unavailable'}
@@ -44,7 +58,43 @@ class TechnicalAnalystAgent:
             score -= 0.2
 
         signal = 'bullish' if score > 0.15 else 'bearish' if score < -0.15 else 'neutral'
-        return {'signal': signal, 'score': round(score, 3), 'indicators': m}
+        output: dict[str, Any] = {
+            'signal': signal,
+            'score': round(score, 3),
+            'indicators': m,
+            'llm_enabled': self.model_selector.is_enabled(db, self.name),
+        }
+        llm_model = self.model_selector.resolve(db, self.name)
+        output['prompt_meta'] = {'llm_model': llm_model, 'llm_enabled': bool(output['llm_enabled'])}
+
+        if not output['llm_enabled']:
+            return output
+
+        prompt = (
+            f'Pair: {ctx.pair}\nTimeframe: {ctx.timeframe}\nTrend: {m.get("trend")}\n'
+            f'RSI: {m.get("rsi")}\nMACD diff: {m.get("macd_diff")}\n'
+            'Donne uniquement: bullish, bearish ou neutral puis une courte justification en français.'
+        )
+        llm_res = self.llm.chat(
+            'Tu es un analyste technique Forex. Réponds en français.',
+            prompt,
+            model=llm_model,
+        )
+        llm_signal = _parse_signal_from_text(llm_res.get('text', ''))
+        llm_score = {'bullish': 0.15, 'bearish': -0.15, 'neutral': 0.0}[llm_signal]
+        merged_score = round(float(output['score']) + llm_score, 3)
+        merged_signal = 'bullish' if merged_score > 0.15 else 'bearish' if merged_score < -0.15 else 'neutral'
+
+        output.update(
+            {
+                'signal': merged_signal,
+                'score': merged_score,
+                'llm_summary': llm_res.get('text', ''),
+                'degraded': llm_res.get('degraded', False),
+                'prompt_meta': {'llm_model': llm_model},
+            }
+        )
+        return output
 
 
 class NewsAnalystAgent:
@@ -52,6 +102,7 @@ class NewsAnalystAgent:
 
     def __init__(self, prompt_service: PromptTemplateService) -> None:
         self.llm = OllamaCloudClient()
+        self.model_selector = AgentModelSelector()
         self.prompt_service = prompt_service
 
     def run(self, ctx: AgentContext, db: Session | None = None) -> dict[str, Any]:
@@ -70,7 +121,9 @@ class NewsAnalystAgent:
         )
 
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
-        if db is not None:
+        llm_enabled = self.model_selector.is_enabled(db, self.name)
+        llm_model = self.model_selector.resolve(db, self.name)
+        if db is not None and llm_enabled:
             prompt_info = self.prompt_service.render(
                 db=db,
                 agent_name=self.name,
@@ -94,30 +147,31 @@ class NewsAnalystAgent:
                 memory_context='\n'.join(f"- {m.get('summary', '')}" for m in ctx.memory_context) or '- none',
             )
 
-        llm_res = self.llm.chat(system, user)
-        text = llm_res.get('text', '').lower()
-
-        signal = 'neutral'
-        score = 0.0
-        if any(keyword in text for keyword in ['bullish', 'haussier', 'hausse']):
-            signal = 'bullish'
-            score = 0.2
-        elif any(keyword in text for keyword in ['bearish', 'baissier', 'baisse']):
-            signal = 'bearish'
-            score = -0.2
-        elif any(keyword in text for keyword in ['neutral', 'neutre']):
+        llm_enabled = self.model_selector.is_enabled(db, self.name)
+        llm_model = self.model_selector.resolve(db, self.name)
+        if llm_enabled:
+            llm_res = self.llm.chat(system, user, model=llm_model)
+            signal = _parse_signal_from_text(llm_res.get('text', ''))
+            score = {'bullish': 0.2, 'bearish': -0.2, 'neutral': 0.0}[signal]
+            degraded = llm_res.get('degraded', False)
+            summary = llm_res.get('text', '')
+        else:
             signal = 'neutral'
             score = 0.0
+            degraded = False
+            summary = 'LLM disabled for news-analyst. Deterministic neutral fallback.'
 
         return {
             'signal': signal,
             'score': score,
-            'summary': llm_res.get('text', ''),
+            'summary': summary,
             'news_count': len(news),
-            'degraded': llm_res.get('degraded', False),
+            'degraded': degraded,
             'prompt_meta': {
                 'prompt_id': prompt_info.get('prompt_id'),
                 'prompt_version': prompt_info.get('version', 0),
+                'llm_model': llm_model,
+                'llm_enabled': llm_enabled,
             },
         }
 
@@ -125,35 +179,96 @@ class NewsAnalystAgent:
 class MacroAnalystAgent:
     name = 'macro-analyst'
 
-    def run(self, ctx: AgentContext) -> dict[str, Any]:
+    def __init__(self) -> None:
+        self.llm = OllamaCloudClient()
+        self.model_selector = AgentModelSelector()
+
+    def run(self, ctx: AgentContext, db: Session | None = None) -> dict[str, Any]:
         market = ctx.market_snapshot
         if market.get('degraded'):
             return {'signal': 'neutral', 'score': 0.0, 'reason': 'Macro proxy unavailable'}
 
         volatility = market.get('atr', 0.0) / market.get('last_price', 1)
         if volatility > 0.01:
-            return {'signal': 'neutral', 'score': 0.0, 'reason': 'High volatility suggests caution'}
-        if market.get('trend') == 'bullish':
-            return {'signal': 'bullish', 'score': 0.1, 'reason': 'Macro proxy aligned with trend'}
-        if market.get('trend') == 'bearish':
-            return {'signal': 'bearish', 'score': -0.1, 'reason': 'Macro proxy aligned with trend'}
-        return {'signal': 'neutral', 'score': 0.0, 'reason': 'No macro edge'}
+            output: dict[str, Any] = {'signal': 'neutral', 'score': 0.0, 'reason': 'High volatility suggests caution'}
+        elif market.get('trend') == 'bullish':
+            output = {'signal': 'bullish', 'score': 0.1, 'reason': 'Macro proxy aligned with trend'}
+        elif market.get('trend') == 'bearish':
+            output = {'signal': 'bearish', 'score': -0.1, 'reason': 'Macro proxy aligned with trend'}
+        else:
+            output = {'signal': 'neutral', 'score': 0.0, 'reason': 'No macro edge'}
+
+        llm_enabled = self.model_selector.is_enabled(db, self.name)
+        output['llm_enabled'] = llm_enabled
+        llm_model = self.model_selector.resolve(db, self.name)
+        output['prompt_meta'] = {'llm_model': llm_model, 'llm_enabled': llm_enabled}
+        if not llm_enabled:
+            return output
+
+        prompt = (
+            f'Pair: {ctx.pair}\nTimeframe: {ctx.timeframe}\nTrend: {market.get("trend")}\n'
+            f'ATR ratio: {round(volatility, 6)}\n'
+            'Donne un biais macro: bullish, bearish ou neutral puis une phrase en français.'
+        )
+        llm_res = self.llm.chat(
+            'Tu es un analyste macro Forex. Réponds en français.',
+            prompt,
+            model=llm_model,
+        )
+        llm_signal = _parse_signal_from_text(llm_res.get('text', ''))
+        llm_score = {'bullish': 0.05, 'bearish': -0.05, 'neutral': 0.0}[llm_signal]
+        output['score'] = round(float(output.get('score', 0.0)) + llm_score, 3)
+        output['signal'] = 'bullish' if output['score'] > 0.05 else 'bearish' if output['score'] < -0.05 else 'neutral'
+        output['llm_summary'] = llm_res.get('text', '')
+        output['degraded'] = llm_res.get('degraded', False)
+        output['prompt_meta'] = {'llm_model': llm_model, 'llm_enabled': llm_enabled}
+        return output
 
 
 class SentimentAgent:
     name = 'sentiment-agent'
 
-    def run(self, ctx: AgentContext) -> dict[str, Any]:
+    def __init__(self) -> None:
+        self.llm = OllamaCloudClient()
+        self.model_selector = AgentModelSelector()
+
+    def run(self, ctx: AgentContext, db: Session | None = None) -> dict[str, Any]:
         market = ctx.market_snapshot
         if market.get('degraded'):
             return {'signal': 'neutral', 'score': 0.0, 'reason': 'Sentiment unavailable'}
 
         change_pct = market.get('change_pct', 0.0)
         if change_pct > 0.1:
-            return {'signal': 'bullish', 'score': 0.1, 'reason': 'Short-term price momentum positive'}
-        if change_pct < -0.1:
-            return {'signal': 'bearish', 'score': -0.1, 'reason': 'Short-term price momentum negative'}
-        return {'signal': 'neutral', 'score': 0.0, 'reason': 'Flat momentum'}
+            output: dict[str, Any] = {'signal': 'bullish', 'score': 0.1, 'reason': 'Short-term price momentum positive'}
+        elif change_pct < -0.1:
+            output = {'signal': 'bearish', 'score': -0.1, 'reason': 'Short-term price momentum negative'}
+        else:
+            output = {'signal': 'neutral', 'score': 0.0, 'reason': 'Flat momentum'}
+
+        llm_enabled = self.model_selector.is_enabled(db, self.name)
+        output['llm_enabled'] = llm_enabled
+        llm_model = self.model_selector.resolve(db, self.name)
+        output['prompt_meta'] = {'llm_model': llm_model, 'llm_enabled': llm_enabled}
+        if not llm_enabled:
+            return output
+
+        prompt = (
+            f'Pair: {ctx.pair}\nTimeframe: {ctx.timeframe}\nChange pct: {change_pct}\n'
+            'Classe le sentiment: bullish, bearish ou neutral puis une justification française concise.'
+        )
+        llm_res = self.llm.chat(
+            'Tu es un analyste sentiment Forex. Réponds en français.',
+            prompt,
+            model=llm_model,
+        )
+        llm_signal = _parse_signal_from_text(llm_res.get('text', ''))
+        llm_score = {'bullish': 0.05, 'bearish': -0.05, 'neutral': 0.0}[llm_signal]
+        output['score'] = round(float(output.get('score', 0.0)) + llm_score, 3)
+        output['signal'] = 'bullish' if output['score'] > 0.05 else 'bearish' if output['score'] < -0.05 else 'neutral'
+        output['llm_summary'] = llm_res.get('text', '')
+        output['degraded'] = llm_res.get('degraded', False)
+        output['prompt_meta'] = {'llm_model': llm_model, 'llm_enabled': llm_enabled}
+        return output
 
 
 class BullishResearcherAgent:
@@ -162,6 +277,7 @@ class BullishResearcherAgent:
     def __init__(self, prompt_service: PromptTemplateService) -> None:
         self.prompt_service = prompt_service
         self.llm = OllamaCloudClient()
+        self.model_selector = AgentModelSelector()
 
     def run(self, ctx: AgentContext, agent_outputs: dict[str, dict[str, Any]], db: Session | None = None) -> dict[str, Any]:
         arguments = []
@@ -180,7 +296,9 @@ class BullishResearcherAgent:
         )
 
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
-        if db is not None:
+        llm_enabled = self.model_selector.is_enabled(db, self.name)
+        llm_model = self.model_selector.resolve(db, self.name)
+        if db is not None and llm_enabled:
             prompt_info = self.prompt_service.render(
                 db=db,
                 agent_name=self.name,
@@ -193,7 +311,7 @@ class BullishResearcherAgent:
                     'memory_context': '\n'.join(f"- {m.get('summary', '')}" for m in ctx.memory_context) or '- none',
                 },
             )
-            llm_out = self.llm.chat(prompt_info['system_prompt'], prompt_info['user_prompt'])
+            llm_out = self.llm.chat(prompt_info['system_prompt'], prompt_info['user_prompt'], model=llm_model)
         else:
             llm_out = {'text': ''}
 
@@ -204,6 +322,8 @@ class BullishResearcherAgent:
             'prompt_meta': {
                 'prompt_id': prompt_info.get('prompt_id'),
                 'prompt_version': prompt_info.get('version', 0),
+                'llm_model': llm_model,
+                'llm_enabled': llm_enabled,
             },
         }
 
@@ -214,6 +334,7 @@ class BearishResearcherAgent:
     def __init__(self, prompt_service: PromptTemplateService) -> None:
         self.prompt_service = prompt_service
         self.llm = OllamaCloudClient()
+        self.model_selector = AgentModelSelector()
 
     def run(self, ctx: AgentContext, agent_outputs: dict[str, dict[str, Any]], db: Session | None = None) -> dict[str, Any]:
         arguments = []
@@ -232,7 +353,9 @@ class BearishResearcherAgent:
         )
 
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
-        if db is not None:
+        llm_enabled = self.model_selector.is_enabled(db, self.name)
+        llm_model = self.model_selector.resolve(db, self.name)
+        if db is not None and llm_enabled:
             prompt_info = self.prompt_service.render(
                 db=db,
                 agent_name=self.name,
@@ -245,7 +368,7 @@ class BearishResearcherAgent:
                     'memory_context': '\n'.join(f"- {m.get('summary', '')}" for m in ctx.memory_context) or '- none',
                 },
             )
-            llm_out = self.llm.chat(prompt_info['system_prompt'], prompt_info['user_prompt'])
+            llm_out = self.llm.chat(prompt_info['system_prompt'], prompt_info['user_prompt'], model=llm_model)
         else:
             llm_out = {'text': ''}
 
@@ -256,6 +379,8 @@ class BearishResearcherAgent:
             'prompt_meta': {
                 'prompt_id': prompt_info.get('prompt_id'),
                 'prompt_version': prompt_info.get('version', 0),
+                'llm_model': llm_model,
+                'llm_enabled': llm_enabled,
             },
         }
 
@@ -263,7 +388,18 @@ class BearishResearcherAgent:
 class TraderAgent:
     name = 'trader-agent'
 
-    def run(self, ctx: AgentContext, agent_outputs: dict[str, dict[str, Any]], bullish: dict[str, Any], bearish: dict[str, Any]) -> dict[str, Any]:
+    def __init__(self) -> None:
+        self.llm = OllamaCloudClient()
+        self.model_selector = AgentModelSelector()
+
+    def run(
+        self,
+        ctx: AgentContext,
+        agent_outputs: dict[str, dict[str, Any]],
+        bullish: dict[str, Any],
+        bearish: dict[str, Any],
+        db: Session | None = None,
+    ) -> dict[str, Any]:
         net_score = round(sum(v.get('score', 0.0) for v in agent_outputs.values()), 3)
         decision = 'HOLD'
         confidence = min(abs(net_score), 1.0)
@@ -292,7 +428,7 @@ class TraderAgent:
             stop_loss = None
             take_profit = None
 
-        return {
+        output = {
             'decision': decision,
             'confidence': round(float(confidence), 3),
             'net_score': net_score,
@@ -307,3 +443,25 @@ class TraderAgent:
                 'memory_refs': [m.get('summary', '') for m in ctx.memory_context[:3]],
             },
         }
+        llm_enabled = self.model_selector.is_enabled(db, self.name)
+        llm_model = self.model_selector.resolve(db, self.name)
+        output['prompt_meta'] = {
+            'llm_enabled': llm_enabled,
+            'llm_model': llm_model,
+        }
+        if not llm_enabled:
+            return output
+
+        llm_prompt = (
+            f'Pair: {ctx.pair}\nTimeframe: {ctx.timeframe}\nDecision: {decision}\nNet score: {net_score}\n'
+            f"Bullish args: {bullish.get('arguments', [])}\nBearish args: {bearish.get('arguments', [])}\n"
+            "Rédige une note d'exécution concise en français."
+        )
+        llm_res = self.llm.chat(
+            "Tu es un assistant trader Forex. Réponds en français.",
+            llm_prompt,
+            model=llm_model,
+        )
+        output['execution_note'] = llm_res.get('text', '')
+        output['degraded'] = llm_res.get('degraded', False)
+        return output

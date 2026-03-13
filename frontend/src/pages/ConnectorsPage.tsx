@@ -1,10 +1,41 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { api } from '../api/client';
 import { useAuth } from '../hooks/useAuth';
-import type { ConnectorConfig, LlmSummary, MetaApiAccount, PromptTemplate } from '../types';
+import type { ConnectorConfig, LlmModelUsage, LlmSummary, MetaApiAccount, PromptTemplate } from '../types';
 
 const PAIRS = ['EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF', 'AUDUSD', 'USDCAD', 'NZDUSD', 'EURJPY', 'GBPJPY', 'EURGBP'];
 const TIMEFRAMES = ['M5', 'M15', 'H1', 'H4', 'D1'];
+const ORCHESTRATION_AGENTS = [
+  'technical-analyst',
+  'news-analyst',
+  'macro-analyst',
+  'sentiment-agent',
+  'bullish-researcher',
+  'bearish-researcher',
+  'trader-agent',
+  'risk-manager',
+  'execution-manager',
+];
+const SWITCHABLE_LLM_AGENTS = new Set([
+  'technical-analyst',
+  'news-analyst',
+  'macro-analyst',
+  'sentiment-agent',
+  'bullish-researcher',
+  'bearish-researcher',
+  'trader-agent',
+]);
+const DEFAULT_AGENT_LLM_ENABLED: Record<string, boolean> = {
+  'technical-analyst': false,
+  'news-analyst': true,
+  'macro-analyst': false,
+  'sentiment-agent': false,
+  'bullish-researcher': true,
+  'bearish-researcher': true,
+  'trader-agent': false,
+  'risk-manager': false,
+  'execution-manager': false,
+};
 
 export function ConnectorsPage() {
   const { token } = useAuth();
@@ -12,10 +43,22 @@ export function ConnectorsPage() {
   const [accounts, setAccounts] = useState<MetaApiAccount[]>([]);
   const [prompts, setPrompts] = useState<PromptTemplate[]>([]);
   const [summary, setSummary] = useState<LlmSummary | null>(null);
+  const [modelsUsage, setModelsUsage] = useState<LlmModelUsage[]>([]);
   const [memoryResults, setMemoryResults] = useState<Array<Record<string, unknown>>>([]);
 
   const [testResult, setTestResult] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const [defaultLlmModel, setDefaultLlmModel] = useState('llama3.1');
+  const [agentModels, setAgentModels] = useState<Record<string, string>>(
+    Object.fromEntries(ORCHESTRATION_AGENTS.map((agent) => [agent, ''])),
+  );
+  const [agentLlmEnabled, setAgentLlmEnabled] = useState<Record<string, boolean>>(
+    Object.fromEntries(ORCHESTRATION_AGENTS.map((agent) => [agent, DEFAULT_AGENT_LLM_ENABLED[agent] ?? false])),
+  );
+  const [modelChoices, setModelChoices] = useState<string[]>([]);
+  const [modelSource, setModelSource] = useState<string>('');
+  const [savingModels, setSavingModels] = useState(false);
 
   const [accountLabel, setAccountLabel] = useState('Paper Account');
   const [accountId, setAccountId] = useState('');
@@ -29,19 +72,53 @@ export function ConnectorsPage() {
   const [memoryTimeframe, setMemoryTimeframe] = useState('H1');
   const [memoryQuery, setMemoryQuery] = useState('recent bullish context');
 
+  const hydrateAgentModels = (connectorRows: ConnectorConfig[]) => {
+    const ollama = connectorRows.find((item) => item.connector_name === 'ollama');
+    const settings = (ollama?.settings ?? {}) as Record<string, unknown>;
+    const configuredDefault = typeof settings.default_model === 'string' ? settings.default_model.trim() : '';
+    const rawMap = settings.agent_models && typeof settings.agent_models === 'object'
+      ? (settings.agent_models as Record<string, unknown>)
+      : {};
+    const rawEnabled = settings.agent_llm_enabled && typeof settings.agent_llm_enabled === 'object'
+      ? (settings.agent_llm_enabled as Record<string, unknown>)
+      : {};
+
+    const next: Record<string, string> = {};
+    const nextEnabled: Record<string, boolean> = {};
+    ORCHESTRATION_AGENTS.forEach((agentName) => {
+      const value = rawMap[agentName];
+      next[agentName] = typeof value === 'string' ? value : '';
+      const enabledValue = rawEnabled[agentName];
+      nextEnabled[agentName] = typeof enabledValue === 'boolean'
+        ? enabledValue
+        : (DEFAULT_AGENT_LLM_ENABLED[agentName] ?? false);
+    });
+
+    setDefaultLlmModel(configuredDefault || 'llama3.1');
+    setAgentModels(next);
+    setAgentLlmEnabled(nextEnabled);
+  };
+
   const loadAll = async () => {
     if (!token) return;
     try {
-      const [c, a, p, s] = await Promise.all([
+      const [c, a, p, s, m, usage] = await Promise.all([
         api.listConnectors(token),
         api.listMetaApiAccounts(token),
         api.listPrompts(token),
         api.llmSummary(token),
+        api.listOllamaModels(token).catch(() => ({ models: [], source: null, error: 'cannot fetch models' })),
+        api.llmModelsUsage(token).catch(() => []),
       ]);
-      setConnectors(c as ConnectorConfig[]);
+      const connectorRows = c as ConnectorConfig[];
+      setConnectors(connectorRows);
       setAccounts(a as MetaApiAccount[]);
       setPrompts(p as PromptTemplate[]);
       setSummary(s as LlmSummary);
+      setModelChoices(Array.isArray(m.models) ? m.models : []);
+      setModelSource(typeof m.source === 'string' ? m.source : '');
+      setModelsUsage(usage as LlmModelUsage[]);
+      hydrateAgentModels(connectorRows);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Cannot load admin data');
     }
@@ -67,6 +144,46 @@ export function ConnectorsPage() {
       setTestResult(result);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Connector test failed');
+    }
+  };
+
+  const saveAgentModels = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!token) return;
+
+    const ollama = connectors.find((item) => item.connector_name === 'ollama');
+    if (!ollama) {
+      setError('Connecteur ollama introuvable');
+      return;
+    }
+
+    const cleanedModels = Object.fromEntries(
+      Object.entries(agentModels)
+        .map(([agent, model]) => [agent, model.trim()])
+        .filter(([, model]) => model.length > 0),
+    );
+    const cleanedEnabled = Object.fromEntries(
+      ORCHESTRATION_AGENTS.map((agentName) => [agentName, SWITCHABLE_LLM_AGENTS.has(agentName) ? Boolean(agentLlmEnabled[agentName]) : false]),
+    );
+    const existingSettings = (ollama.settings ?? {}) as Record<string, unknown>;
+
+    setSavingModels(true);
+    setError(null);
+    try {
+      await api.updateConnector(token, 'ollama', {
+        enabled: ollama.enabled,
+        settings: {
+          ...existingSettings,
+          default_model: defaultLlmModel.trim() || 'llama3.1',
+          agent_models: cleanedModels,
+          agent_llm_enabled: cleanedEnabled,
+        },
+      });
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Cannot save LLM models');
+    } finally {
+      setSavingModels(false);
     }
   };
 
@@ -133,6 +250,12 @@ export function ConnectorsPage() {
     }
   };
 
+  const effectiveModelFor = (agentName: string): string => {
+    const specific = (agentModels[agentName] ?? '').trim();
+    const fallback = defaultLlmModel.trim() || 'llama3.1';
+    return specific || fallback;
+  };
+
   return (
     <div className="dashboard-grid">
       <section className="card">
@@ -183,6 +306,90 @@ export function ConnectorsPage() {
             <strong>{summary?.total_cost_usd ?? 0}</strong>
           </div>
         </div>
+      </section>
+
+      <section className="card">
+        <h3>Modèles LLM par agent</h3>
+        <form className="form-grid" onSubmit={saveAgentModels}>
+          <label>
+            Modèle par défaut (fallback)
+            <input
+              list="ollama-model-choices"
+              value={defaultLlmModel}
+              onChange={(e) => setDefaultLlmModel(e.target.value)}
+              placeholder="llama3.1"
+              required
+            />
+          </label>
+          <datalist id="ollama-model-choices">
+            {modelChoices.map((modelName) => (
+              <option key={modelName} value={modelName} />
+            ))}
+          </datalist>
+          {modelSource && <p className="model-source">Catalogue modèles: <code>{modelSource}</code></p>}
+          {modelsUsage.length > 0 && (
+            <table>
+              <thead>
+                <tr>
+                  <th>LLM réellement utilisé</th>
+                  <th>Calls</th>
+                  <th>Succès</th>
+                  <th>Last seen</th>
+                </tr>
+              </thead>
+              <tbody>
+                {modelsUsage.map((row) => (
+                  <tr key={row.model}>
+                    <td><code>{row.model}</code></td>
+                    <td>{row.calls}</td>
+                    <td>{row.success_calls}</td>
+                    <td>{row.last_seen ? new Date(row.last_seen).toLocaleString() : '-'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+
+          <table>
+            <thead>
+              <tr>
+                <th>Agent</th>
+                <th>LLM actif</th>
+                <th>Modèle</th>
+                <th>LLM effectif</th>
+              </tr>
+            </thead>
+            <tbody>
+              {ORCHESTRATION_AGENTS.map((agentName) => (
+                <tr key={agentName}>
+                  <td>{agentName}</td>
+                  <td>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(agentLlmEnabled[agentName])}
+                      disabled={!SWITCHABLE_LLM_AGENTS.has(agentName)}
+                      onChange={(e) => setAgentLlmEnabled((prev) => ({ ...prev, [agentName]: e.target.checked }))}
+                    />
+                  </td>
+                  <td>
+                    <input
+                      list="ollama-model-choices"
+                      value={agentModels[agentName] ?? ''}
+                      onChange={(e) => setAgentModels((prev) => ({ ...prev, [agentName]: e.target.value }))}
+                      placeholder={`hérite: ${defaultLlmModel || 'llama3.1'}`}
+                      disabled={!SWITCHABLE_LLM_AGENTS.has(agentName)}
+                    />
+                  </td>
+                  <td>
+                    <code>{effectiveModelFor(agentName)}</code>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          <button disabled={savingModels}>{savingModels ? 'Enregistrement...' : 'Enregistrer les modèles'}</button>
+        </form>
       </section>
 
       <section className="card">

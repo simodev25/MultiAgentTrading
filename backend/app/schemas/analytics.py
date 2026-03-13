@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel
 
 
@@ -9,3 +11,10 @@ class LlmAnalyticsSummary(BaseModel):
     total_prompt_tokens: int
     total_completion_tokens: int
     total_cost_usd: float
+
+
+class LlmModelUsageItem(BaseModel):
+    model: str
+    calls: int
+    success_calls: int
+    last_seen: datetime | None

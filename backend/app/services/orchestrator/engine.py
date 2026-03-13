@@ -136,7 +136,7 @@ class ForexOrchestrator:
         tech_out = execute_step(
             self.technical_agent.name,
             {'pair': context.pair, 'timeframe': context.timeframe},
-            lambda: self.technical_agent.run(context),
+            lambda: self.technical_agent.run(context, db=db),
         )
         analysis_outputs[self.technical_agent.name] = tech_out
 
@@ -150,14 +150,14 @@ class ForexOrchestrator:
         macro_out = execute_step(
             self.macro_agent.name,
             {'market': context.market_snapshot},
-            lambda: self.macro_agent.run(context),
+            lambda: self.macro_agent.run(context, db=db),
         )
         analysis_outputs[self.macro_agent.name] = macro_out
 
         sentiment_out = execute_step(
             self.sentiment_agent.name,
             {'market': context.market_snapshot},
-            lambda: self.sentiment_agent.run(context),
+            lambda: self.sentiment_agent.run(context, db=db),
         )
         analysis_outputs[self.sentiment_agent.name] = sentiment_out
 
@@ -176,7 +176,7 @@ class ForexOrchestrator:
         trader_decision = execute_step(
             self.trader_agent.name,
             {'analysis_outputs': analysis_outputs, 'bullish': bullish, 'bearish': bearish},
-            lambda: self.trader_agent.run(context, analysis_outputs, bullish, bearish),
+            lambda: self.trader_agent.run(context, analysis_outputs, bullish, bearish, db=db),
         )
 
         risk = self.risk_engine.evaluate(

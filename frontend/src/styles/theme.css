@@ -173,7 +173,7 @@ label {
   font-size: 0.9rem;
 }
 
-input,
+input:not([type='checkbox']),
 select,
 textarea {
   border: 1px solid var(--line);
@@ -181,6 +181,12 @@ textarea {
   color: var(--text);
   border-radius: 10px;
   padding: 9px 10px;
+}
+
+input[type='checkbox'] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent-blue);
 }
 
 table {
@@ -266,6 +272,12 @@ tbody td {
 
 .alert {
   color: #ff9ca6;
+}
+
+.model-source {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
 }
 
 pre,

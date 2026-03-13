@@ -105,3 +105,10 @@ export interface LlmSummary {
   total_completion_tokens: number;
   total_cost_usd: number;
 }
+
+export interface LlmModelUsage {
+  model: string;
+  calls: number;
+  success_calls: number;
+  last_seen?: string | null;
+}

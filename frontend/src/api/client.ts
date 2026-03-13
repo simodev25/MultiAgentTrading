@@ -53,6 +53,12 @@ export const api = {
     }, token),
   testConnector: (token: string, connector: string) =>
     request(`/connectors/${connector}/test`, { method: 'POST' }, token),
+  listOllamaModels: (token: string) =>
+    request<{ models: string[]; source?: string | null; error?: string }>(
+      '/connectors/ollama/models',
+      {},
+      token,
+    ),
   listMetaApiAccounts: (token: string) => request('/trading/accounts', {}, token),
   createMetaApiAccount: (
     token: string,
@@ -83,6 +89,8 @@ export const api = {
   activatePrompt: (token: string, promptId: number) =>
     request(`/prompts/${promptId}/activate`, { method: 'POST' }, token),
   llmSummary: (token: string, days = 30) => request(`/analytics/llm-summary?days=${days}`, {}, token),
+  llmModelsUsage: (token: string, days = 30, limit = 20) =>
+    request(`/analytics/llm-models?days=${days}&limit=${limit}`, {}, token),
   backtestsSummary: (token: string) => request('/analytics/backtests-summary', {}, token),
   listBacktests: (token: string) => request('/backtests', {}, token),
   getBacktest: (token: string, id: number) => request(`/backtests/${id}`, {}, token),

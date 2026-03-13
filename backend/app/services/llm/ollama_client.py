@@ -98,18 +98,18 @@ class OllamaCloudClient:
             response.raise_for_status()
             return response.json()
 
-    def chat(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+    def chat(self, system_prompt: str, user_prompt: str, model: str | None = None) -> dict[str, Any]:
         provider = 'ollama-cloud'
-        model = self.settings.ollama_model
+        selected_model = (model or self.settings.ollama_model or '').strip() or self.settings.ollama_model
         started = time.perf_counter()
 
         if not self.is_configured():
             latency = time.perf_counter() - started
             llm_calls_total.labels(provider='fallback', status='degraded').inc()
-            llm_latency_seconds.labels(provider='fallback', model=model, status='degraded').observe(latency)
+            llm_latency_seconds.labels(provider='fallback', model=selected_model, status='degraded').observe(latency)
             self._persist_log(
                 provider='fallback',
-                model=model,
+                model=selected_model,
                 status='degraded',
                 prompt_tokens=0,
                 completion_tokens=0,
@@ -130,7 +130,7 @@ class OllamaCloudClient:
         base_url = self._normalized_base_url()
         url = f"{base_url}/api/chat"
         payload = {
-            'model': model,
+            'model': selected_model,
             'messages': [
                 {'role': 'system', 'content': system_prompt},
                 {'role': 'user', 'content': user_prompt},
@@ -152,14 +152,14 @@ class OllamaCloudClient:
             latency = time.perf_counter() - started
 
             llm_calls_total.labels(provider=provider, status='success').inc()
-            llm_prompt_tokens_total.labels(provider=provider, model=model).inc(prompt_tokens)
-            llm_completion_tokens_total.labels(provider=provider, model=model).inc(completion_tokens)
-            llm_cost_usd_total.labels(provider=provider, model=model).inc(cost_usd)
-            llm_latency_seconds.labels(provider=provider, model=model, status='success').observe(latency)
+            llm_prompt_tokens_total.labels(provider=provider, model=selected_model).inc(prompt_tokens)
+            llm_completion_tokens_total.labels(provider=provider, model=selected_model).inc(completion_tokens)
+            llm_cost_usd_total.labels(provider=provider, model=selected_model).inc(cost_usd)
+            llm_latency_seconds.labels(provider=provider, model=selected_model, status='success').observe(latency)
 
             self._persist_log(
                 provider=provider,
-                model=model,
+                model=selected_model,
                 status='success',
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
@@ -169,7 +169,7 @@ class OllamaCloudClient:
 
             logger.info(
                 'ollama_chat_call_success model=%s chars=%s prompt_tokens=%s completion_tokens=%s latency_ms=%.2f',
-                model,
+                selected_model,
                 len(text),
                 prompt_tokens,
                 completion_tokens,
@@ -188,7 +188,7 @@ class OllamaCloudClient:
         except Exception as exc:  # pragma: no cover
             latency = time.perf_counter() - started
             llm_calls_total.labels(provider=provider, status='error').inc()
-            llm_latency_seconds.labels(provider=provider, model=model, status='error').observe(latency)
+            llm_latency_seconds.labels(provider=provider, model=selected_model, status='error').observe(latency)
             external_provider_failures_total.labels(provider='ollama').inc()
 
             status_code = None
@@ -197,7 +197,7 @@ class OllamaCloudClient:
 
             self._persist_log(
                 provider=provider,
-                model=model,
+                model=selected_model,
                 status='error',
                 prompt_tokens=0,
                 completion_tokens=0,
@@ -206,10 +206,10 @@ class OllamaCloudClient:
                 error=str(exc),
             )
             if status_code in {401, 403}:
-                logger.error('ollama_chat_auth_error model=%s status=%s', model, status_code)
+                logger.error('ollama_chat_auth_error model=%s status=%s', selected_model, status_code)
                 message = f'Ollama authentication failed (HTTP {status_code}). Check OLLAMA_API_KEY.'
             else:
-                logger.exception('ollama_chat_call_error model=%s', model)
+                logger.exception('ollama_chat_call_error model=%s', selected_model)
                 message = f'Ollama call failed after retries: {exc}'
             return {
                 'provider': 'fallback',

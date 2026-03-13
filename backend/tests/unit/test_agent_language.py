@@ -38,8 +38,10 @@ def test_prompt_render_enforces_french_directive() -> None:
 def test_news_agent_detects_french_bearish_sentiment(monkeypatch) -> None:
     service = PromptTemplateService()
     agent = NewsAnalystAgent(service)
+    captured: dict[str, str | None] = {'model': None}
 
-    def fake_chat(_system: str, _user: str) -> dict[str, str]:
+    def fake_chat(_system: str, _user: str, model: str | None = None) -> dict[str, str]:
+        captured['model'] = model
         return {'text': 'Sentiment: baissier. Le dollar reste dominant.'}
 
     monkeypatch.setattr(agent.llm, 'chat', fake_chat)
@@ -57,3 +59,5 @@ def test_news_agent_detects_french_bearish_sentiment(monkeypatch) -> None:
     out = agent.run(ctx, db=None)
     assert out['signal'] == 'bearish'
     assert out['score'] == -0.2
+    assert isinstance(captured['model'], str)
+    assert bool(captured['model'])

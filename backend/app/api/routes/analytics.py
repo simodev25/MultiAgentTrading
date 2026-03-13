@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from app.core.security import Role, require_roles
 from app.db.models.backtest_run import BacktestRun
 from app.db.session import get_db
-from app.schemas.analytics import LlmAnalyticsSummary
+from app.schemas.analytics import LlmAnalyticsSummary, LlmModelUsageItem
 from app.services.analytics.llm_analytics import LlmAnalyticsService
 
 router = APIRouter(prefix='/analytics', tags=['analytics'])
@@ -18,6 +18,18 @@ def llm_summary(
 ) -> LlmAnalyticsSummary:
     service = LlmAnalyticsService()
     return LlmAnalyticsSummary.model_validate(service.summary(db=db, days=days))
+
+
+@router.get('/llm-models', response_model=list[LlmModelUsageItem])
+def llm_models_usage(
+    days: int | None = Query(default=30, ge=1, le=3650),
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _=Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN, Role.TRADER_OPERATOR, Role.ANALYST, Role.VIEWER)),
+) -> list[LlmModelUsageItem]:
+    service = LlmAnalyticsService()
+    rows = service.models_usage(db=db, days=days, limit=limit)
+    return [LlmModelUsageItem.model_validate(item) for item in rows]
 
 
 @router.get('/backtests-summary')

@@ -1,6 +1,8 @@
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.security import Role, require_roles
 from app.db.models.connector_config import ConnectorConfig
 from app.db.session import get_db
@@ -29,6 +31,49 @@ def list_connectors(
     db.commit()
     connectors = db.query(ConnectorConfig).all()
     return [ConnectorConfigOut.model_validate(conn) for conn in connectors]
+
+
+@router.get('/ollama/models')
+def list_ollama_models(
+    _=Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN)),
+) -> dict:
+    settings = get_settings()
+    base_url = (settings.ollama_base_url or '').strip().rstrip('/')
+    api_key = (settings.ollama_api_key or '').strip().strip('"').strip("'")
+    timeout = max(min(int(settings.ollama_timeout_seconds), 30), 5)
+
+    candidate_urls = []
+    if base_url:
+        candidate_urls.append(f'{base_url}/api/tags')
+    candidate_urls.append('https://ollama.com/api/tags')
+
+    # Deduplicate while preserving order.
+    unique_urls = list(dict.fromkeys(candidate_urls))
+    headers = {'Accept': 'application/json'}
+    if api_key:
+        headers['Authorization'] = f'Bearer {api_key}'
+
+    errors: list[str] = []
+    for url in unique_urls:
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                response = client.get(url, headers=headers)
+                response.raise_for_status()
+                payload = response.json() if response.content else {}
+            models = payload.get('models', [])
+            names: list[str] = []
+            if isinstance(models, list):
+                for item in models:
+                    if not isinstance(item, dict):
+                        continue
+                    name = item.get('name') or item.get('model')
+                    if isinstance(name, str) and name.strip():
+                        names.append(name.strip())
+            return {'models': sorted(set(names)), 'source': url}
+        except Exception as exc:  # pragma: no cover - network failures are expected in local/offline runs
+            errors.append(f'{url}: {exc}')
+
+    return {'models': [], 'source': None, 'error': '; '.join(errors[:2])}
 
 
 @router.put('/{connector_name}', response_model=ConnectorConfigOut)
