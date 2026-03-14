@@ -1,7 +1,17 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
+import { RealTradesCharts } from '../components/RealTradesCharts';
+import { runtimeConfig } from '../config/runtime';
 import { useAuth } from '../hooks/useAuth';
-import type { ConnectorConfig, LlmModelUsage, LlmSummary, MetaApiAccount, PromptTemplate } from '../types';
+import type {
+  ConnectorConfig,
+  LlmModelUsage,
+  LlmSummary,
+  MetaApiAccount,
+  MetaApiDeal,
+  MetaApiHistoryOrder,
+  PromptTemplate,
+} from '../types';
 
 const PAIRS = ['EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF', 'AUDUSD', 'USDCAD', 'NZDUSD', 'EURJPY', 'GBPJPY', 'EURGBP'];
 const TIMEFRAMES = ['M5', 'M15', 'H1', 'H4', 'D1'];
@@ -93,6 +103,15 @@ export function ConnectorsPage() {
   const [accountLabel, setAccountLabel] = useState('Paper Account');
   const [accountId, setAccountId] = useState('');
   const [accountRegion, setAccountRegion] = useState('new-york');
+  const [tradeAccountRef, setTradeAccountRef] = useState<number | null>(null);
+  const [tradeDays, setTradeDays] = useState(runtimeConfig.metaApiRealTradesDefaultDays);
+  const [mt5Deals, setMt5Deals] = useState<MetaApiDeal[]>([]);
+  const [mt5HistoryOrders, setMt5HistoryOrders] = useState<MetaApiHistoryOrder[]>([]);
+  const [mt5Provider, setMt5Provider] = useState('');
+  const [mt5Syncing, setMt5Syncing] = useState(false);
+  const [mt5Loading, setMt5Loading] = useState(false);
+  const [mt5Error, setMt5Error] = useState<string | null>(null);
+  const [mt5FeatureDisabled, setMt5FeatureDisabled] = useState(!runtimeConfig.enableMetaApiRealTradesDashboard);
 
   const [promptAgent, setPromptAgent] = useState('news-analyst');
   const [promptSystem, setPromptSystem] = useState(AGENT_PROMPT_FALLBACKS['news-analyst'].system);
@@ -142,14 +161,21 @@ export function ConnectorsPage() {
         api.llmModelsUsage(token).catch(() => []),
       ]);
       const connectorRows = c as ConnectorConfig[];
+      const accountRows = a as MetaApiAccount[];
       setConnectors(connectorRows);
-      setAccounts(a as MetaApiAccount[]);
+      setAccounts(accountRows);
       setPrompts(p as PromptTemplate[]);
       setSummary(s as LlmSummary);
       setModelChoices(Array.isArray(m.models) ? m.models : []);
       setModelSource(typeof m.source === 'string' ? m.source : '');
       setModelsUsage(usage as LlmModelUsage[]);
       hydrateAgentModels(connectorRows);
+      if (accountRows.length > 0) {
+        const fallback = accountRows.find((item) => item.is_default && item.enabled) ?? accountRows.find((item) => item.enabled) ?? accountRows[0];
+        setTradeAccountRef((prev) => (prev == null ? fallback?.id ?? null : prev));
+      } else {
+        setTradeAccountRef(null);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Cannot load admin data');
     }
@@ -158,6 +184,13 @@ export function ConnectorsPage() {
   useEffect(() => {
     void loadAll();
   }, [token]);
+
+  useEffect(() => {
+    if (!token) return;
+    if (tradeAccountRef == null) return;
+    if (mt5FeatureDisabled) return;
+    void refreshRealTrades();
+  }, [token, tradeAccountRef, tradeDays, mt5FeatureDisabled]);
 
   const activePromptByAgent = useMemo(() => {
     const map = new Map<string, PromptTemplate>();
@@ -262,6 +295,62 @@ export function ConnectorsPage() {
     if (!token) return;
     await api.updateMetaApiAccount(token, account.id, { is_default: true });
     await loadAll();
+  };
+
+  const refreshRealTrades = async () => {
+    if (!token) return;
+    if (mt5FeatureDisabled) return;
+    setMt5Loading(true);
+    setMt5Error(null);
+    try {
+      const [dealsPayload, historyPayload] = await Promise.all([
+        api.listMetaApiDeals(token, {
+          account_ref: tradeAccountRef,
+          days: tradeDays,
+          limit: runtimeConfig.metaApiRealTradesTableLimit,
+        }),
+        api.listMetaApiHistoryOrders(token, {
+          account_ref: tradeAccountRef,
+          days: tradeDays,
+          limit: runtimeConfig.metaApiRealTradesTableLimit,
+        }),
+      ]);
+
+      const dealsData = dealsPayload as {
+        deals?: MetaApiDeal[];
+        synchronizing?: boolean;
+        provider?: string;
+        reason?: string;
+      };
+      const historyData = historyPayload as {
+        history_orders?: MetaApiHistoryOrder[];
+        synchronizing?: boolean;
+        provider?: string;
+        reason?: string;
+      };
+
+      setMt5Deals(Array.isArray(dealsData.deals) ? dealsData.deals : []);
+      setMt5HistoryOrders(Array.isArray(historyData.history_orders) ? historyData.history_orders : []);
+      setMt5Provider(
+        typeof dealsData.provider === 'string'
+          ? dealsData.provider
+          : (typeof historyData.provider === 'string' ? historyData.provider : ''),
+      );
+      setMt5Syncing(Boolean(dealsData.synchronizing || historyData.synchronizing));
+      const reason = dealsData.reason ?? historyData.reason ?? null;
+      setMt5Error(reason);
+      setMt5FeatureDisabled(Boolean(reason && String(reason).includes('ENABLE_METAAPI_REAL_TRADES_DASHBOARD')));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Cannot load MetaApi real trades';
+      setMt5Deals([]);
+      setMt5HistoryOrders([]);
+      setMt5Provider('');
+      setMt5Syncing(false);
+      setMt5Error(message);
+      setMt5FeatureDisabled(message.includes('ENABLE_METAAPI_REAL_TRADES_DASHBOARD'));
+    } finally {
+      setMt5Loading(false);
+    }
   };
 
   const createPrompt = async (e: FormEvent) => {
@@ -504,6 +593,129 @@ export function ConnectorsPage() {
             ))}
           </tbody>
         </table>
+      </section>
+
+      <section className="card">
+        <h3>Trading réel MT5 via MetaApi</h3>
+        <form
+          className="form-grid inline"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void refreshRealTrades();
+          }}
+        >
+          <label>
+            Compte
+            <select
+              value={tradeAccountRef ?? ''}
+              onChange={(e) => setTradeAccountRef(e.target.value ? Number(e.target.value) : null)}
+              disabled={mt5FeatureDisabled}
+            >
+              <option value="">Default</option>
+              {accounts.map((account) => (
+                <option key={account.id} value={account.id}>
+                  {account.label} ({account.region}){account.is_default ? ' [default]' : ''}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Fenêtre (jours)
+            <input
+              type="number"
+              min={1}
+              max={365}
+              value={tradeDays}
+              onChange={(e) => setTradeDays(Number(e.target.value) || runtimeConfig.metaApiRealTradesDefaultDays)}
+              disabled={mt5FeatureDisabled}
+            />
+          </label>
+          <button disabled={mt5Loading || mt5FeatureDisabled}>{mt5Loading ? 'Chargement...' : 'Rafraîchir'}</button>
+        </form>
+        {mt5FeatureDisabled ? (
+          <>
+            <p className="model-source">
+              Vue désactivée côté UI. Activer <code>VITE_ENABLE_METAAPI_REAL_TRADES_DASHBOARD=true</code>.
+            </p>
+            {mt5Error && <p className="alert">{mt5Error}</p>}
+          </>
+        ) : (
+          <>
+            {mt5Error && <p className="alert">{mt5Error}</p>}
+            <p className="model-source">
+              Provider: <code>{mt5Provider || 'unknown'}</code> | Sync in progress: <code>{mt5Syncing ? 'yes' : 'no'}</code>
+            </p>
+
+            <h4>Deals exécutés</h4>
+            <table>
+              <thead>
+                <tr>
+                  <th>Deal ID</th>
+                  <th>Time</th>
+                  <th>Symbol</th>
+                  <th>Type</th>
+                  <th>Volume</th>
+                  <th>Price</th>
+                  <th>PnL</th>
+                </tr>
+              </thead>
+              <tbody>
+                {mt5Deals.length === 0 ? (
+                  <tr>
+                    <td colSpan={7}>Aucun deal sur la fenêtre courante.</td>
+                  </tr>
+                ) : (
+                  mt5Deals.map((deal, idx) => (
+                    <tr key={`${deal.id ?? deal.orderId ?? idx}`}>
+                      <td>{String(deal.id ?? '-')}</td>
+                      <td>{String(deal.time ?? deal.brokerTime ?? '-')}</td>
+                      <td>{String(deal.symbol ?? '-')}</td>
+                      <td>{String(deal.type ?? deal.entryType ?? '-')}</td>
+                      <td>{typeof deal.volume === 'number' ? deal.volume.toFixed(2) : '-'}</td>
+                      <td>{typeof deal.price === 'number' ? deal.price.toFixed(5) : '-'}</td>
+                      <td>{typeof deal.profit === 'number' ? deal.profit.toFixed(2) : '-'}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+
+            <h4>Historique ordres</h4>
+            <table>
+              <thead>
+                <tr>
+                  <th>Order ID</th>
+                  <th>Done Time</th>
+                  <th>Symbol</th>
+                  <th>Type</th>
+                  <th>State</th>
+                  <th>Volume</th>
+                  <th>Done Price</th>
+                </tr>
+              </thead>
+              <tbody>
+                {mt5HistoryOrders.length === 0 ? (
+                  <tr>
+                    <td colSpan={7}>Aucun historique d'ordre sur la fenêtre courante.</td>
+                  </tr>
+                ) : (
+                  mt5HistoryOrders.map((order, idx) => (
+                    <tr key={`${order.id ?? order.positionId ?? idx}`}>
+                      <td>{String(order.id ?? '-')}</td>
+                      <td>{String(order.doneTime ?? order.brokerTime ?? '-')}</td>
+                      <td>{String(order.symbol ?? '-')}</td>
+                      <td>{String(order.type ?? '-')}</td>
+                      <td>{String(order.state ?? '-')}</td>
+                      <td>{typeof order.volume === 'number' ? order.volume.toFixed(2) : '-'}</td>
+                      <td>{typeof order.donePrice === 'number' ? order.donePrice.toFixed(5) : '-'}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+            <RealTradesCharts deals={mt5Deals} historyOrders={mt5HistoryOrders} />
+          </>
+        )}
       </section>
 
       <section className="card" id="agent-prompts-editor">

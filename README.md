@@ -31,12 +31,17 @@ Plateforme IA multi-agent dédiée au Forex avec:
 cp backend/.env.example backend/.env
 ```
 
-2. Lancer en local conteneurisé:
+2. Copier l'environnement frontend:
+```bash
+cp frontend/.env.example frontend/.env
+```
+
+3. Lancer en local conteneurisé:
 ```bash
 docker compose up --build
 ```
 
-3. Accéder aux services:
+4. Accéder aux services:
 - Frontend: `http://localhost:5173`
 - API docs: `http://localhost:8000/docs`
 - Grafana: `http://localhost:3000` (`admin/admin`)
@@ -60,6 +65,8 @@ Compte seed local:
 - `GET /api/v1/runs`
 - `GET /api/v1/runs/{id}`
 - `GET /api/v1/trading/orders`
+- `GET /api/v1/trading/deals`
+- `GET /api/v1/trading/history-orders`
 - `GET/POST/PATCH /api/v1/trading/accounts`
 - `GET /api/v1/connectors`
 - `PUT /api/v1/connectors/{name}`
@@ -71,6 +78,19 @@ Compte seed local:
 - `GET/POST /api/v1/backtests`
 - `GET /api/v1/analytics/llm-summary`
 - `GET /api/v1/analytics/llm-models`
+
+Paramètre `.env` pour activer la vue trades MT5 réels (tables + graphes):
+- `ENABLE_METAAPI_REAL_TRADES_DASHBOARD=true`
+- `METAAPI_USE_SDK_FOR_MARKET_DATA=false` (recommandé pour limiter les subscriptions MetaApi)
+- `CELERY_WORKER_CONCURRENCY=2` (stabilité locale)
+
+Paramètres `.env` UI (`frontend/.env`) pour la même vue:
+- `VITE_ENABLE_METAAPI_REAL_TRADES_DASHBOARD=true`
+- `VITE_METAAPI_REAL_TRADES_DEFAULT_DAYS=14`
+- `VITE_METAAPI_REAL_TRADES_REFRESH_MS=15000`
+- `VITE_METAAPI_REAL_TRADES_DASHBOARD_LIMIT=8`
+- `VITE_METAAPI_REAL_TRADES_TABLE_LIMIT=15`
+- `VITE_METAAPI_REAL_TRADES_ORDERS_PAGE_LIMIT=25`
 
 ## Tests
 

@@ -1,8 +1,10 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api/client';
+import { RealTradesCharts } from '../components/RealTradesCharts';
+import { runtimeConfig } from '../config/runtime';
 import { useAuth } from '../hooks/useAuth';
-import type { ExecutionMode, MetaApiAccount, Run } from '../types';
+import type { ExecutionMode, MetaApiAccount, MetaApiDeal, MetaApiHistoryOrder, Run } from '../types';
 
 const PAIRS = ['EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF', 'AUDUSD', 'USDCAD', 'NZDUSD', 'EURJPY', 'GBPJPY', 'EURGBP'];
 const TIMEFRAMES = ['M5', 'M15', 'H1', 'H4', 'D1'];
@@ -39,6 +41,12 @@ export function DashboardPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(Date.now());
+  const [metaDeals, setMetaDeals] = useState<MetaApiDeal[]>([]);
+  const [metaHistoryOrders, setMetaHistoryOrders] = useState<MetaApiHistoryOrder[]>([]);
+  const [metaDealsSyncing, setMetaDealsSyncing] = useState(false);
+  const [metaDealsProvider, setMetaDealsProvider] = useState('');
+  const [metaDealsError, setMetaDealsError] = useState<string | null>(null);
+  const [metaDealsFeatureDisabled, setMetaDealsFeatureDisabled] = useState(!runtimeConfig.enableMetaApiRealTradesDashboard);
 
   const loadRuns = async () => {
     if (!token) return;
@@ -47,6 +55,51 @@ export function DashboardPage() {
       setRuns(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load runs');
+    }
+  };
+
+  const loadMetaDeals = async (accountRef: number | null) => {
+    if (!token) return;
+    try {
+      const [dealsPayload, historyPayload] = await Promise.all([
+        api.listMetaApiDeals(token, {
+          account_ref: accountRef,
+          days: runtimeConfig.metaApiRealTradesDefaultDays,
+          limit: runtimeConfig.metaApiRealTradesDashboardLimit,
+        }),
+        api.listMetaApiHistoryOrders(token, {
+          account_ref: accountRef,
+          days: runtimeConfig.metaApiRealTradesDefaultDays,
+          limit: runtimeConfig.metaApiRealTradesDashboardLimit,
+        }),
+      ]);
+      const payload = dealsPayload as {
+        deals?: MetaApiDeal[];
+        synchronizing?: boolean;
+        provider?: string;
+        reason?: string;
+      };
+      const history = historyPayload as {
+        history_orders?: MetaApiHistoryOrder[];
+        synchronizing?: boolean;
+        provider?: string;
+        reason?: string;
+      };
+      setMetaDeals(Array.isArray(payload.deals) ? payload.deals : []);
+      setMetaHistoryOrders(Array.isArray(history.history_orders) ? history.history_orders : []);
+      setMetaDealsSyncing(Boolean(payload.synchronizing || history.synchronizing));
+      setMetaDealsProvider(typeof payload.provider === 'string' ? payload.provider : (typeof history.provider === 'string' ? history.provider : ''));
+      const reason = payload.reason ?? history.reason ?? null;
+      setMetaDealsError(reason);
+      setMetaDealsFeatureDisabled(Boolean(reason && String(reason).includes('ENABLE_METAAPI_REAL_TRADES_DASHBOARD')));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Cannot load MetaApi trades';
+      setMetaDeals([]);
+      setMetaHistoryOrders([]);
+      setMetaDealsSyncing(false);
+      setMetaDealsProvider('');
+      setMetaDealsError(message);
+      setMetaDealsFeatureDisabled(message.includes('ENABLE_METAAPI_REAL_TRADES_DASHBOARD'));
     }
   };
 
@@ -59,7 +112,11 @@ export function DashboardPage() {
           const accountList = data as MetaApiAccount[];
           setAccounts(accountList);
           const defaultAccount = accountList.find((account) => account.is_default && account.enabled) ?? accountList.find((account) => account.enabled);
-          setMetaapiAccountRef(defaultAccount?.id ?? null);
+          const resolvedRef = defaultAccount?.id ?? null;
+          setMetaapiAccountRef(resolvedRef);
+          if (!metaDealsFeatureDisabled) {
+            void loadMetaDeals(resolvedRef);
+          }
         })
         .catch(() => {
           setAccounts([]);
@@ -70,7 +127,17 @@ export function DashboardPage() {
       void loadRuns();
     }, 5000);
     return () => clearInterval(interval);
-  }, [token]);
+  }, [token, metaDealsFeatureDisabled]);
+
+  useEffect(() => {
+    if (!token) return;
+    if (metaDealsFeatureDisabled) return;
+    void loadMetaDeals(metaapiAccountRef);
+    const interval = setInterval(() => {
+      void loadMetaDeals(metaapiAccountRef);
+    }, runtimeConfig.metaApiRealTradesRefreshMs);
+    return () => clearInterval(interval);
+  }, [token, metaapiAccountRef, metaDealsFeatureDisabled]);
 
   useEffect(() => {
     const ticker = setInterval(() => setNowMs(Date.now()), 1000);
@@ -211,6 +278,49 @@ export function DashboardPage() {
           </tbody>
         </table>
       </section>
+
+      {!metaDealsFeatureDisabled && (
+        <section className="card">
+          <h3>Trades réels MetaApi (MT5)</h3>
+          {metaDealsError && <p className="alert">{metaDealsError}</p>}
+          <p className="model-source">
+            Provider: <code>{metaDealsProvider || 'unknown'}</code> | Sync in progress: <code>{metaDealsSyncing ? 'yes' : 'no'}</code>
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>Deal ID</th>
+                <th>Time</th>
+                <th>Symbol</th>
+                <th>Type</th>
+                <th>Volume</th>
+                <th>Price</th>
+                <th>PnL</th>
+              </tr>
+            </thead>
+            <tbody>
+              {metaDeals.length === 0 ? (
+                <tr>
+                  <td colSpan={7}>Aucun deal remonté sur la fenêtre sélectionnée.</td>
+                </tr>
+              ) : (
+                metaDeals.map((deal, idx) => (
+                  <tr key={`${deal.id ?? deal.orderId ?? idx}`}>
+                    <td>{String(deal.id ?? '-')}</td>
+                    <td>{String(deal.time ?? deal.brokerTime ?? '-')}</td>
+                    <td>{String(deal.symbol ?? '-')}</td>
+                    <td>{String(deal.type ?? deal.entryType ?? '-')}</td>
+                    <td>{typeof deal.volume === 'number' ? deal.volume.toFixed(2) : '-'}</td>
+                    <td>{typeof deal.price === 'number' ? deal.price.toFixed(5) : '-'}</td>
+                    <td>{typeof deal.profit === 'number' ? deal.profit.toFixed(2) : '-'}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+          <RealTradesCharts deals={metaDeals} historyOrders={metaHistoryOrders} />
+        </section>
+      )}
     </div>
   );
 }

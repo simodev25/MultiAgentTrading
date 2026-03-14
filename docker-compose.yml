@@ -69,7 +69,11 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
       CELERY_IGNORE_RESULT: 'true'
-    command: celery -A app.tasks.celery_app.celery_app worker --loglevel=info -Q analysis
+    command: >
+      sh -c "celery -A app.tasks.celery_app.celery_app worker --loglevel=info -Q analysis
+      --concurrency=$${CELERY_WORKER_CONCURRENCY:-2}
+      --prefetch-multiplier=$${CELERY_WORKER_PREFETCH_MULTIPLIER:-1}
+      --max-tasks-per-child=$${CELERY_WORKER_MAX_TASKS_PER_CHILD:-100}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -82,7 +86,7 @@ services:
     build:
       context: ./frontend
     environment:
-      VITE_API_URL: http://localhost:8000/api/v1
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:8000/api/v1}
     ports:
       - '5173:5173'
     depends_on:

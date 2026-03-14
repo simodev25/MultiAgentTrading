@@ -9,6 +9,16 @@
 - `METAAPI_MARKET_BASE_URL`
 - `METAAPI_AUTH_HEADER` (par défaut `auth-token`)
 - `METAAPI_SYMBOL_SUFFIX` (ex: `.pro`)
+- `ENABLE_METAAPI_REAL_TRADES_DASHBOARD` (`true|false`, active la vue trades MT5 réels + graphes)
+- `METAAPI_USE_SDK_FOR_MARKET_DATA` (`false` recommandé pour éviter la limite de subscriptions SDK sur deals/history)
+
+Variables UI associées (`frontend/.env`):
+- `VITE_ENABLE_METAAPI_REAL_TRADES_DASHBOARD`
+- `VITE_METAAPI_REAL_TRADES_DEFAULT_DAYS`
+- `VITE_METAAPI_REAL_TRADES_REFRESH_MS`
+- `VITE_METAAPI_REAL_TRADES_DASHBOARD_LIMIT`
+- `VITE_METAAPI_REAL_TRADES_TABLE_LIMIT`
+- `VITE_METAAPI_REAL_TRADES_ORDERS_PAGE_LIMIT`
 
 Compatibilité alias legacy (déjà supportée):
 
@@ -46,6 +56,8 @@ Compatibilité alias legacy (déjà supportée):
 - `POST /api/v1/connectors/metaapi/test`
 - `GET /api/v1/trading/positions`
 - `GET /api/v1/trading/orders`
+- `GET /api/v1/trading/deals`
+- `GET /api/v1/trading/history-orders`
 
 ## Multi-comptes
 

@@ -50,6 +50,41 @@ export interface ExecutionOrder {
   created_at: string;
 }
 
+export interface MetaApiDeal {
+  id?: string | number;
+  orderId?: string | number;
+  positionId?: string | number;
+  symbol?: string;
+  type?: string;
+  entryType?: string;
+  volume?: number;
+  price?: number;
+  profit?: number;
+  commission?: number;
+  swap?: number;
+  fee?: number;
+  brokerTime?: string;
+  time?: string;
+  comment?: string;
+  [key: string]: unknown;
+}
+
+export interface MetaApiHistoryOrder {
+  id?: string | number;
+  positionId?: string | number;
+  symbol?: string;
+  type?: string;
+  state?: string;
+  volume?: number;
+  currentVolume?: number;
+  donePrice?: number;
+  currentPrice?: number;
+  doneTime?: string;
+  brokerTime?: string;
+  comment?: string;
+  [key: string]: unknown;
+}
+
 export interface ConnectorConfig {
   id: number;
   connector_name: string;

@@ -1,5 +1,8 @@
 import logging
+import inspect
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -40,6 +43,25 @@ class MetaApiClient:
     def _resolve_base_url(self) -> str:
         return self.settings.metaapi_base_url.rstrip('/')
 
+    @staticmethod
+    def _normalize_time_range(
+        start_time: datetime | None,
+        end_time: datetime | None,
+        days: int,
+    ) -> tuple[datetime, datetime]:
+        safe_days = min(max(int(days or 1), 1), 365)
+        end = end_time or datetime.utcnow()
+        start = start_time or (end - timedelta(days=safe_days))
+        if start >= end:
+            start = end - timedelta(days=1)
+        return start, end
+
+    @staticmethod
+    def _iso_utc(dt: datetime) -> str:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
     def _resolve_trade_symbol(self, symbol: str) -> str:
         base_symbol = (symbol or '').strip()
         suffix = (self.settings.metaapi_symbol_suffix or '').strip()
@@ -63,6 +85,23 @@ class MetaApiClient:
         if region not in self._sdk_by_region:
             self._sdk_by_region[region] = self._metaapi_cls(self._resolve_token(), {'region': region})
         return self._sdk_by_region[region]
+
+    def _use_sdk_for_market_data(self) -> bool:
+        return bool(self.settings.metaapi_use_sdk_for_market_data)
+
+    @staticmethod
+    async def _close_connection(connection: Any) -> None:
+        if connection is None:
+            return
+        close = getattr(connection, 'close', None)
+        if not callable(close):
+            return
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except Exception as exc:  # pragma: no cover
+            logger.debug('metaapi connection close ignored: %s', exc)
 
     def is_configured(self, account_id: str | None = None) -> bool:
         resolved = self._resolve_account_id(account_id)
@@ -124,6 +163,47 @@ class MetaApiClient:
         except Exception as exc:  # pragma: no cover
             logger.exception('metaapi rest post failure account_id=%s path=%s', account_id, path)
             return {'degraded': True, 'executed': False, 'reason': str(exc), 'endpoint': url}
+
+    async def _rest_get_history(
+        self,
+        account_id: str,
+        *,
+        kind: str,
+        start_time: datetime,
+        end_time: datetime,
+        offset: int,
+        limit: int,
+    ) -> dict[str, Any]:
+        start_iso = quote(self._iso_utc(start_time), safe='')
+        end_iso = quote(self._iso_utc(end_time), safe='')
+
+        if kind == 'deals':
+            paths = [
+                # Official REST route family for historical deals.
+                f'/users/current/accounts/{account_id}/history-deals/time/{start_iso}/{end_iso}?offset={offset}&limit={limit}',
+                f'/users/current/accounts/{account_id}/history-deals/by-time-range?startTime={start_iso}&endTime={end_iso}&offset={offset}&limit={limit}',
+                f'/users/current/accounts/{account_id}/history-deals/time-range?startTime={start_iso}&endTime={end_iso}&offset={offset}&limit={limit}',
+                # Backward-compatible aliases used by some gateways.
+                f'/users/current/accounts/{account_id}/historyDeals/time/{start_iso}/{end_iso}?offset={offset}&limit={limit}',
+                f'/users/current/accounts/{account_id}/historyDeals/by-time-range?startTime={start_iso}&endTime={end_iso}&offset={offset}&limit={limit}',
+                f'/users/current/accounts/{account_id}/historyDeals?startTime={start_iso}&endTime={end_iso}&offset={offset}&limit={limit}',
+                f'/users/current/accounts/{account_id}/history-deals?startTime={start_iso}&endTime={end_iso}&offset={offset}&limit={limit}',
+                # Legacy fallbacks kept as a last resort.
+                f'/users/current/accounts/{account_id}/deals/time/{start_iso}/{end_iso}?offset={offset}&limit={limit}',
+                f'/users/current/accounts/{account_id}/deals/by-time-range?startTime={start_iso}&endTime={end_iso}&offset={offset}&limit={limit}',
+                f'/users/current/accounts/{account_id}/deals/time-range?startTime={start_iso}&endTime={end_iso}&offset={offset}&limit={limit}',
+                f'/users/current/accounts/{account_id}/deals?startTime={start_iso}&endTime={end_iso}&offset={offset}&limit={limit}',
+            ]
+        else:
+            paths = [
+                f'/users/current/accounts/{account_id}/history-orders/by-time-range?startTime={start_iso}&endTime={end_iso}&offset={offset}&limit={limit}',
+                f'/users/current/accounts/{account_id}/history-orders/time-range?startTime={start_iso}&endTime={end_iso}&offset={offset}&limit={limit}',
+                f'/users/current/accounts/{account_id}/history-orders/time/{start_iso}/{end_iso}?offset={offset}&limit={limit}',
+                f'/users/current/accounts/{account_id}/historyOrders/by-time-range?startTime={start_iso}&endTime={end_iso}&offset={offset}&limit={limit}',
+                f'/users/current/accounts/{account_id}/historyOrders?startTime={start_iso}&endTime={end_iso}&offset={offset}&limit={limit}',
+            ]
+
+        return await self._rest_get(account_id, paths)
 
     @classmethod
     def _trade_result_ok(cls, payload: Any) -> tuple[bool, str | None]:
@@ -189,6 +269,7 @@ class MetaApiClient:
 
         sdk = self._get_sdk(region)
         if sdk:
+            connection = None
             try:
                 account = await sdk.metatrader_account_api.get_account(resolved_account_id)
                 if account.state != 'DEPLOYED':
@@ -200,6 +281,8 @@ class MetaApiClient:
                 return {'degraded': False, 'account_info': await connection.get_account_information(), 'provider': 'sdk'}
             except Exception as exc:  # pragma: no cover
                 logger.warning('metaapi sdk account info failed, trying REST fallback: %s', exc)
+            finally:
+                await self._close_connection(connection)
 
         result = await self._rest_get(
             resolved_account_id,
@@ -219,6 +302,7 @@ class MetaApiClient:
 
         sdk = self._get_sdk(region)
         if sdk:
+            connection = None
             try:
                 account = await sdk.metatrader_account_api.get_account(resolved_account_id)
                 connection = account.get_rpc_connection()
@@ -227,6 +311,8 @@ class MetaApiClient:
                 return {'degraded': False, 'positions': await connection.get_positions(), 'provider': 'sdk'}
             except Exception as exc:  # pragma: no cover
                 logger.warning('metaapi sdk positions failed, trying REST fallback: %s', exc)
+            finally:
+                await self._close_connection(connection)
 
         result = await self._rest_get(
             resolved_account_id,
@@ -242,6 +328,192 @@ class MetaApiClient:
         if isinstance(payload, dict):
             payload = payload.get('positions', payload)
         return {'degraded': False, 'positions': payload if isinstance(payload, list) else [], 'provider': 'rest', 'endpoint': result.get('endpoint')}
+
+    async def get_deals(
+        self,
+        account_id: str | None = None,
+        region: str | None = None,
+        *,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        days: int = 30,
+        offset: int = 0,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        resolved_account_id = self._resolve_account_id(account_id)
+        if not resolved_account_id:
+            return {'degraded': True, 'deals': [], 'reason': 'MetaApi account id not configured'}
+
+        start, end = self._normalize_time_range(start_time, end_time, days)
+        safe_offset = max(int(offset or 0), 0)
+        safe_limit = min(max(int(limit or 1), 1), 1000)
+
+        sdk = self._get_sdk(region)
+        if sdk and self._use_sdk_for_market_data():
+            connection = None
+            try:
+                account = await sdk.metatrader_account_api.get_account(resolved_account_id)
+                if account.state != 'DEPLOYED':
+                    await account.deploy()
+                    await account.wait_connected()
+                connection = account.get_rpc_connection()
+                await connection.connect()
+                await connection.wait_synchronized()
+                payload = await connection.get_deals_by_time_range(start, end, safe_offset, safe_limit)
+                deals_payload = payload.get('deals', []) if isinstance(payload, dict) else []
+                if not isinstance(deals_payload, list):
+                    deals_payload = []
+                return {
+                    'degraded': False,
+                    'deals': deals_payload,
+                    'synchronizing': bool(payload.get('synchronizing', False)) if isinstance(payload, dict) else False,
+                    'provider': 'sdk',
+                    'account_id': resolved_account_id,
+                    'start_time': self._iso_utc(start),
+                    'end_time': self._iso_utc(end),
+                    'offset': safe_offset,
+                    'limit': safe_limit,
+                }
+            except Exception as exc:  # pragma: no cover
+                logger.warning('metaapi sdk deals failed, trying REST fallback: %s', exc)
+            finally:
+                await self._close_connection(connection)
+
+        result = await self._rest_get_history(
+            resolved_account_id,
+            kind='deals',
+            start_time=start,
+            end_time=end,
+            offset=safe_offset,
+            limit=safe_limit,
+        )
+        if result.get('degraded'):
+            return {
+                'degraded': True,
+                'deals': [],
+                'reason': result.get('reason', 'REST fallback failed'),
+                'errors': result.get('errors', []),
+                'account_id': resolved_account_id,
+                'start_time': self._iso_utc(start),
+                'end_time': self._iso_utc(end),
+                'offset': safe_offset,
+                'limit': safe_limit,
+            }
+
+        payload = result.get('payload', [])
+        if isinstance(payload, dict):
+            if isinstance(payload.get('deals'), list):
+                payload = payload.get('deals', [])
+            elif isinstance(payload.get('items'), list):
+                payload = payload.get('items', [])
+            else:
+                payload = []
+
+        return {
+            'degraded': False,
+            'deals': payload if isinstance(payload, list) else [],
+            'provider': 'rest',
+            'endpoint': result.get('endpoint'),
+            'account_id': resolved_account_id,
+            'start_time': self._iso_utc(start),
+            'end_time': self._iso_utc(end),
+            'offset': safe_offset,
+            'limit': safe_limit,
+        }
+
+    async def get_history_orders(
+        self,
+        account_id: str | None = None,
+        region: str | None = None,
+        *,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        days: int = 30,
+        offset: int = 0,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        resolved_account_id = self._resolve_account_id(account_id)
+        if not resolved_account_id:
+            return {'degraded': True, 'history_orders': [], 'reason': 'MetaApi account id not configured'}
+
+        start, end = self._normalize_time_range(start_time, end_time, days)
+        safe_offset = max(int(offset or 0), 0)
+        safe_limit = min(max(int(limit or 1), 1), 1000)
+
+        sdk = self._get_sdk(region)
+        if sdk and self._use_sdk_for_market_data():
+            connection = None
+            try:
+                account = await sdk.metatrader_account_api.get_account(resolved_account_id)
+                if account.state != 'DEPLOYED':
+                    await account.deploy()
+                    await account.wait_connected()
+                connection = account.get_rpc_connection()
+                await connection.connect()
+                await connection.wait_synchronized()
+                payload = await connection.get_history_orders_by_time_range(start, end, safe_offset, safe_limit)
+                history_orders_payload = payload.get('historyOrders', []) if isinstance(payload, dict) else []
+                if not isinstance(history_orders_payload, list):
+                    history_orders_payload = []
+                return {
+                    'degraded': False,
+                    'history_orders': history_orders_payload,
+                    'synchronizing': bool(payload.get('synchronizing', False)) if isinstance(payload, dict) else False,
+                    'provider': 'sdk',
+                    'account_id': resolved_account_id,
+                    'start_time': self._iso_utc(start),
+                    'end_time': self._iso_utc(end),
+                    'offset': safe_offset,
+                    'limit': safe_limit,
+                }
+            except Exception as exc:  # pragma: no cover
+                logger.warning('metaapi sdk history orders failed, trying REST fallback: %s', exc)
+            finally:
+                await self._close_connection(connection)
+
+        result = await self._rest_get_history(
+            resolved_account_id,
+            kind='history-orders',
+            start_time=start,
+            end_time=end,
+            offset=safe_offset,
+            limit=safe_limit,
+        )
+        if result.get('degraded'):
+            return {
+                'degraded': True,
+                'history_orders': [],
+                'reason': result.get('reason', 'REST fallback failed'),
+                'errors': result.get('errors', []),
+                'account_id': resolved_account_id,
+                'start_time': self._iso_utc(start),
+                'end_time': self._iso_utc(end),
+                'offset': safe_offset,
+                'limit': safe_limit,
+            }
+
+        payload = result.get('payload', [])
+        if isinstance(payload, dict):
+            if isinstance(payload.get('historyOrders'), list):
+                payload = payload.get('historyOrders', [])
+            elif isinstance(payload.get('history_orders'), list):
+                payload = payload.get('history_orders', [])
+            elif isinstance(payload.get('items'), list):
+                payload = payload.get('items', [])
+            else:
+                payload = []
+
+        return {
+            'degraded': False,
+            'history_orders': payload if isinstance(payload, list) else [],
+            'provider': 'rest',
+            'endpoint': result.get('endpoint'),
+            'account_id': resolved_account_id,
+            'start_time': self._iso_utc(start),
+            'end_time': self._iso_utc(end),
+            'offset': safe_offset,
+            'limit': safe_limit,
+        }
 
     async def place_order(
         self,
@@ -260,6 +532,7 @@ class MetaApiClient:
 
         sdk = self._get_sdk(region)
         if sdk:
+            connection = None
             try:
                 account = await sdk.metatrader_account_api.get_account(resolved_account_id)
                 connection = account.get_rpc_connection()
@@ -302,6 +575,8 @@ class MetaApiClient:
                 }
             except Exception as exc:  # pragma: no cover
                 logger.warning('metaapi sdk order failed, trying REST fallback: %s', exc)
+            finally:
+                await self._close_connection(connection)
 
         action_type = 'ORDER_TYPE_BUY' if side.upper() == 'BUY' else 'ORDER_TYPE_SELL'
         rest_payload = {

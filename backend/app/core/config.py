@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     )
 
     database_url: str = Field(default='sqlite:///./forex.db', alias='DATABASE_URL')
+    db_pool_size: int = Field(default=12, alias='DB_POOL_SIZE')
+    db_max_overflow: int = Field(default=24, alias='DB_MAX_OVERFLOW')
+    db_pool_timeout_seconds: int = Field(default=30, alias='DB_POOL_TIMEOUT_SECONDS')
+    db_pool_recycle_seconds: int = Field(default=1800, alias='DB_POOL_RECYCLE_SECONDS')
     redis_url: str = Field(default='redis://redis:6379/0', alias='REDIS_URL')
     celery_broker_url: str = Field(default='amqp://guest:guest@rabbitmq:5672//', alias='CELERY_BROKER_URL')
     celery_result_backend: str = Field(default='redis://redis:6379/1', alias='CELERY_RESULT_BACKEND')
@@ -54,6 +58,11 @@ class Settings(BaseSettings):
     )
     metaapi_auth_header: str = Field(default='auth-token', alias='METAAPI_AUTH_HEADER')
     metaapi_symbol_suffix: str = Field(default='', alias='METAAPI_SYMBOL_SUFFIX')
+    enable_metaapi_real_trades_dashboard: bool = Field(
+        default=False,
+        alias='ENABLE_METAAPI_REAL_TRADES_DASHBOARD',
+    )
+    metaapi_use_sdk_for_market_data: bool = Field(default=False, alias='METAAPI_USE_SDK_FOR_MARKET_DATA')
 
     allow_live_trading: bool = Field(default=False, alias='ALLOW_LIVE_TRADING')
     enable_paper_execution: bool = Field(default=True, alias='ENABLE_PAPER_EXECUTION')

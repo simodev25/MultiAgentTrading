@@ -60,6 +60,30 @@ export const api = {
       token,
     ),
   listMetaApiAccounts: (token: string) => request('/trading/accounts', {}, token),
+  listMetaApiDeals: (
+    token: string,
+    params: { account_ref?: number | null; days?: number; limit?: number; offset?: number } = {},
+  ) => {
+    const search = new URLSearchParams();
+    if (params.account_ref != null) search.set('account_ref', String(params.account_ref));
+    if (params.days != null) search.set('days', String(params.days));
+    if (params.limit != null) search.set('limit', String(params.limit));
+    if (params.offset != null) search.set('offset', String(params.offset));
+    const suffix = search.toString();
+    return request(`/trading/deals${suffix ? `?${suffix}` : ''}`, {}, token);
+  },
+  listMetaApiHistoryOrders: (
+    token: string,
+    params: { account_ref?: number | null; days?: number; limit?: number; offset?: number } = {},
+  ) => {
+    const search = new URLSearchParams();
+    if (params.account_ref != null) search.set('account_ref', String(params.account_ref));
+    if (params.days != null) search.set('days', String(params.days));
+    if (params.limit != null) search.set('limit', String(params.limit));
+    if (params.offset != null) search.set('offset', String(params.offset));
+    const suffix = search.toString();
+    return request(`/trading/history-orders${suffix ? `?${suffix}` : ''}`, {}, token);
+  },
   createMetaApiAccount: (
     token: string,
     payload: { label: string; account_id: string; region: string; enabled: boolean; is_default: boolean },

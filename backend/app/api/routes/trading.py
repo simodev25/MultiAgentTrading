@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.security import Role, require_roles
 from app.db.models.execution_order import ExecutionOrder
 from app.db.models.metaapi_account import MetaApiAccount
@@ -10,6 +11,7 @@ from app.schemas.order import ExecutionOrderOut
 from app.services.trading.metaapi_client import MetaApiClient
 
 router = APIRouter(prefix='/trading', tags=['trading'])
+metaapi_client = MetaApiClient()
 
 
 @router.get('/orders', response_model=list[ExecutionOrderOut])
@@ -98,10 +100,12 @@ async def account_info(
     _=Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN, Role.TRADER_OPERATOR)),
 ) -> dict:
     account = _get_account_or_none(db, account_ref)
-    client = MetaApiClient()
-    return await client.get_account_information(
-        account_id=account.account_id if account else None,
-        region=account.region if account else None,
+    account_id = account.account_id if account else None
+    region = account.region if account else None
+    db.close()
+    return await metaapi_client.get_account_information(
+        account_id=account_id,
+        region=region,
     )
 
 
@@ -112,8 +116,66 @@ async def positions(
     _=Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN, Role.TRADER_OPERATOR, Role.ANALYST, Role.VIEWER)),
 ) -> dict:
     account = _get_account_or_none(db, account_ref)
-    client = MetaApiClient()
-    return await client.get_positions(
-        account_id=account.account_id if account else None,
-        region=account.region if account else None,
+    account_id = account.account_id if account else None
+    region = account.region if account else None
+    db.close()
+    return await metaapi_client.get_positions(
+        account_id=account_id,
+        region=region,
+    )
+
+
+@router.get('/deals')
+async def deals(
+    account_ref: int | None = Query(default=None),
+    days: int = Query(default=30, ge=1, le=365),
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+    _=Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN, Role.TRADER_OPERATOR, Role.ANALYST, Role.VIEWER)),
+) -> dict:
+    settings = get_settings()
+    if not settings.enable_metaapi_real_trades_dashboard:
+        raise HTTPException(
+            status_code=403,
+            detail='MetaApi real trades dashboard disabled (ENABLE_METAAPI_REAL_TRADES_DASHBOARD=false)',
+        )
+    account = _get_account_or_none(db, account_ref)
+    account_id = account.account_id if account else None
+    region = account.region if account else None
+    db.close()
+    return await metaapi_client.get_deals(
+        account_id=account_id,
+        region=region,
+        days=days,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get('/history-orders')
+async def history_orders(
+    account_ref: int | None = Query(default=None),
+    days: int = Query(default=30, ge=1, le=365),
+    limit: int = Query(default=100, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+    _=Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN, Role.TRADER_OPERATOR, Role.ANALYST, Role.VIEWER)),
+) -> dict:
+    settings = get_settings()
+    if not settings.enable_metaapi_real_trades_dashboard:
+        raise HTTPException(
+            status_code=403,
+            detail='MetaApi real trades dashboard disabled (ENABLE_METAAPI_REAL_TRADES_DASHBOARD=false)',
+        )
+    account = _get_account_or_none(db, account_ref)
+    account_id = account.account_id if account else None
+    region = account.region if account else None
+    db.close()
+    return await metaapi_client.get_history_orders(
+        account_id=account_id,
+        region=region,
+        days=days,
+        limit=limit,
+        offset=offset,
     )
