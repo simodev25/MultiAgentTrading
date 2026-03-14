@@ -44,7 +44,7 @@ Source de vérité: `backend/app/services/orchestrator/engine.py` (`WORKFLOW_STE
 
 Depuis Trading Control Room:
 
-- écran `Connecteurs` -> section `Modèles LLM par agent`.
+- écran `Config` -> section `Modèles LLM par agent`.
 - switch `LLM actif` par agent supporté.
 - modèle dédié par agent (ou héritage du modèle par défaut).
 

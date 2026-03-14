@@ -51,7 +51,7 @@ Exemple:
 }
 ```
 
-UI associée: Trading Control Room -> `Connecteurs` -> `Modèles LLM par agent`.
+UI associée: Trading Control Room -> `Config` -> `Modèles LLM par agent`.
 
 ## Endpoints utiles
 

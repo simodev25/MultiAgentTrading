@@ -12,7 +12,7 @@ Plateforme IA multi-agent dédiée au Forex avec:
 - Mémoire long-terme vectorielle (Qdrant + pgvector fallback)
 - Prompts versionnés en base pour enrichir le débat agents
 - Configuration LLM par agent (switch, modèle effectif, catalogue modèles, prompts modifiables)
-- Trading Control Room: configuration connecteurs, comptes MetaApi, prompts et telemetry LLM
+- Trading Control Room (menu `Config`): configuration connecteurs, comptes MetaApi, prompts et telemetry LLM
 - Backtesting avancé (Sharpe, Sortino, drawdown, profit factor)
 - Support multi-comptes MetaApi
 - Dashboard Grafana enrichi latence/coûts LLM
@@ -22,7 +22,7 @@ Plateforme IA multi-agent dédiée au Forex avec:
 - `backend/`: API, orchestration, agents, risk, execution, tests
 - `frontend/`: UI React/Vite
 - `infra/`: Docker monitoring + chart Helm
-- `docs/`: architecture, UX/UI, connecteurs, monitoring, tests
+- `docs/`: architecture, UX/UI, configuration, monitoring, tests
 
 ## Démarrage rapide
 
@@ -86,7 +86,7 @@ Paramètre `.env` pour activer la vue trades MT5 réels (tables + graphes):
 
 Paramètres `.env` UI (`frontend/.env`) pour la même vue:
 - `VITE_ENABLE_METAAPI_REAL_TRADES_DASHBOARD=true`
-- `VITE_METAAPI_REAL_TRADES_DEFAULT_DAYS=14`
+- `VITE_METAAPI_REAL_TRADES_DEFAULT_DAYS=14` (ou liste CSV `0,7,14,30,90`; `0` = Aujourd'hui, compat: `1` est interprété comme Aujourd'hui)
 - `VITE_METAAPI_REAL_TRADES_REFRESH_MS=15000`
 - `VITE_METAAPI_REAL_TRADES_DASHBOARD_LIMIT=8`
 - `VITE_METAAPI_REAL_TRADES_TABLE_LIMIT=15`

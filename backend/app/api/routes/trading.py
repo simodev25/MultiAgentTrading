@@ -128,7 +128,7 @@ async def positions(
 @router.get('/deals')
 async def deals(
     account_ref: int | None = Query(default=None),
-    days: int = Query(default=30, ge=1, le=365),
+    days: int = Query(default=30, ge=0, le=365),
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
@@ -156,7 +156,7 @@ async def deals(
 @router.get('/history-orders')
 async def history_orders(
     account_ref: int | None = Query(default=None),
-    days: int = Query(default=30, ge=1, le=365),
+    days: int = Query(default=30, ge=0, le=365),
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),

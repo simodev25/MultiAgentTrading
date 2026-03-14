@@ -5,6 +5,21 @@ import { runtimeConfig } from '../config/runtime';
 import { useAuth } from '../hooks/useAuth';
 import type { ExecutionOrder, MetaApiAccount, MetaApiDeal, MetaApiHistoryOrder } from '../types';
 
+const REFRESH_DEBOUNCE_MS = 1200;
+
+function resolveTicket(value: Record<string, unknown>): string {
+  const raw = value.ticket ?? value.orderId ?? value.id ?? value.positionId ?? null;
+  if (raw == null) return '-';
+  const text = String(raw).trim();
+  return text || '-';
+}
+
+function formatDaysWindowLabel(days: number): string {
+  if (days === 0) return "Aujourd'hui";
+  if (days === 1) return '1 jour';
+  return `${days} jours`;
+}
+
 export function OrdersPage() {
   const { token } = useAuth();
   const [orders, setOrders] = useState<ExecutionOrder[]>([]);
@@ -17,10 +32,19 @@ export function OrdersPage() {
   const [syncing, setSyncing] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
   const [metaError, setMetaError] = useState<string | null>(null);
+  const [metaLoading, setMetaLoading] = useState(false);
+  const [lastManualRefreshMs, setLastManualRefreshMs] = useState(0);
   const [metaFeatureDisabled, setMetaFeatureDisabled] = useState(!runtimeConfig.enableMetaApiRealTradesDashboard);
 
-  const loadMetaTrading = async (selectedRef: number | null) => {
+  const loadMetaTrading = async (selectedRef: number | null, source: 'auto' | 'manual' = 'auto') => {
     if (!token) return;
+    if (metaLoading) return;
+    if (source === 'manual') {
+      const now = Date.now();
+      if (now - lastManualRefreshMs < REFRESH_DEBOUNCE_MS) return;
+      setLastManualRefreshMs(now);
+    }
+    setMetaLoading(true);
     try {
       setMetaError(null);
       const [dealsPayload, historyPayload] = await Promise.all([
@@ -56,6 +80,8 @@ export function OrdersPage() {
       setSyncing(false);
       setMetaError(message);
       setMetaFeatureDisabled(message.includes('ENABLE_METAAPI_REAL_TRADES_DASHBOARD'));
+    } finally {
+      setMetaLoading(false);
     }
   };
 
@@ -139,7 +165,7 @@ export function OrdersPage() {
               className="form-grid inline"
               onSubmit={(e) => {
                 e.preventDefault();
-                void loadMetaTrading(accountRef);
+                void loadMetaTrading(accountRef, 'manual');
               }}
             >
               <label>
@@ -154,26 +180,27 @@ export function OrdersPage() {
                 </select>
               </label>
               <label>
-                Fenêtre (jours)
-                <input
-                  type="number"
-                  min={1}
-                  max={365}
-                  value={days}
-                  onChange={(e) => setDays(Number(e.target.value) || runtimeConfig.metaApiRealTradesDefaultDays)}
-                />
+                Fenêtre
+                <select value={days} onChange={(e) => setDays(Number(e.target.value))}>
+                  {runtimeConfig.metaApiRealTradesDaysOptions.map((daysOption) => (
+                    <option key={daysOption} value={daysOption}>
+                      {formatDaysWindowLabel(daysOption)}
+                    </option>
+                  ))}
+                </select>
               </label>
-              <button>Rafraîchir</button>
+              <button disabled={metaLoading}>{metaLoading ? 'Rafraîchir...' : 'Rafraîchir'}</button>
             </form>
             <p className="model-source">
               Provider: <code>{provider || 'unknown'}</code> | Sync in progress: <code>{syncing ? 'yes' : 'no'}</code>
             </p>
             {metaError && <p className="alert">{metaError}</p>}
+            <RealTradesCharts deals={deals} historyOrders={historyOrders} />
             <h3>Deals exécutés</h3>
             <table>
               <thead>
                 <tr>
-                  <th>Deal ID</th>
+                  <th>Ticket</th>
                   <th>Time</th>
                   <th>Symbol</th>
                   <th>Type</th>
@@ -189,8 +216,8 @@ export function OrdersPage() {
                   </tr>
                 ) : (
                   deals.map((deal, idx) => (
-                    <tr key={`${deal.id ?? deal.orderId ?? idx}`}>
-                      <td>{String(deal.id ?? '-')}</td>
+                    <tr key={`${resolveTicket(deal as Record<string, unknown>)}-${idx}`}>
+                      <td>{resolveTicket(deal as Record<string, unknown>)}</td>
                       <td>{String(deal.time ?? deal.brokerTime ?? '-')}</td>
                       <td>{String(deal.symbol ?? '-')}</td>
                       <td>{String(deal.type ?? deal.entryType ?? '-')}</td>
@@ -206,7 +233,7 @@ export function OrdersPage() {
             <table>
               <thead>
                 <tr>
-                  <th>Order ID</th>
+                  <th>Ticket</th>
                   <th>Done Time</th>
                   <th>Symbol</th>
                   <th>Type</th>
@@ -222,8 +249,8 @@ export function OrdersPage() {
                   </tr>
                 ) : (
                   historyOrders.map((order, idx) => (
-                    <tr key={`${order.id ?? order.positionId ?? idx}`}>
-                      <td>{String(order.id ?? '-')}</td>
+                    <tr key={`${resolveTicket(order as Record<string, unknown>)}-${idx}`}>
+                      <td>{resolveTicket(order as Record<string, unknown>)}</td>
                       <td>{String(order.doneTime ?? order.brokerTime ?? '-')}</td>
                       <td>{String(order.symbol ?? '-')}</td>
                       <td>{String(order.type ?? '-')}</td>
@@ -235,7 +262,6 @@ export function OrdersPage() {
                 )}
               </tbody>
             </table>
-            <RealTradesCharts deals={deals} historyOrders={historyOrders} />
           </>
         )}
       </section>

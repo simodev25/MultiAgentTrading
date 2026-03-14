@@ -52,6 +52,7 @@ export interface ExecutionOrder {
 
 export interface MetaApiDeal {
   id?: string | number;
+  ticket?: string | number;
   orderId?: string | number;
   positionId?: string | number;
   symbol?: string;
@@ -71,6 +72,7 @@ export interface MetaApiDeal {
 
 export interface MetaApiHistoryOrder {
   id?: string | number;
+  ticket?: string | number;
   positionId?: string | number;
   symbol?: string;
   type?: string;

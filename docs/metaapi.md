@@ -14,7 +14,11 @@
 
 Variables UI associées (`frontend/.env`):
 - `VITE_ENABLE_METAAPI_REAL_TRADES_DASHBOARD`
-- `VITE_METAAPI_REAL_TRADES_DEFAULT_DAYS`
+- `VITE_METAAPI_REAL_TRADES_DEFAULT_DAYS`:
+  - valeur unique (ex: `14`) => défaut + liste UI standard (`Aujourd'hui`, `7`, `14`, `30`, `60`, `90`)
+  - liste CSV (ex: `0,7,14,30,90`) => options explicites, premier élément sélectionné par défaut
+  - `0` = `Aujourd'hui` (de minuit UTC à maintenant)
+  - compatibilité: `1` est interprété en UI comme `Aujourd'hui`
 - `VITE_METAAPI_REAL_TRADES_REFRESH_MS`
 - `VITE_METAAPI_REAL_TRADES_DASHBOARD_LIMIT`
 - `VITE_METAAPI_REAL_TRADES_TABLE_LIMIT`
@@ -56,8 +60,15 @@ Compatibilité alias legacy (déjà supportée):
 - `POST /api/v1/connectors/metaapi/test`
 - `GET /api/v1/trading/positions`
 - `GET /api/v1/trading/orders`
-- `GET /api/v1/trading/deals`
-- `GET /api/v1/trading/history-orders`
+- `GET /api/v1/trading/deals` (`days` accepte `0..365`)
+- `GET /api/v1/trading/history-orders` (`days` accepte `0..365`)
+
+## Fenêtre temporelle deals/history
+
+- `days=0`: aujourd'hui, de `00:00:00 UTC` à maintenant.
+- `days>=1`: fenêtre glissante sur `N` jours.
+- Le backend filtre strictement les timestamps dans la fenêtre sélectionnée.
+- En UI, les tableaux affichent une colonne `Ticket` (deal/order) pour faciliter la réconciliation MT5.
 
 ## Multi-comptes
 

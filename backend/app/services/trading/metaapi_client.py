@@ -49,11 +49,33 @@ class MetaApiClient:
         end_time: datetime | None,
         days: int,
     ) -> tuple[datetime, datetime]:
-        safe_days = min(max(int(days or 1), 1), 365)
-        end = end_time or datetime.utcnow()
-        start = start_time or (end - timedelta(days=safe_days))
+        if days is None:
+            safe_days = 1
+        else:
+            safe_days = min(max(int(days), 0), 365)
+        end = end_time or datetime.now(timezone.utc)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        end = end.astimezone(timezone.utc)
+
+        if start_time is None:
+            if safe_days == 0:
+                start = end.replace(hour=0, minute=0, second=0, microsecond=0)
+            else:
+                start = end - timedelta(days=safe_days)
+        else:
+            start = start_time
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        start = start.astimezone(timezone.utc)
+
         if start >= end:
-            start = end - timedelta(days=1)
+            if safe_days == 0:
+                start = end.replace(hour=0, minute=0, second=0, microsecond=0)
+                if start >= end:
+                    start = end - timedelta(minutes=1)
+            else:
+                start = end - timedelta(days=1)
         return start, end
 
     @staticmethod
@@ -61,6 +83,101 @@ class MetaApiClient:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+    @staticmethod
+    def _to_utc_datetime(value: Any) -> datetime | None:
+        if isinstance(value, datetime):
+            dt = value
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+
+        if isinstance(value, (int, float)):
+            raw = float(value)
+            # Heuristic: values above 10^10 are usually milliseconds.
+            if abs(raw) >= 10_000_000_000:
+                raw = raw / 1000.0
+            try:
+                return datetime.fromtimestamp(raw, tz=timezone.utc)
+            except Exception:
+                return None
+
+        if not isinstance(value, str):
+            return None
+
+        text = value.strip()
+        if not text:
+            return None
+
+        candidates = [text]
+        # Some MetaApi/MT5 payloads append a trailing timezone label (e.g. "... GMT+0200").
+        if ' GMT' in text:
+            candidates.append(text.split(' GMT', 1)[0].strip())
+        if text.upper().endswith(' UTC'):
+            candidates.append(text[:-4].strip())
+
+        for candidate in candidates:
+            if candidate.isdigit():
+                parsed = MetaApiClient._to_utc_datetime(int(candidate))
+                if parsed is not None:
+                    return parsed
+
+            normalized = candidate.replace('Z', '+00:00')
+            try:
+                dt = datetime.fromisoformat(normalized)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.astimezone(timezone.utc)
+            except ValueError:
+                pass
+
+            for fmt in (
+                '%Y-%m-%d %H:%M:%S.%f',
+                '%Y-%m-%d %H:%M:%S',
+                '%Y-%m-%dT%H:%M:%S.%f',
+                '%Y-%m-%dT%H:%M:%S',
+                '%Y.%m.%d %H:%M:%S.%f',
+                '%Y.%m.%d %H:%M:%S',
+                '%Y/%m/%d %H:%M:%S.%f',
+                '%Y/%m/%d %H:%M:%S',
+            ):
+                try:
+                    return datetime.strptime(candidate, fmt).replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue
+
+        return None
+
+    def _extract_item_timestamp(self, item: dict[str, Any], candidate_keys: tuple[str, ...]) -> datetime | None:
+        for key in candidate_keys:
+            ts = self._to_utc_datetime(item.get(key))
+            if ts is not None:
+                return ts
+        return None
+
+    def _filter_items_by_time_range(
+        self,
+        items: list[Any],
+        start_time: datetime,
+        end_time: datetime,
+        *,
+        candidate_keys: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        start = self._to_utc_datetime(start_time) or start_time.replace(tzinfo=timezone.utc)
+        end = self._to_utc_datetime(end_time) or end_time.replace(tzinfo=timezone.utc)
+
+        selected: list[tuple[datetime, dict[str, Any]]] = []
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            ts = self._extract_item_timestamp(raw, candidate_keys)
+            if ts is None:
+                continue
+            if start <= ts <= end:
+                selected.append((ts, raw))
+
+        selected.sort(key=lambda item: item[0], reverse=True)
+        return [item for _, item in selected]
 
     def _resolve_trade_symbol(self, symbol: str) -> str:
         base_symbol = (symbol or '').strip()
@@ -348,8 +465,9 @@ class MetaApiClient:
         safe_offset = max(int(offset or 0), 0)
         safe_limit = min(max(int(limit or 1), 1), 1000)
 
-        sdk = self._get_sdk(region)
-        if sdk and self._use_sdk_for_market_data():
+        use_sdk = self._use_sdk_for_market_data()
+        sdk = self._get_sdk(region) if use_sdk else None
+        if sdk:
             connection = None
             try:
                 account = await sdk.metatrader_account_api.get_account(resolved_account_id)
@@ -363,6 +481,19 @@ class MetaApiClient:
                 deals_payload = payload.get('deals', []) if isinstance(payload, dict) else []
                 if not isinstance(deals_payload, list):
                     deals_payload = []
+                deals_payload = self._filter_items_by_time_range(
+                    deals_payload,
+                    start,
+                    end,
+                    candidate_keys=(
+                        'time',
+                        'brokerTime',
+                        'doneTime',
+                        'updateTime',
+                        'openTime',
+                        'closeTime',
+                    ),
+                )
                 return {
                     'degraded': False,
                     'deals': deals_payload,
@@ -409,9 +540,23 @@ class MetaApiClient:
             else:
                 payload = []
 
+        normalized_deals = self._filter_items_by_time_range(
+            payload if isinstance(payload, list) else [],
+            start,
+            end,
+            candidate_keys=(
+                'time',
+                'brokerTime',
+                'doneTime',
+                'updateTime',
+                'openTime',
+                'closeTime',
+            ),
+        )
+
         return {
             'degraded': False,
-            'deals': payload if isinstance(payload, list) else [],
+            'deals': normalized_deals,
             'provider': 'rest',
             'endpoint': result.get('endpoint'),
             'account_id': resolved_account_id,
@@ -440,8 +585,9 @@ class MetaApiClient:
         safe_offset = max(int(offset or 0), 0)
         safe_limit = min(max(int(limit or 1), 1), 1000)
 
-        sdk = self._get_sdk(region)
-        if sdk and self._use_sdk_for_market_data():
+        use_sdk = self._use_sdk_for_market_data()
+        sdk = self._get_sdk(region) if use_sdk else None
+        if sdk:
             connection = None
             try:
                 account = await sdk.metatrader_account_api.get_account(resolved_account_id)
@@ -455,6 +601,19 @@ class MetaApiClient:
                 history_orders_payload = payload.get('historyOrders', []) if isinstance(payload, dict) else []
                 if not isinstance(history_orders_payload, list):
                     history_orders_payload = []
+                history_orders_payload = self._filter_items_by_time_range(
+                    history_orders_payload,
+                    start,
+                    end,
+                    candidate_keys=(
+                        'doneTime',
+                        'time',
+                        'brokerTime',
+                        'updateTime',
+                        'openTime',
+                        'closeTime',
+                    ),
+                )
                 return {
                     'degraded': False,
                     'history_orders': history_orders_payload,
@@ -503,9 +662,23 @@ class MetaApiClient:
             else:
                 payload = []
 
+        normalized_orders = self._filter_items_by_time_range(
+            payload if isinstance(payload, list) else [],
+            start,
+            end,
+            candidate_keys=(
+                'doneTime',
+                'time',
+                'brokerTime',
+                'updateTime',
+                'openTime',
+                'closeTime',
+            ),
+        )
+
         return {
             'degraded': False,
-            'history_orders': payload if isinstance(payload, list) else [],
+            'history_orders': normalized_orders,
             'provider': 'rest',
             'endpoint': result.get('endpoint'),
             'account_id': resolved_account_id,

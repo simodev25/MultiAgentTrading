@@ -15,7 +15,7 @@
   - positions
   - ordres
   - comptes MetaApi
-5. Trading Control Room (Connecteurs)
+5. Trading Control Room (Config)
   - état/test connecteurs
   - configuration LLM par agent
   - édition prompts versionnés par agent
@@ -23,7 +23,7 @@
 
 ## Navigation
 
-- Sidebar: Dashboard, Runs, Backtests, Trading, Connecteurs.
+- Sidebar: Dashboard, Backtests, Ordres, Config.
 - Header: session utilisateur/rôle.
 - Navigation orientée "opérations d'abord": lancer, suivre, auditer.
 
@@ -33,10 +33,14 @@
 
 - Carte de lancement run.
 - KPIs de statut (`total`, `actifs`, `complétés`, `échecs`).
+- Bloc `Trades réels MetaApi (MT5)`:
+  - filtre fenêtre avec options (`Aujourd'hui`, `7`, `14`, `30`, `60`, `90` jours),
+  - graphe affiché avant la liste,
+  - colonne `Ticket` pour tracer chaque ligne.
 - Tableau d'historique avec:
   - `ID`, `Pair`, `TF`, `Mode`, `Status`, `Temps running`, `Decision`, `Action`.
 
-### Connecteurs / Trading Control Room
+### Config / Trading Control Room
 
 - Tableau connecteurs (`ollama`, `metaapi`, `yfinance`, `qdrant`) avec `Enable/Disable` + `Test`.
 - Bloc `Modèles LLM par agent`:
@@ -51,6 +55,13 @@
   - création + activation de version.
 - Bloc `LLM réellement utilisé` (analytics).
 - Bloc `Mémoire long-terme` (search).
+
+### Ordres
+
+- Bloc `Trades réels MT5 (MetaApi)` avec:
+  - filtre compte + fenêtre (`Aujourd'hui`, `7`, `14`, `30`, `60`, `90` jours),
+  - graphe affiché avant les tables,
+  - colonnes `Ticket` côté deals et historique ordres.
 
 ## Design system
 
