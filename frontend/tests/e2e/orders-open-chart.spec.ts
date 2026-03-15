@@ -137,6 +137,8 @@ test('orders page displays TradingView chart when prices are available', async (
         volume: 0.2,
         openPrice: 1.089,
         currentPrice: 1.094,
+        stopLoss: 1.08123,
+        takeProfit: 1.10456,
         profit: 23.4,
       },
     ],
@@ -161,6 +163,10 @@ test('orders page displays TradingView chart when prices are available', async (
   await expect(chartSection.getByLabel('Graphique TradingView des ordres ouverts')).toBeVisible();
   await expect(chartSection.locator('.open-orders-chart-canvas canvas').first()).toBeVisible();
   await expect(chartSection.getByText('Aucune donnée de prix exploitable pour les ordres ouverts.')).toHaveCount(0);
+  await expect(page.getByRole('columnheader', { name: 'S/L' })).toBeVisible();
+  await expect(page.getByRole('columnheader', { name: 'T/P' })).toBeVisible();
+  await expect(page.getByRole('cell', { name: '1.08123' })).toBeVisible();
+  await expect(page.getByRole('cell', { name: '1.10456' })).toBeVisible();
   await expect(page.getByRole('columnheader', { name: 'TF ouverture' })).toBeVisible();
   await expect(page.getByRole('cell', { name: 'H1' }).first()).toBeVisible();
 });

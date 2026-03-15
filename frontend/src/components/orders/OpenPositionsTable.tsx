@@ -1,5 +1,6 @@
 import type { MetaApiPosition } from '../../types';
 import { resolveTicket } from '../../utils/tradingSymbols';
+import { formatPrice, resolveStopLoss, resolveTakeProfit } from '../../utils/priceLevels';
 import { displaySymbol } from './formatters';
 import { TableSkeletonRows } from './TableSkeletonRows';
 
@@ -27,22 +28,26 @@ export function OpenPositionsTable({
           <th>Volume</th>
           <th>Open Price</th>
           <th>Current Price</th>
+          <th>S/L</th>
+          <th>T/P</th>
           <th>PnL</th>
           <th>Graphique</th>
         </tr>
       </thead>
       <tbody>
         {metaLoading && openPositions.length === 0 ? (
-          <TableSkeletonRows prefix="positions" columns={9} rows={4} />
+          <TableSkeletonRows prefix="positions" columns={11} rows={4} />
         ) : openPositions.length === 0 ? (
           <tr>
-            <td colSpan={9}>Aucun ordre ouvert sur le compte sélectionné.</td>
+            <td colSpan={11}>Aucun ordre ouvert sur le compte sélectionné.</td>
           </tr>
         ) : (
           openPositions.map((position, idx) => {
             const ticket = resolveTicket(position as Record<string, unknown>);
             const selected = selectedChartTicket === ticket;
             const selectable = ticket !== '-';
+            const stopLoss = resolveStopLoss(position as Record<string, unknown>);
+            const takeProfit = resolveTakeProfit(position as Record<string, unknown>);
             return (
               <tr key={`${ticket}-${idx}`}>
                 <td>{ticket}</td>
@@ -50,8 +55,10 @@ export function OpenPositionsTable({
                 <td>{displaySymbol(position.symbol)}</td>
                 <td>{String(position.type ?? '-')}</td>
                 <td>{typeof position.volume === 'number' ? position.volume.toFixed(2) : '-'}</td>
-                <td>{typeof position.openPrice === 'number' ? position.openPrice.toFixed(5) : '-'}</td>
-                <td>{typeof position.currentPrice === 'number' ? position.currentPrice.toFixed(5) : '-'}</td>
+                <td>{formatPrice(typeof position.openPrice === 'number' ? position.openPrice : null)}</td>
+                <td>{formatPrice(typeof position.currentPrice === 'number' ? position.currentPrice : null)}</td>
+                <td>{formatPrice(stopLoss)}</td>
+                <td>{formatPrice(takeProfit)}</td>
                 <td>{typeof position.profit === 'number' ? position.profit.toFixed(2) : '-'}</td>
                 <td>
                   <button

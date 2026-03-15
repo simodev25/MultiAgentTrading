@@ -107,6 +107,12 @@ export interface MetaApiPosition {
   volume?: number;
   openPrice?: number;
   currentPrice?: number;
+  stopLoss?: number;
+  takeProfit?: number;
+  stopLossPrice?: number;
+  takeProfitPrice?: number;
+  sl?: number;
+  tp?: number;
   profit?: number;
   swap?: number;
   brokerTime?: string;
@@ -127,6 +133,12 @@ export interface MetaApiOpenOrder {
   currentVolume?: number;
   openPrice?: number;
   currentPrice?: number;
+  stopLoss?: number;
+  takeProfit?: number;
+  stopLossPrice?: number;
+  takeProfitPrice?: number;
+  sl?: number;
+  tp?: number;
   time?: string;
   brokerTime?: string;
   comment?: string;

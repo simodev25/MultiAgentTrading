@@ -7,12 +7,14 @@ import {
   LineStyle,
   createChart,
   createSeriesMarkers,
+  type IChartApi,
   type HistogramData,
   type LineData,
   type SeriesMarker,
   type UTCTimestamp,
 } from 'lightweight-charts';
 import type { MarketCandle, MetaApiOpenOrder, MetaApiPosition } from '../types';
+import { dedupeSortedPrices, resolveStopLoss, resolveTakeProfit, toPositiveNumber } from '../utils/priceLevels';
 import { resolveTicket, symbolsLikelyMatch } from '../utils/tradingSymbols';
 
 interface OpenOrdersChartProps {
@@ -31,16 +33,7 @@ interface CandlePoint {
   close: number;
 }
 
-function toNumber(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return value > 0 ? value : null;
-  }
-  if (typeof value === 'string') {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  }
-  return null;
-}
+const toNumber = toPositiveNumber;
 
 function toEpochSeconds(value: unknown): number | null {
   if (typeof value !== 'string' && !(value instanceof Date)) return null;
@@ -251,19 +244,39 @@ export function OpenOrdersChart({
     for (const position of filteredPositions) {
       const open = toNumber(position.openPrice);
       const current = toNumber(position.currentPrice);
+      const stopLoss = resolveStopLoss(position as Record<string, unknown>);
+      const takeProfit = resolveTakeProfit(position as Record<string, unknown>);
       if (open !== null) prices.push(open);
       if (current !== null) prices.push(current);
+      if (stopLoss !== null) prices.push(stopLoss);
+      if (takeProfit !== null) prices.push(takeProfit);
     }
     for (const order of filteredOpenOrders) {
       const open = toNumber(order.openPrice);
       const current = toNumber(order.currentPrice);
+      const stopLoss = resolveStopLoss(order as Record<string, unknown>);
+      const takeProfit = resolveTakeProfit(order as Record<string, unknown>);
       if (open !== null) prices.push(open);
       if (current !== null) prices.push(current);
+      if (stopLoss !== null) prices.push(stopLoss);
+      if (takeProfit !== null) prices.push(takeProfit);
     }
     return resolveChartPriceFormat(prices);
   }, [marketCandleData, openPositions, openOrders, selectedSymbol, selectedTicket]);
 
-  const { positionOpenData, positionCurrentData, pendingOpenData, pendingCurrentData, positionLinks } = useMemo(() => {
+  const {
+    positionOpenData,
+    positionCurrentData,
+    pendingOpenData,
+    pendingCurrentData,
+    positionLinks,
+    positionStopLossLevels,
+    positionTakeProfitLevels,
+    pendingStopLossLevels,
+    pendingTakeProfitLevels,
+    levelRangeStartTime,
+    levelRangeEndTime,
+  } = useMemo(() => {
     const symbolFilteredPositions = selectedSymbol
       ? openPositions.filter((position) => symbolsLikelyMatch(position.symbol, selectedSymbol))
       : openPositions;
@@ -302,18 +315,28 @@ export function OpenOrdersChart({
     const nextPositionOpen: LineData<UTCTimestamp>[] = [];
     const nextPositionCurrent: LineData<UTCTimestamp>[] = [];
     const nextPositionLinks: PositionLink[] = [];
+    const nextPositionStopLossLevels: number[] = [];
+    const nextPositionTakeProfitLevels: number[] = [];
 
     filteredPositions.forEach((position, index) => {
       const openTime = positionTimes[index] as UTCTimestamp;
       const currentTime = positionCurrentTimes[index] as UTCTimestamp;
       const openPrice = toNumber(position.openPrice);
       const currentPrice = toNumber(position.currentPrice);
+      const stopLoss = resolveStopLoss(position as Record<string, unknown>);
+      const takeProfit = resolveTakeProfit(position as Record<string, unknown>);
 
       if (openPrice !== null) {
         nextPositionOpen.push({ time: openTime, value: openPrice });
       }
       if (currentPrice !== null) {
         nextPositionCurrent.push({ time: currentTime, value: currentPrice });
+      }
+      if (stopLoss !== null) {
+        nextPositionStopLossLevels.push(stopLoss);
+      }
+      if (takeProfit !== null) {
+        nextPositionTakeProfitLevels.push(takeProfit);
       }
       if (openPrice !== null && currentPrice !== null) {
         nextPositionLinks.push({
@@ -334,11 +357,15 @@ export function OpenOrdersChart({
 
     const nextPendingOpen: LineData<UTCTimestamp>[] = [];
     const nextPendingCurrent: LineData<UTCTimestamp>[] = [];
+    const nextPendingStopLossLevels: number[] = [];
+    const nextPendingTakeProfitLevels: number[] = [];
 
     filteredOpenOrders.forEach((order, index) => {
       const time = pendingTimes[index] as UTCTimestamp;
       const openPrice = toNumber(order.openPrice);
       const currentPrice = toNumber(order.currentPrice);
+      const stopLoss = resolveStopLoss(order as Record<string, unknown>);
+      const takeProfit = resolveTakeProfit(order as Record<string, unknown>);
 
       if (openPrice !== null) {
         nextPendingOpen.push({ time, value: openPrice });
@@ -346,7 +373,24 @@ export function OpenOrdersChart({
       if (currentPrice !== null) {
         nextPendingCurrent.push({ time, value: currentPrice });
       }
+      if (stopLoss !== null) {
+        nextPendingStopLossLevels.push(stopLoss);
+      }
+      if (takeProfit !== null) {
+        nextPendingTakeProfitLevels.push(takeProfit);
+      }
     });
+
+    const timeline: number[] = [];
+    for (const candle of marketCandleData) timeline.push(Number(candle.time));
+    for (const point of nextPositionOpen) timeline.push(Number(point.time));
+    for (const point of nextPositionCurrent) timeline.push(Number(point.time));
+    for (const point of nextPendingOpen) timeline.push(Number(point.time));
+    for (const point of nextPendingCurrent) timeline.push(Number(point.time));
+    const rawStart = timeline.length > 0 ? Math.min(...timeline) : nowSeconds;
+    const rawEnd = timeline.length > 0 ? Math.max(...timeline) : (rawStart + 60);
+    const normalizedStart = Math.floor(rawStart) as UTCTimestamp;
+    const normalizedEnd = Math.floor(rawEnd > rawStart ? rawEnd : (rawStart + 1)) as UTCTimestamp;
 
     return {
       positionOpenData: sortLineData(nextPositionOpen),
@@ -354,6 +398,12 @@ export function OpenOrdersChart({
       pendingOpenData: sortLineData(nextPendingOpen),
       pendingCurrentData: sortLineData(nextPendingCurrent),
       positionLinks: nextPositionLinks,
+      positionStopLossLevels: dedupeSortedPrices(nextPositionStopLossLevels),
+      positionTakeProfitLevels: dedupeSortedPrices(nextPositionTakeProfitLevels),
+      pendingStopLossLevels: dedupeSortedPrices(nextPendingStopLossLevels),
+      pendingTakeProfitLevels: dedupeSortedPrices(nextPendingTakeProfitLevels),
+      levelRangeStartTime: normalizedStart,
+      levelRangeEndTime: normalizedEnd,
     };
   }, [openPositions, openOrders, selectedTicket, selectedSymbol, marketCandleData]);
 
@@ -361,7 +411,11 @@ export function OpenOrdersChart({
     || positionOpenData.length > 0
     || positionCurrentData.length > 0
     || pendingOpenData.length > 0
-    || pendingCurrentData.length > 0;
+    || pendingCurrentData.length > 0
+    || positionStopLossLevels.length > 0
+    || positionTakeProfitLevels.length > 0
+    || pendingStopLossLevels.length > 0
+    || pendingTakeProfitLevels.length > 0;
 
   useEffect(() => {
     if (!hasRenderableData) return;
@@ -369,7 +423,7 @@ export function OpenOrdersChart({
     if (!container) return;
     setChartRenderError(null);
 
-    let chart;
+    let chart: IChartApi | undefined;
     try {
       chart = createChart(container, {
         autoSize: true,
@@ -500,12 +554,47 @@ export function OpenOrdersChart({
         },
       });
 
+      const addHorizontalLevels = (
+        levels: number[],
+        title: string,
+        color: string,
+        style: LineStyle,
+      ) => {
+        for (const level of levels) {
+          const levelSeries = chart!.addSeries(LineSeries, {
+            color,
+            lineWidth: 1,
+            lineStyle: style,
+            lineVisible: true,
+            pointMarkersVisible: false,
+            priceLineVisible: true,
+            priceLineColor: color,
+            lastValueVisible: false,
+            crosshairMarkerVisible: false,
+            title,
+            priceFormat: {
+              type: 'price',
+              precision: chartPriceFormat.precision,
+              minMove: chartPriceFormat.minMove,
+            },
+          });
+          levelSeries.setData([
+            { time: levelRangeStartTime, value: level },
+            { time: levelRangeEndTime, value: level },
+          ]);
+        }
+      };
+
       if (marketCandleData.length > 0) marketSeries.setData(marketCandleData);
       if (marketVolumeData.length > 0) volumeSeries.setData(marketVolumeData);
       if (positionOpenData.length > 0) positionOpenSeries.setData(positionOpenData);
       if (positionCurrentData.length > 0) positionCurrentSeries.setData(positionCurrentData);
       if (pendingOpenData.length > 0) pendingOpenSeries.setData(pendingOpenData);
       if (pendingCurrentData.length > 0) pendingCurrentSeries.setData(pendingCurrentData);
+      addHorizontalLevels(positionStopLossLevels, 'Positions - S/L', '#ff5f7f', LineStyle.Dashed);
+      addHorizontalLevels(positionTakeProfitLevels, 'Positions - T/P', '#67f0a5', LineStyle.Dashed);
+      addHorizontalLevels(pendingStopLossLevels, 'Ordres - S/L', '#ff8b5b', LineStyle.Dotted);
+      addHorizontalLevels(pendingTakeProfitLevels, 'Ordres - T/P', '#9dee71', LineStyle.Dotted);
 
       for (const link of positionLinks) {
         const linkSeries = chart.addSeries(LineSeries, {
@@ -567,8 +656,14 @@ export function OpenOrdersChart({
     hasRenderableData,
     marketCandleData,
     marketVolumeData,
+    levelRangeEndTime,
+    levelRangeStartTime,
+    pendingStopLossLevels,
+    pendingTakeProfitLevels,
     pendingCurrentData,
     pendingOpenData,
+    positionStopLossLevels,
+    positionTakeProfitLevels,
     positionCurrentData,
     positionLinks,
     positionOpenData,
@@ -577,7 +672,7 @@ export function OpenOrdersChart({
   return (
     <div className="open-orders-chart open-orders-chart--mt5">
       <p className="model-source open-orders-legend">
-        Bougies MT5: haussière contour vert, baissière corps blanc | Volume: histogramme vert | Bleu: prix d&apos;entrée positions | Vert: prix courant positions | Orange: prix d&apos;entrée ordres | Rouge: prix courant ordres
+        Bougies MT5: haussière contour vert, baissière corps blanc | Volume: histogramme vert | Bleu: prix d&apos;entrée positions | Vert: prix courant positions | Orange: prix d&apos;entrée ordres | Rouge: prix courant ordres | S/L: ligne rouge pointillée | T/P: ligne verte pointillée
       </p>
       {chartRenderError ? (
         <p className="chart-empty">Erreur graphique: {chartRenderError}</p>
