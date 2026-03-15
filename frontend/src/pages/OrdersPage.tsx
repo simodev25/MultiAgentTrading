@@ -107,30 +107,34 @@ export function OrdersPage() {
               Sources: positions <code>{openPositionsProvider || 'unknown'}</code> | ordres <code>{openOrdersProvider || 'unknown'}</code>
             </p>
             <div className="form-grid inline open-orders-filter-row">
-              <p className="model-source open-orders-meta" data-testid="open-orders-chart-filter">
-                Filtre actif: <code>{selectedChartTicket ?? 'Tous les ordres'}</code>
-              </p>
-              <p className="model-source open-orders-meta" data-testid="open-orders-chart-context">
-                Symbole: <code>{chartSelection.displaySymbol ?? '-'}</code> | Timeframe: <code>{chartSelection.timeframe ?? '-'}</code>{' '}
-                {chartTimeframeOverride ? '' : `(auto: ${chartSelection.autoTimeframe ?? '-'})`} | Provider marché: <code>{marketProvider || 'unknown'}</code>
-              </p>
-              <p className="model-source open-orders-meta" data-testid="open-orders-chart-timer">
-                Timer bougie ({chartSelection.timeframe ?? '-'}): <code>{chartCountdownLabel}</code> | Prochaine MAJ: <code>{chartNextRefreshAtLabel}</code>
-              </p>
-              <label className="open-orders-timeframe-control">
-                Timeframe graphique
-                <select
-                  aria-label="Timeframe graphique"
-                  value={chartTimeframeOverride}
-                  onChange={(e) => setChartTimeframeOverride(e.target.value)}
-                  disabled={!chartSelection.symbol}
-                >
-                  <option value="">Auto (TF ouverture)</option>
-                  {DEFAULT_TIMEFRAMES.map((item) => (
-                    <option key={item} value={item}>{item}</option>
-                  ))}
-                </select>
-              </label>
+              <div className="open-orders-meta-stack">
+                <p className="model-source open-orders-meta" data-testid="open-orders-chart-filter">
+                  Filtre actif: <code>{selectedChartTicket ?? 'Tous les ordres'}</code>
+                </p>
+                <p className="model-source open-orders-meta" data-testid="open-orders-chart-context">
+                  Symbole: <code>{chartSelection.displaySymbol ?? '-'}</code> | Timeframe: <code>{chartSelection.timeframe ?? '-'}</code>{' '}
+                  {chartTimeframeOverride ? '' : `(auto: ${chartSelection.autoTimeframe ?? '-'})`} | Provider marché: <code>{marketProvider || 'unknown'}</code>
+                </p>
+              </div>
+              <div className="open-orders-meta-stack open-orders-meta-stack--right">
+                <p className="model-source open-orders-meta" data-testid="open-orders-chart-timer">
+                  Timer bougie ({chartSelection.timeframe ?? '-'}): <code>{chartCountdownLabel}</code> | Prochaine MAJ: <code>{chartNextRefreshAtLabel}</code>
+                </p>
+                <label className="open-orders-timeframe-control">
+                  Timeframe graphique
+                  <select
+                    aria-label="Timeframe graphique"
+                    value={chartTimeframeOverride}
+                    onChange={(e) => setChartTimeframeOverride(e.target.value)}
+                    disabled={!chartSelection.symbol}
+                  >
+                    <option value="">Auto (TF ouverture)</option>
+                    {DEFAULT_TIMEFRAMES.map((item) => (
+                      <option key={item} value={item}>{item}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
             </div>
             {marketLoading && marketCandles.length > 0 && <p className="model-source open-orders-status">Mise à jour de la courbe...</p>}
             {marketError && <p className="alert">{marketError}</p>}

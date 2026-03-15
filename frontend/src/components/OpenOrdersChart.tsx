@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  CandlestickSeries,
   ColorType,
+  HistogramSeries,
   LineSeries,
   LineStyle,
   createChart,
   createSeriesMarkers,
+  type HistogramData,
   type LineData,
   type SeriesMarker,
   type UTCTimestamp,
@@ -18,6 +21,14 @@ interface OpenOrdersChartProps {
   marketCandles: MarketCandle[];
   selectedTicket?: string | null;
   selectedSymbol?: string | null;
+}
+
+interface CandlePoint {
+  time: UTCTimestamp;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
 }
 
 function toNumber(value: unknown): number | null {
@@ -66,7 +77,34 @@ function sortLineData(data: LineData<UTCTimestamp>[]): LineData<UTCTimestamp>[] 
   for (const point of sorted) {
     const last = deduped[deduped.length - 1];
     if (last && Number(last.time) === Number(point.time)) {
-      // Keep the most recent value for duplicate timestamps.
+      deduped[deduped.length - 1] = point;
+      continue;
+    }
+    deduped.push(point);
+  }
+  return deduped;
+}
+
+function sortCandleData(data: CandlePoint[]): CandlePoint[] {
+  const sorted = [...data].sort((a, b) => Number(a.time) - Number(b.time));
+  const deduped: CandlePoint[] = [];
+  for (const point of sorted) {
+    const last = deduped[deduped.length - 1];
+    if (last && Number(last.time) === Number(point.time)) {
+      deduped[deduped.length - 1] = point;
+      continue;
+    }
+    deduped.push(point);
+  }
+  return deduped;
+}
+
+function sortHistogramData(data: HistogramData<UTCTimestamp>[]): HistogramData<UTCTimestamp>[] {
+  const sorted = [...data].sort((a, b) => Number(a.time) - Number(b.time));
+  const deduped: HistogramData<UTCTimestamp>[] = [];
+  for (const point of sorted) {
+    const last = deduped[deduped.length - 1];
+    if (last && Number(last.time) === Number(point.time)) {
       deduped[deduped.length - 1] = point;
       continue;
     }
@@ -80,8 +118,6 @@ function resolveCurrentTimes(openTimes: number[], latestMarketTime: number): num
   const start = latestMarketTime - Math.max(0, openTimes.length - 1);
   const resolved = new Array<number>(openTimes.length);
   for (let i = 0; i < openTimes.length; i += 1) {
-    // Must be strictly after openTime for link series ([open, current]) to be
-    // strictly ascending and avoid Lightweight Charts assertion failures.
     const minPairTime = openTimes[i] + 1;
     const minClusterTime = start + i;
     const candidate = Math.max(minPairTime, minClusterTime);
@@ -154,15 +190,44 @@ export function OpenOrdersChart({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [chartRenderError, setChartRenderError] = useState<string | null>(null);
 
-  const marketCloseData = useMemo(() => {
-    const points: LineData<UTCTimestamp>[] = [];
+  const marketCandleData = useMemo(() => {
+    const points: CandlePoint[] = [];
     for (const candle of marketCandles) {
       const time = toEpochSeconds(candle.time);
+      const open = toNumber(candle.open);
+      const high = toNumber(candle.high);
+      const low = toNumber(candle.low);
       const close = toNumber(candle.close);
-      if (time == null || close == null) continue;
-      points.push({ time: time as UTCTimestamp, value: close });
+      if (time == null || open == null || high == null || low == null || close == null) continue;
+
+      const maxPrice = Math.max(high, open, close);
+      const minPrice = Math.min(low, open, close);
+      points.push({
+        time: time as UTCTimestamp,
+        open,
+        high: maxPrice,
+        low: minPrice,
+        close,
+      });
     }
-    return sortLineData(points);
+    return sortCandleData(points);
+  }, [marketCandles]);
+
+  const marketVolumeData = useMemo(() => {
+    const points: HistogramData<UTCTimestamp>[] = [];
+    for (const candle of marketCandles) {
+      const time = toEpochSeconds(candle.time);
+      const open = toNumber(candle.open);
+      const close = toNumber(candle.close);
+      const volume = toNumber(candle.volume);
+      if (time == null || open == null || close == null || volume == null) continue;
+      points.push({
+        time: time as UTCTimestamp,
+        value: volume,
+        color: close >= open ? 'rgba(0, 255, 80, 0.60)' : 'rgba(0, 180, 60, 0.45)',
+      });
+    }
+    return sortHistogramData(points);
   }, [marketCandles]);
 
   const chartPriceFormat = useMemo(() => {
@@ -180,7 +245,9 @@ export function OpenOrdersChart({
       : symbolFilteredOrders;
 
     const prices: number[] = [];
-    for (const point of marketCloseData) prices.push(point.value);
+    for (const candle of marketCandleData) {
+      prices.push(candle.open, candle.high, candle.low, candle.close);
+    }
     for (const position of filteredPositions) {
       const open = toNumber(position.openPrice);
       const current = toNumber(position.currentPrice);
@@ -194,7 +261,7 @@ export function OpenOrdersChart({
       if (current !== null) prices.push(current);
     }
     return resolveChartPriceFormat(prices);
-  }, [marketCloseData, openPositions, openOrders, selectedSymbol, selectedTicket]);
+  }, [marketCandleData, openPositions, openOrders, selectedSymbol, selectedTicket]);
 
   const { positionOpenData, positionCurrentData, pendingOpenData, pendingCurrentData, positionLinks } = useMemo(() => {
     const symbolFilteredPositions = selectedSymbol
@@ -212,18 +279,17 @@ export function OpenOrdersChart({
       : symbolFilteredOrders;
 
     const nowSeconds = Math.floor(Date.now() / 1000);
-    const latestMarketTime = marketCloseData.length > 0
-      ? Number(marketCloseData[marketCloseData.length - 1].time)
+    const latestMarketTime = marketCandleData.length > 0
+      ? Number(marketCandleData[marketCandleData.length - 1].time)
       : nowSeconds;
-    const earliestMarketTime = marketCloseData.length > 0
-      ? Number(marketCloseData[0].time)
+    const earliestMarketTime = marketCandleData.length > 0
+      ? Number(marketCandleData[0].time)
       : null;
 
     const positionRawTimes = filteredPositions.map((position) => {
       const parsed = toEpochSeconds(position.time ?? position.brokerTime);
       if (parsed == null) return null;
       if (earliestMarketTime == null) return parsed;
-      // Keep entry markers inside the loaded candle window to avoid distorted time scale.
       return Math.min(Math.max(parsed, earliestMarketTime), latestMarketTime);
     });
 
@@ -289,9 +355,9 @@ export function OpenOrdersChart({
       pendingCurrentData: sortLineData(nextPendingCurrent),
       positionLinks: nextPositionLinks,
     };
-  }, [openPositions, openOrders, selectedTicket, selectedSymbol, marketCloseData]);
+  }, [openPositions, openOrders, selectedTicket, selectedSymbol, marketCandleData]);
 
-  const hasRenderableData = marketCloseData.length > 0
+  const hasRenderableData = marketCandleData.length > 0
     || positionOpenData.length > 0
     || positionCurrentData.length > 0
     || pendingOpenData.length > 0
@@ -306,109 +372,141 @@ export function OpenOrdersChart({
     let chart;
     try {
       chart = createChart(container, {
-      autoSize: true,
-      layout: {
-        background: { type: ColorType.Solid, color: '#0a1220' },
-        textColor: '#b4c7e7',
-        attributionLogo: true,
-      },
-      grid: {
-        vertLines: { color: 'rgba(64, 84, 117, 0.35)' },
-        horzLines: { color: 'rgba(64, 84, 117, 0.35)' },
-      },
-      rightPriceScale: {
-        borderColor: '#2f3f5a',
-      },
-      timeScale: {
-        borderColor: '#2f3f5a',
-        timeVisible: true,
-        secondsVisible: false,
-      },
-      crosshair: {
-        vertLine: { color: 'rgba(190, 212, 245, 0.30)' },
-        horzLine: { color: 'rgba(190, 212, 245, 0.30)' },
-      },
-      localization: {
-        locale: 'fr-FR',
-      },
+        autoSize: true,
+        layout: {
+          background: { type: ColorType.Solid, color: '#000000' },
+          textColor: '#d5dfef',
+          attributionLogo: false,
+        },
+        grid: {
+          vertLines: { color: 'rgba(91, 126, 173, 0.45)', style: LineStyle.Dotted },
+          horzLines: { color: 'rgba(91, 126, 173, 0.45)', style: LineStyle.Dotted },
+        },
+        rightPriceScale: {
+          borderColor: 'rgba(138, 154, 182, 0.5)',
+          scaleMargins: {
+            top: 0.06,
+            bottom: 0.13,
+          },
+        },
+        timeScale: {
+          borderColor: 'rgba(138, 154, 182, 0.5)',
+          timeVisible: true,
+          secondsVisible: false,
+        },
+        crosshair: {
+          vertLine: { color: 'rgba(205, 219, 238, 0.3)', style: LineStyle.Solid },
+          horzLine: { color: 'rgba(205, 219, 238, 0.3)', style: LineStyle.Solid },
+        },
+        localization: {
+          locale: 'fr-FR',
+        },
       });
 
-      const marketSeries = chart.addSeries(LineSeries, {
-      color: '#d8e6ff',
-      lineWidth: 2,
-      title: 'Prix symbole (Close)',
-      lineVisible: true,
-      pointMarkersVisible: false,
-      priceLineVisible: false,
-      priceFormat: {
-        type: 'price',
-        precision: chartPriceFormat.precision,
-        minMove: chartPriceFormat.minMove,
-      },
-    });
-      const positionOpenSeries = chart.addSeries(LineSeries, {
-      color: '#4f8eff',
-      lineWidth: 2,
-      title: 'Positions - Open',
-      lineVisible: false,
-      pointMarkersVisible: true,
-      pointMarkersRadius: 4,
-      priceLineVisible: false,
-      priceFormat: {
-        type: 'price',
-        precision: chartPriceFormat.precision,
-        minMove: chartPriceFormat.minMove,
-      },
-    });
-      const positionCurrentSeries = chart.addSeries(LineSeries, {
-      color: '#2dd0a8',
-      lineWidth: 2,
-      title: 'Positions - Current',
-      lineVisible: false,
-      pointMarkersVisible: false,
-      priceLineVisible: false,
-      priceFormat: {
-        type: 'price',
-        precision: chartPriceFormat.precision,
-        minMove: chartPriceFormat.minMove,
-      },
-    });
-      const pendingOpenSeries = chart.addSeries(LineSeries, {
-      color: '#f1b14d',
-      lineWidth: 2,
-      title: 'En attente - Open',
-      lineVisible: false,
-      pointMarkersVisible: true,
-      pointMarkersRadius: 4,
-      priceLineVisible: false,
-      priceFormat: {
-        type: 'price',
-        precision: chartPriceFormat.precision,
-        minMove: chartPriceFormat.minMove,
-      },
-    });
-      const pendingCurrentSeries = chart.addSeries(LineSeries, {
-      color: '#ff6a7a',
-      lineWidth: 2,
-      title: 'En attente - Current',
-      lineVisible: false,
-      pointMarkersVisible: true,
-      pointMarkersRadius: 4,
-      priceLineVisible: false,
-      priceFormat: {
-        type: 'price',
-        precision: chartPriceFormat.precision,
-        minMove: chartPriceFormat.minMove,
-      },
-    });
+      const marketSeries = chart.addSeries(CandlestickSeries, {
+        upColor: 'rgba(0, 0, 0, 0)',
+        downColor: '#f7fbff',
+        borderVisible: true,
+        borderUpColor: '#00ff3f',
+        borderDownColor: '#00ff3f',
+        wickUpColor: '#00ff3f',
+        wickDownColor: '#00ff3f',
+        priceLineColor: '#00ff3f',
+        lastValueVisible: true,
+        title: 'Prix symbole',
+        priceFormat: {
+          type: 'price',
+          precision: chartPriceFormat.precision,
+          minMove: chartPriceFormat.minMove,
+        },
+      });
 
-      if (marketCloseData.length > 0) marketSeries.setData(marketCloseData);
+      const volumeSeries = chart.addSeries(HistogramSeries, {
+        priceScaleId: 'volume',
+        priceLineVisible: false,
+        lastValueVisible: false,
+        base: 0,
+        priceFormat: {
+          type: 'volume',
+        },
+      });
+
+      chart.priceScale('volume').applyOptions({
+        borderVisible: false,
+        scaleMargins: {
+          top: 0.82,
+          bottom: 0,
+        },
+      });
+
+      const positionOpenSeries = chart.addSeries(LineSeries, {
+        color: '#3b82f6',
+        lineWidth: 2,
+        title: 'Positions - Open',
+        lineVisible: false,
+        pointMarkersVisible: true,
+        pointMarkersRadius: 4,
+        priceLineVisible: true,
+        priceLineColor: '#3b82f6',
+        priceFormat: {
+          type: 'price',
+          precision: chartPriceFormat.precision,
+          minMove: chartPriceFormat.minMove,
+        },
+      });
+
+      const positionCurrentSeries = chart.addSeries(LineSeries, {
+        color: '#2dd0a8',
+        lineWidth: 2,
+        title: 'Positions - Current',
+        lineVisible: false,
+        pointMarkersVisible: false,
+        priceLineVisible: true,
+        priceLineColor: '#2dd0a8',
+        priceFormat: {
+          type: 'price',
+          precision: chartPriceFormat.precision,
+          minMove: chartPriceFormat.minMove,
+        },
+      });
+
+      const pendingOpenSeries = chart.addSeries(LineSeries, {
+        color: '#f59e0b',
+        lineWidth: 2,
+        title: 'En attente - Open',
+        lineVisible: false,
+        pointMarkersVisible: true,
+        pointMarkersRadius: 4,
+        priceLineVisible: false,
+        priceFormat: {
+          type: 'price',
+          precision: chartPriceFormat.precision,
+          minMove: chartPriceFormat.minMove,
+        },
+      });
+
+      const pendingCurrentSeries = chart.addSeries(LineSeries, {
+        color: '#ef4444',
+        lineWidth: 2,
+        title: 'En attente - Current',
+        lineVisible: false,
+        pointMarkersVisible: true,
+        pointMarkersRadius: 4,
+        priceLineVisible: false,
+        priceFormat: {
+          type: 'price',
+          precision: chartPriceFormat.precision,
+          minMove: chartPriceFormat.minMove,
+        },
+      });
+
+      if (marketCandleData.length > 0) marketSeries.setData(marketCandleData);
+      if (marketVolumeData.length > 0) volumeSeries.setData(marketVolumeData);
       if (positionOpenData.length > 0) positionOpenSeries.setData(positionOpenData);
       if (positionCurrentData.length > 0) positionCurrentSeries.setData(positionCurrentData);
       if (pendingOpenData.length > 0) pendingOpenSeries.setData(pendingOpenData);
       if (pendingCurrentData.length > 0) pendingCurrentSeries.setData(pendingCurrentData);
 
-      // Draw entry -> current connection for each open position.
       for (const link of positionLinks) {
         const linkSeries = chart.addSeries(LineSeries, {
           color: link.isProfit ? '#2dd0a8' : '#ff6a7a',
@@ -431,7 +529,6 @@ export function OpenOrdersChart({
         ]);
       }
 
-      // Markers must be sorted by time for lightweight-charts.
       const currentMarkers: SeriesMarker<UTCTimestamp>[] = [];
       for (const link of positionLinks) {
         const directionPosition: 'aboveBar' | 'belowBar' = link.isUpMove ? 'aboveBar' : 'belowBar';
@@ -464,19 +561,30 @@ export function OpenOrdersChart({
     return () => {
       chart?.remove();
     };
-  }, [hasRenderableData, marketCloseData, pendingCurrentData, pendingOpenData, positionCurrentData, positionLinks, positionOpenData, chartPriceFormat.minMove, chartPriceFormat.precision]);
+  }, [
+    chartPriceFormat.minMove,
+    chartPriceFormat.precision,
+    hasRenderableData,
+    marketCandleData,
+    marketVolumeData,
+    pendingCurrentData,
+    pendingOpenData,
+    positionCurrentData,
+    positionLinks,
+    positionOpenData,
+  ]);
 
   return (
-    <div className="open-orders-chart">
+    <div className="open-orders-chart open-orders-chart--mt5">
       <p className="model-source open-orders-legend">
-        Blanc: courbe de prix du symbole | Points: niveaux de prix par ordre | Bleu: prix d&apos;entrée positions | Vert: prix courant positions | Orange: prix d&apos;entrée ordres | Rouge: prix courant ordres
+        Bougies MT5: haussière contour vert, baissière corps blanc | Volume: histogramme vert | Bleu: prix d&apos;entrée positions | Vert: prix courant positions | Orange: prix d&apos;entrée ordres | Rouge: prix courant ordres
       </p>
       {chartRenderError ? (
         <p className="chart-empty">Erreur graphique: {chartRenderError}</p>
       ) : hasRenderableData ? (
         <div
           aria-label="Graphique TradingView des ordres ouverts"
-          className="open-orders-chart-canvas"
+          className="open-orders-chart-canvas open-orders-chart-canvas--mt5"
           ref={containerRef}
         />
       ) : (
