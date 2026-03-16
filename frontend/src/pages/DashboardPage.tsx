@@ -7,6 +7,15 @@ import { useMarketSymbols } from '../hooks/useMarketSymbols';
 import type { ExecutionMode, MetaApiAccount, Run } from '../types';
 
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'pending']);
+const EXECUTION_DATE_FORMATTER = new Intl.DateTimeFormat('fr-FR', {
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+});
 
 function parseApiDateMs(value: string): number {
   const raw = String(value ?? '').trim();
@@ -36,6 +45,12 @@ function runElapsed(run: Run, nowMs: number): string {
   const end = ACTIVE_STATUSES.has(run.status) ? nowMs : finished;
   if (!Number.isFinite(started) || !Number.isFinite(end) || end < started) return '-';
   return formatDuration(end - started);
+}
+
+function formatExecutionDate(value: string): string {
+  const ts = parseApiDateMs(value);
+  if (!Number.isFinite(ts)) return '-';
+  return EXECUTION_DATE_FORMATTER.format(new Date(ts));
 }
 
 export function DashboardPage() {
@@ -206,6 +221,7 @@ export function DashboardPage() {
               <th>TF</th>
               <th>Mode</th>
               <th>Status</th>
+              <th>Date d&apos;exécution</th>
               <th>Temps running</th>
               <th>Decision</th>
               <th>Action</th>
@@ -221,6 +237,7 @@ export function DashboardPage() {
                 <td>
                   <span className={`badge ${run.status}`}>{run.status}</span>
                 </td>
+                <td>{formatExecutionDate(run.created_at)}</td>
                 <td>{runElapsed(run, nowMs)}</td>
                 <td>{(run.decision?.decision as string) ?? '-'}</td>
                 <td>
