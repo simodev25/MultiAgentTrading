@@ -110,6 +110,8 @@ class Settings(BaseSettings):
     backtest_agent_log_every: int = Field(default=25, alias='BACKTEST_AGENT_LOG_EVERY')
     backtest_enable_llm: bool = Field(default=False, alias='BACKTEST_ENABLE_LLM')
     backtest_llm_every: int = Field(default=24, alias='BACKTEST_LLM_EVERY')
+    scheduler_enabled: bool = Field(default=True, alias='SCHEDULER_ENABLED')
+    scheduler_batch_size: int = Field(default=20, ge=1, le=500, alias='SCHEDULER_BATCH_SIZE')
 
     @field_validator('cors_origins', mode='before')
     @classmethod

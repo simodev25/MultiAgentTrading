@@ -15,6 +15,7 @@ Plateforme IA multi-agent dédiée au Forex avec:
 - Trading Control Room (menu `Config`): configuration connecteurs, comptes MetaApi, prompts et télémétrie LLM
 - Backtesting avancé (Sharpe, Sortino, drawdown, profit factor)
 - Support multi-comptes MetaApi
+- Planification automatique des analyses (cron) avec sélection symbole/timeframe/mode/risque
 - Dashboard Grafana enrichi (latence/coûts LLM)
 
 ## Structure
@@ -86,6 +87,8 @@ Compte seed local:
 - `GET /api/v1/memory`
 - `POST /api/v1/memory/search`
 - `GET/POST /api/v1/backtests`
+- `GET/POST/PATCH/DELETE /api/v1/schedules`
+- `POST /api/v1/schedules/{id}/run-now`
 - `GET /api/v1/analytics/llm-summary`
 - `GET /api/v1/analytics/llm-models`
 

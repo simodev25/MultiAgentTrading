@@ -82,6 +82,25 @@ services:
       rabbitmq:
         condition: service_started
 
+  beat:
+    build:
+      context: ./backend
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://forex:forex@postgres:5432/forex_platform
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
+      CELERY_IGNORE_RESULT: 'true'
+    command: celery -A app.tasks.celery_app.celery_app beat --loglevel=info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_started
+
   frontend:
     build:
       context: ./frontend

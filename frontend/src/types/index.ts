@@ -220,3 +220,21 @@ export interface LlmModelUsage {
   success_calls: number;
   last_seen?: string | null;
 }
+
+export interface ScheduledRun {
+  id: number;
+  name: string;
+  pair: string;
+  timeframe: string;
+  mode: ExecutionMode;
+  risk_percent: number;
+  metaapi_account_ref?: number | null;
+  cron_expression: string;
+  is_active: boolean;
+  last_run_at?: string | null;
+  next_run_at?: string | null;
+  last_error?: string | null;
+  created_by_id: number;
+  created_at: string;
+  updated_at: string;
+}
