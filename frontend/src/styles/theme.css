@@ -322,6 +322,64 @@ tbody td {
   font-size: 0.82rem;
 }
 
+.ai-plan-builder {
+  border-color: rgba(73, 122, 214, 0.58);
+  background:
+    radial-gradient(circle at 0% 0%, rgba(59, 114, 220, 0.16), transparent 34%),
+    linear-gradient(180deg, rgba(16, 27, 46, 0.92), rgba(8, 16, 31, 0.96));
+}
+
+.ai-plan-builder h4 {
+  margin: 14px 0 8px;
+  font-size: 0.98rem;
+}
+
+.tf-multi-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  min-height: 42px;
+}
+
+label.tf-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 6px 9px;
+  border: 1px solid rgba(74, 105, 164, 0.6);
+  border-radius: 999px;
+  background: rgba(10, 18, 33, 0.82);
+  color: #cddcf4;
+  font-size: 0.82rem;
+  line-height: 1;
+}
+
+.tf-chip input[type='checkbox'] {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+}
+
+.llm-report-actions {
+  margin-top: 10px;
+}
+
+.llm-report-panel {
+  margin-top: 10px;
+  border: 1px solid rgba(80, 116, 184, 0.48);
+  border-radius: 12px;
+  padding: 12px;
+  background: rgba(6, 13, 26, 0.92);
+}
+
+.llm-report-panel h5 {
+  margin: 0 0 8px;
+  font-size: 0.9rem;
+  color: #cfe0ff;
+}
+
 .charts-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));

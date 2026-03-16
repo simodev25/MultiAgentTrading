@@ -4,7 +4,7 @@ import { api } from '../api/client';
 import { DEFAULT_PAIR, DEFAULT_TIMEFRAMES } from '../constants/markets';
 import { useAuth } from '../hooks/useAuth';
 import { useMarketSymbols } from '../hooks/useMarketSymbols';
-import type { ExecutionMode, MetaApiAccount, Run, ScheduledRun } from '../types';
+import type { ExecutionMode, MetaApiAccount, RegenerateSchedulesResult, RiskProfile, Run, ScheduledRun } from '../types';
 
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'pending']);
 const EXECUTION_DATE_FORMATTER = new Intl.DateTimeFormat('fr-FR', {
@@ -88,6 +88,14 @@ export function DashboardPage() {
   const [loading, setLoading] = useState(false);
   const [scheduleLoading, setScheduleLoading] = useState(false);
   const [scheduleActionId, setScheduleActionId] = useState<number | null>(null);
+  const [autoTargetCount, setAutoTargetCount] = useState(5);
+  const [autoRiskProfile, setAutoRiskProfile] = useState<RiskProfile>('balanced');
+  const [autoTimeframes, setAutoTimeframes] = useState<string[]>(['H1', 'H4', 'D1']);
+  const [autoUseLlm, setAutoUseLlm] = useState(true);
+  const [autoGenerating, setAutoGenerating] = useState(false);
+  const [autoGenerationSummary, setAutoGenerationSummary] = useState<string | null>(null);
+  const [autoLlmReport, setAutoLlmReport] = useState<Record<string, unknown> | null>(null);
+  const [showLlmReport, setShowLlmReport] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(Date.now());
 
@@ -164,6 +172,14 @@ export function DashboardPage() {
       setScheduleCronExpression(CRON_PRESET_BY_TIMEFRAME[scheduleTimeframe] ?? '0 * * * *');
     }
   }, [scheduleTimeframe, scheduleCronTouched]);
+
+  const toggleTf = (list: string[], timeframe: string) => {
+    if (list.includes(timeframe)) {
+      const next = list.filter((item) => item !== timeframe);
+      return next.length > 0 ? next : list;
+    }
+    return [...list, timeframe];
+  };
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -261,6 +277,37 @@ export function DashboardPage() {
     setScheduleCronExpression(CRON_PRESET_BY_TIMEFRAME[scheduleTimeframe] ?? '0 * * * *');
   };
 
+  const regenerateActiveSchedules = async () => {
+    if (!token) return;
+    setAutoGenerating(true);
+    setError(null);
+    setAutoGenerationSummary(null);
+    setAutoLlmReport(null);
+    setShowLlmReport(false);
+    try {
+      const payload = (await api.regenerateActiveSchedules(token, {
+        target_count: autoTargetCount,
+        mode: scheduleMode,
+        risk_profile: autoRiskProfile,
+        allowed_timeframes: autoTimeframes,
+        use_llm: autoUseLlm,
+        deactivate_existing: true,
+        metaapi_account_ref: scheduleMetaapiAccountRef,
+      })) as RegenerateSchedulesResult;
+      setSchedules(payload.active_schedules);
+      setAutoGenerationSummary(
+        `Source=${payload.source} | Remplacés=${payload.replaced_count} | Créés=${payload.created_count}` +
+        `${payload.llm_note ? ` | Note=${payload.llm_note}` : ''}`,
+      );
+      const llmUsed = Boolean(payload.llm_report && (payload.llm_report as Record<string, unknown>).used === true);
+      setAutoLlmReport(llmUsed ? (payload.llm_report as Record<string, unknown>) : null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Cannot regenerate active schedules');
+    } finally {
+      setAutoGenerating(false);
+    }
+  };
+
   const stats = useMemo(() => {
     const completed = runs.filter((r) => r.status === 'completed').length;
     const failed = runs.filter((r) => r.status === 'failed').length;
@@ -339,7 +386,7 @@ export function DashboardPage() {
         </div>
       </section>
 
-      <section className="card primary">
+      <section className="card primary ai-plan-builder">
         <h3>Automatisation intelligente (cron)</h3>
         <form onSubmit={onSubmitSchedule} className="form-grid inline">
           <label>
@@ -421,6 +468,78 @@ export function DashboardPage() {
         <p className="model-source">
           Exemple cron: <code>*/5 * * * *</code>, <code>0 * * * *</code>, <code>0 8-20 * * 1-5</code>.
         </p>
+        <h4>Génération automatique du plan</h4>
+        <form
+          className="form-grid inline"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void regenerateActiveSchedules();
+          }}
+        >
+          <label>
+            Nb plans
+            <input
+              type="number"
+              min={1}
+              max={20}
+              value={autoTargetCount}
+              onChange={(e) => setAutoTargetCount(Number(e.target.value))}
+            />
+          </label>
+          <label>
+            Profil risque
+            <select value={autoRiskProfile} onChange={(e) => setAutoRiskProfile(e.target.value as RiskProfile)}>
+              <option value="conservative">Conservateur</option>
+              <option value="balanced">Équilibré</option>
+              <option value="aggressive">Agressif</option>
+            </select>
+          </label>
+          <label>
+            TF autorisés
+            <div className="tf-multi-picker">
+              {DEFAULT_TIMEFRAMES.map((item) => (
+                <label key={item} className="tf-chip">
+                  <input
+                    type="checkbox"
+                    checked={autoTimeframes.includes(item)}
+                    onChange={() => setAutoTimeframes((prev) => toggleTf(prev, item))}
+                  />
+                  <span>{item}</span>
+                </label>
+              ))}
+            </div>
+          </label>
+          <label>
+            Mode
+            <select value={scheduleMode} onChange={(e) => setScheduleMode(e.target.value as ExecutionMode)}>
+              <option value="simulation">Simulation</option>
+              <option value="paper">Paper</option>
+              <option value="live">Live</option>
+            </select>
+          </label>
+          <label>
+            Utiliser LLM
+            <select value={autoUseLlm ? 'yes' : 'no'} onChange={(e) => setAutoUseLlm(e.target.value === 'yes')}>
+              <option value="yes">Oui</option>
+              <option value="no">Non (fallback)</option>
+            </select>
+          </label>
+          <button disabled={autoGenerating}>{autoGenerating ? 'Génération...' : 'Génération automatique'}</button>
+        </form>
+        {autoGenerationSummary && <p className="model-source">{autoGenerationSummary}</p>}
+        {autoLlmReport && (
+          <div className="llm-report-actions">
+            <button type="button" onClick={() => setShowLlmReport((prev) => !prev)}>
+              {showLlmReport ? 'Masquer rapport LLM' : 'Afficher rapport LLM'}
+            </button>
+          </div>
+        )}
+        {showLlmReport && autoLlmReport && (
+          <div className="llm-report-panel">
+            <h5>Rapport LLM - Génération du plan</h5>
+            <pre>{JSON.stringify(autoLlmReport, null, 2)}</pre>
+          </div>
+        )}
       </section>
 
       <section className="card">

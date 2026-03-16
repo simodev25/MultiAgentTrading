@@ -238,3 +238,28 @@ export interface ScheduledRun {
   created_at: string;
   updated_at: string;
 }
+
+export type RiskProfile = 'conservative' | 'balanced' | 'aggressive';
+
+export interface GeneratedSchedulePlanItem {
+  name: string;
+  pair: string;
+  timeframe: string;
+  mode: ExecutionMode;
+  risk_percent: number;
+  cron_expression: string;
+  metaapi_account_ref?: number | null;
+  rationale?: string | null;
+}
+
+export interface RegenerateSchedulesResult {
+  source: string;
+  llm_degraded: boolean;
+  llm_note?: string | null;
+  llm_report?: Record<string, unknown> | null;
+  replaced_count: number;
+  created_count: number;
+  generated_plans: GeneratedSchedulePlanItem[];
+  active_schedules: ScheduledRun[];
+  analysis: Record<string, unknown>;
+}

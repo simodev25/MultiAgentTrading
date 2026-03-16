@@ -84,6 +84,22 @@ export const api = {
     request(`/schedules/${scheduleId}`, { method: 'DELETE' }, token),
   runScheduleNow: (token: string, scheduleId: number) =>
     request(`/schedules/${scheduleId}/run-now`, { method: 'POST' }, token),
+  regenerateActiveSchedules: (
+    token: string,
+    payload: {
+      target_count: number;
+      mode: string;
+      risk_profile: 'conservative' | 'balanced' | 'aggressive';
+      allowed_timeframes?: string[];
+      use_llm: boolean;
+      deactivate_existing?: boolean;
+      metaapi_account_ref?: number | null;
+    },
+  ) =>
+    request('/schedules/regenerate-active', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }, token),
   listOrders: (token: string) => request('/trading/orders', {}, token),
   listConnectors: (token: string) => request('/connectors', {}, token),
   getMarketSymbols: (token: string) => request('/connectors/market-symbols', {}, token),

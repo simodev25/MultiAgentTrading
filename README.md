@@ -89,6 +89,7 @@ Compte seed local:
 - `GET/POST /api/v1/backtests`
 - `GET/POST/PATCH/DELETE /api/v1/schedules`
 - `POST /api/v1/schedules/{id}/run-now`
+- `POST /api/v1/schedules/regenerate-active` (génération automatique de plan via LLM + fallback)
 - `GET /api/v1/analytics/llm-summary`
 - `GET /api/v1/analytics/llm-models`
 

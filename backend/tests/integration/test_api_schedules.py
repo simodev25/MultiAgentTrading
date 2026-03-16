@@ -61,3 +61,53 @@ def test_create_list_and_run_schedule(monkeypatch) -> None:
         run_payload = run_now_resp.json()
         assert run_payload['status'] == 'queued'
         assert run_payload['pair'] == 'EURUSD.PRO'
+
+
+def test_regenerate_active_schedules(monkeypatch) -> None:
+    monkeypatch.setattr('app.tasks.run_analysis_task.execute.apply_async', _fake_apply_async)
+
+    def _fake_generate(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return {
+            'source': 'llm',
+            'llm_degraded': False,
+            'llm_note': 'ok',
+            'generated_plans': [
+                {
+                    'name': 'EURUSD.PRO',
+                    'pair': 'EURUSD.PRO',
+                    'timeframe': 'H1',
+                    'mode': 'simulation',
+                    'risk_percent': 1.0,
+                    'cron_expression': '0 * * * *',
+                    'metaapi_account_ref': None,
+                    'rationale': 'test',
+                }
+            ],
+            'analysis': {'run_count': 0, 'backtest_count': 0, 'candidate_count': 1},
+        }
+
+    monkeypatch.setattr('app.api.routes.schedules.generate_schedule_plan', _fake_generate)
+
+    with TestClient(app) as client:
+        login_resp = client.post('/api/v1/auth/login', json={'email': 'admin@local.dev', 'password': 'admin1234'})
+        assert login_resp.status_code == 200
+        token = login_resp.json()['access_token']
+        headers = {'Authorization': f'Bearer {token}'}
+
+        symbols_resp = client.put(
+            '/api/v1/connectors/market-symbols',
+            json={'symbol_groups': [{'name': 'forex', 'symbols': ['EURUSD.PRO']}]},
+            headers=headers,
+        )
+        assert symbols_resp.status_code == 200
+
+        regenerate_resp = client.post(
+            '/api/v1/schedules/regenerate-active',
+            json={'target_count': 1, 'mode': 'simulation', 'risk_profile': 'balanced', 'use_llm': True},
+            headers=headers,
+        )
+        assert regenerate_resp.status_code == 200
+        payload = regenerate_resp.json()
+        assert payload['source'] == 'llm'
+        assert payload['created_count'] == 1
+        assert payload['generated_plans'][0]['pair'] == 'EURUSD.PRO'

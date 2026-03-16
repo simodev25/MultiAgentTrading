@@ -9,8 +9,16 @@ from app.db.models.scheduled_run import ScheduledRun
 from app.db.models.user import User
 from app.db.session import get_db
 from app.schemas.run import RunOut
-from app.schemas.schedule import ScheduledRunCreate, ScheduledRunOut, ScheduledRunUpdate
+from app.schemas.schedule import (
+    GeneratedSchedulePlanItem,
+    RegenerateSchedulesOut,
+    RegenerateSchedulesRequest,
+    ScheduledRunCreate,
+    ScheduledRunOut,
+    ScheduledRunUpdate,
+)
 from app.services.scheduler.cron import next_run_after, validate_cron_expression
+from app.services.scheduler.plan_generator import generate_schedule_plan
 from app.services.scheduler.runner import create_and_enqueue_run, validate_schedule_target
 
 router = APIRouter(prefix='/schedules', tags=['schedules'])
@@ -190,3 +198,86 @@ def run_schedule_now(
     db.commit()
 
     return RunOut.model_validate(run)
+
+
+@router.post('/regenerate-active', response_model=RegenerateSchedulesOut)
+def regenerate_active_schedules(
+    payload: RegenerateSchedulesRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN, Role.TRADER_OPERATOR, Role.ANALYST)),
+) -> RegenerateSchedulesOut:
+    _ensure_live_permissions(payload.mode, user)
+    settings = get_settings()
+    allowed_timeframes = [
+        item.strip().upper()
+        for item in payload.allowed_timeframes
+        if isinstance(item, str) and item.strip()
+    ]
+    if allowed_timeframes:
+        unsupported = sorted({item for item in allowed_timeframes if item not in settings.default_timeframes})
+        if unsupported:
+            raise HTTPException(status_code=400, detail=f'Unsupported timeframes: {", ".join(unsupported)}')
+
+    generation = generate_schedule_plan(
+        db,
+        settings,
+        target_count=payload.target_count,
+        mode=payload.mode,
+        risk_profile=payload.risk_profile,
+        allowed_timeframes=allowed_timeframes or None,
+        use_llm=payload.use_llm,
+        metaapi_account_ref=payload.metaapi_account_ref,
+    )
+    generated_plans = generation.get('generated_plans', [])
+    if not generated_plans:
+        raise HTTPException(status_code=400, detail='Unable to generate a valid schedule plan')
+
+    replaced_count = 0
+    if payload.deactivate_existing:
+        current_active = db.query(ScheduledRun).filter(ScheduledRun.is_active.is_(True)).all()
+        for row in current_active:
+            row.is_active = False
+            row.next_run_at = None
+        replaced_count = len(current_active)
+
+    now = datetime.utcnow()
+    created_rows: list[ScheduledRun] = []
+    for plan in generated_plans:
+        row = ScheduledRun(
+            name=str(plan['name']).strip(),
+            pair=plan['pair'],
+            timeframe=plan['timeframe'],
+            mode=payload.mode,
+            risk_percent=float(plan['risk_percent']),
+            metaapi_account_ref=plan.get('metaapi_account_ref'),
+            cron_expression=plan['cron_expression'],
+            is_active=True,
+            next_run_at=next_run_after(plan['cron_expression'], now),
+            created_by_id=user.id,
+        )
+        db.add(row)
+        db.flush()
+        created_rows.append(row)
+
+    db.commit()
+    for row in created_rows:
+        db.refresh(row)
+
+    active_rows = (
+        db.query(ScheduledRun)
+        .filter(ScheduledRun.is_active.is_(True))
+        .order_by(ScheduledRun.created_at.desc())
+        .all()
+    )
+
+    return RegenerateSchedulesOut(
+        source=str(generation.get('source', 'fallback')),
+        llm_degraded=bool(generation.get('llm_degraded', False)),
+        llm_note=generation.get('llm_note'),
+        llm_report=generation.get('llm_report'),
+        replaced_count=replaced_count,
+        created_count=len(created_rows),
+        generated_plans=[GeneratedSchedulePlanItem.model_validate(item) for item in generated_plans],
+        active_schedules=[ScheduledRunOut.model_validate(item) for item in active_rows],
+        analysis=generation.get('analysis', {}),
+    )

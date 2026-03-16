@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -47,3 +47,39 @@ class ScheduledRunOut(BaseModel):
     updated_at: datetime
 
     model_config = {'from_attributes': True}
+
+
+class GeneratedSchedulePlanItem(BaseModel):
+    name: str
+    pair: str
+    timeframe: str
+    mode: ExecutionMode
+    risk_percent: float
+    cron_expression: str
+    metaapi_account_ref: int | None = None
+    rationale: str | None = None
+
+
+RiskProfile = Literal['conservative', 'balanced', 'aggressive']
+
+
+class RegenerateSchedulesRequest(BaseModel):
+    target_count: int = Field(default=5, ge=1, le=20)
+    mode: ExecutionMode = 'simulation'
+    risk_profile: RiskProfile = 'balanced'
+    allowed_timeframes: list[str] = Field(default_factory=list)
+    use_llm: bool = True
+    deactivate_existing: bool = True
+    metaapi_account_ref: int | None = None
+
+
+class RegenerateSchedulesOut(BaseModel):
+    source: str
+    llm_degraded: bool
+    llm_note: str | None
+    llm_report: dict[str, Any] | None = None
+    replaced_count: int
+    created_count: int
+    generated_plans: list[GeneratedSchedulePlanItem]
+    active_schedules: list[ScheduledRunOut]
+    analysis: dict[str, Any]
