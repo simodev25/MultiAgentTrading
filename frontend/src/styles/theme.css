@@ -895,6 +895,23 @@ a:hover {
   font-size: 0.95rem;
 }
 
+.orders-watchlist p.orders-watchlist-total {
+  margin-top: 4px;
+  border-color: rgba(73, 110, 168, 0.72);
+  background:
+    radial-gradient(circle at 0% 50%, rgba(37, 99, 235, 0.16), transparent 40%),
+    linear-gradient(180deg, rgba(10, 20, 36, 0.95), rgba(8, 16, 31, 0.95));
+}
+
+.orders-watchlist p.orders-watchlist-total span {
+  color: #b9cdf0;
+  font-weight: 600;
+}
+
+.orders-watchlist p.orders-watchlist-total strong {
+  font-size: 1.02rem;
+}
+
 .card {
   position: relative;
   min-width: 0;

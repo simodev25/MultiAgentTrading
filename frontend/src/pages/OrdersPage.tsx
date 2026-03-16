@@ -41,6 +41,27 @@ function toNumber(value: unknown): number {
   return 0;
 }
 
+function toNullableNumber(value: unknown): number | null {
+  const parsed = toNumber(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function resolveLivePrice(snapshot: Record<string, unknown>): number {
+  const direct =
+    toNullableNumber(snapshot.currentPrice)
+    ?? toNullableNumber(snapshot.currentTickValue)
+    ?? toNullableNumber(snapshot.lastPrice)
+    ?? toNullableNumber(snapshot.marketPrice)
+    ?? toNullableNumber(snapshot.price);
+  if (direct != null) return direct;
+
+  const bid = toNullableNumber(snapshot.bid);
+  const ask = toNullableNumber(snapshot.ask);
+  if (bid != null && ask != null) return (bid + ask) / 2;
+
+  return toNullableNumber(snapshot.openPrice) ?? 0;
+}
+
 function formatSigned(value: number, digits = 2): string {
   const sign = value > 0 ? '+' : '';
   return `${sign}${value.toFixed(digits)}`;
@@ -113,6 +134,7 @@ export function OrdersPage() {
     metaFeatureDisabled,
     bootstrapLoading: metaBootstrapLoading,
     loadMetaTrading,
+    liveExposurePollMs,
   } = useMetaTradingData(token);
 
   const {
@@ -351,7 +373,7 @@ export function OrdersPage() {
     const bySymbol = new Map<string, { symbol: string; last: number; pnl: number; orders: number }>();
     for (const position of openPositions) {
       const symbol = String(position.symbol ?? '-').trim() || '-';
-      const current = toNumber(position.currentPrice ?? position.openPrice);
+      const current = resolveLivePrice(position as Record<string, unknown>);
       const bucket = bySymbol.get(symbol) ?? { symbol, last: 0, pnl: 0, orders: 0 };
       bucket.last = current || bucket.last;
       bucket.pnl += toNumber(position.profit);
@@ -360,15 +382,19 @@ export function OrdersPage() {
     }
     for (const order of openOrders) {
       const symbol = String(order.symbol ?? '-').trim() || '-';
-      const current = toNumber(order.currentPrice ?? order.openPrice);
+      const current = resolveLivePrice(order as Record<string, unknown>);
       const bucket = bySymbol.get(symbol) ?? { symbol, last: 0, pnl: 0, orders: 0 };
       bucket.last = current || bucket.last;
       bucket.orders += 1;
       bySymbol.set(symbol, bucket);
     }
-    return [...bySymbol.values()]
+    const allRows = [...bySymbol.values()];
+    const rows = [...allRows]
       .sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl))
       .slice(0, 6);
+    const totalPnl = allRows.reduce((sum, row) => sum + row.pnl, 0);
+    const totalOrders = allRows.reduce((sum, row) => sum + row.orders, 0);
+    return { rows, totalPnl, totalOrders };
   }, [openPositions, openOrders]);
 
   const quickNavigate = (sectionId: string, panelId?: 'analysis' | 'metaapi' | 'queue') => {
@@ -636,17 +662,29 @@ export function OrdersPage() {
         <aside className="orders-right-column">
           <section className="card orders-side-card">
             <h3>File ordres</h3>
+            <p className="model-source">
+              MAJ live: {Math.max(1, Math.round(liveExposurePollMs / 1000))}s (onglet visible)
+            </p>
             <div className="orders-watchlist">
-              {watchlist.length === 0 ? (
+              {watchlist.rows.length === 0 ? (
                 <p className="model-source">Aucun symbole actif.</p>
               ) : (
-                watchlist.map((row) => (
-                  <p key={row.symbol}>
-                    <span>{row.symbol}</span>
-                    <span>{row.last > 0 ? row.last.toFixed(5) : '-'}</span>
-                    <strong className={row.pnl >= 0 ? 'ok-text' : 'danger-text'}>{formatSigned(row.pnl)}</strong>
+                <>
+                  {watchlist.rows.map((row) => (
+                    <p key={row.symbol}>
+                      <span>{row.symbol}</span>
+                      <span>{row.last > 0 ? row.last.toFixed(5) : '-'}</span>
+                      <strong className={row.pnl >= 0 ? 'ok-text' : 'danger-text'}>{formatSigned(row.pnl)}</strong>
+                    </p>
+                  ))}
+                  <p className="orders-watchlist-total">
+                    <span>Total</span>
+                    <span>{watchlist.totalOrders} ordres</span>
+                    <strong className={watchlist.totalPnl >= 0 ? 'ok-text' : 'danger-text'}>
+                      {formatSigned(watchlist.totalPnl)}
+                    </strong>
                   </p>
-                ))
+                </>
               )}
             </div>
           </section>

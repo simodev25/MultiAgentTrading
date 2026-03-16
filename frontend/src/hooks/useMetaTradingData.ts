@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, wsTradingOrdersUrl } from '../api/client';
 import { runtimeConfig } from '../config/runtime';
 import type { MetaApiAccount, MetaApiDeal, MetaApiHistoryOrder, MetaApiOpenOrder, MetaApiPosition } from '../types';
@@ -6,6 +6,10 @@ import type { MetaApiAccount, MetaApiDeal, MetaApiHistoryOrder, MetaApiOpenOrder
 const REFRESH_DEBOUNCE_MS = 1200;
 const WS_RECONNECT_DELAY_MS = 3000;
 const WS_REFRESH_DEBOUNCE_MS = 1500;
+const LIVE_EXPOSURE_POLL_MS = runtimeConfig.metaApiRealtimePricesPollMs;
+const LIVE_EXPOSURE_SDK_MIN_POLL_MS = 20000;
+const LIVE_EXPOSURE_RATE_LIMIT_COOLDOWN_MS = 65000;
+type OpenExposureScope = 'full' | 'positions' | 'orders';
 type TradingOrdersWsMessage = {
   type?: string;
   order?: {
@@ -35,12 +39,123 @@ export function useMetaTradingData(token: string | null) {
   const [bootstrapLoading, setBootstrapLoading] = useState(true);
 
   const metaLoadingRef = useRef(false);
+  const openExposureLoadingRef = useRef(false);
+  const openExposurePollTargetRef = useRef<'positions' | 'orders'>('positions');
+  const openExposureCooldownUntilMsRef = useRef(0);
   const lastManualRefreshMsRef = useRef(0);
   const lastEventRefreshMsRef = useRef(0);
+  const liveExposurePollMs = useMemo(() => {
+    const sdkProvider = openPositionsProvider === 'sdk' || openOrdersProvider === 'sdk';
+    if (!sdkProvider) return LIVE_EXPOSURE_POLL_MS;
+    return Math.max(LIVE_EXPOSURE_POLL_MS, LIVE_EXPOSURE_SDK_MIN_POLL_MS);
+  }, [openOrdersProvider, openPositionsProvider]);
 
   useEffect(() => {
     metaLoadingRef.current = metaLoading;
   }, [metaLoading]);
+
+  const registerRateLimitCooldown = useCallback((message: string | null | undefined) => {
+    if (!message) return;
+    if (!/(too ?many ?requests|rate.?limit|limit_subscribe_rate_per_server)/i.test(message)) return;
+    const now = Date.now();
+    let retryAt = now + LIVE_EXPOSURE_RATE_LIMIT_COOLDOWN_MS;
+    const match = message.match(/(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)/);
+    if (match?.[1]) {
+      const parsed = Date.parse(match[1]);
+      if (Number.isFinite(parsed)) retryAt = Math.max(retryAt, parsed + 1500);
+    }
+    openExposureCooldownUntilMsRef.current = Math.max(openExposureCooldownUntilMsRef.current, retryAt);
+  }, []);
+
+  const loadOpenExposure = useCallback(async (
+    selectedRef: number | null,
+    scope: OpenExposureScope = 'full',
+    source: 'auto' | 'manual' | 'poll' = 'auto',
+  ) => {
+    if (!token) return;
+    if (source === 'poll' && Date.now() < openExposureCooldownUntilMsRef.current) return;
+    if (openExposureLoadingRef.current) return;
+
+    openExposureLoadingRef.current = true;
+    try {
+      if (scope === 'full') {
+        const [openOrdersResult, openPositionsResult] = await Promise.allSettled([
+          api.listMetaApiOpenOrders(token, { account_ref: selectedRef }),
+          api.listMetaApiPositions(token, { account_ref: selectedRef }),
+        ]);
+
+        if (openOrdersResult.status === 'fulfilled') {
+          const openOrdersPayload = openOrdersResult.value as {
+            open_orders?: MetaApiOpenOrder[];
+            provider?: string;
+            reason?: string;
+          };
+          setOpenOrders(Array.isArray(openOrdersPayload.open_orders) ? openOrdersPayload.open_orders : []);
+          setOpenOrdersProvider(typeof openOrdersPayload.provider === 'string' ? openOrdersPayload.provider : '');
+          setOpenOrdersError(openOrdersPayload.reason ?? null);
+          registerRateLimitCooldown(openOrdersPayload.reason);
+        } else {
+          const message = openOrdersResult.reason instanceof Error ? openOrdersResult.reason.message : 'Unable to load MetaApi open orders';
+          setOpenOrdersError(message);
+          registerRateLimitCooldown(message);
+        }
+
+        if (openPositionsResult.status === 'fulfilled') {
+          const openPositionsPayload = openPositionsResult.value as {
+            positions?: MetaApiPosition[];
+            provider?: string;
+            reason?: string;
+          };
+          setOpenPositions(Array.isArray(openPositionsPayload.positions) ? openPositionsPayload.positions : []);
+          setOpenPositionsProvider(typeof openPositionsPayload.provider === 'string' ? openPositionsPayload.provider : '');
+          setOpenPositionsError(openPositionsPayload.reason ?? null);
+          registerRateLimitCooldown(openPositionsPayload.reason);
+        } else {
+          const message = openPositionsResult.reason instanceof Error ? openPositionsResult.reason.message : 'Unable to load MetaApi open positions';
+          setOpenPositionsError(message);
+          registerRateLimitCooldown(message);
+        }
+        return;
+      }
+
+      if (scope === 'orders') {
+        try {
+          const openOrdersPayload = await api.listMetaApiOpenOrders(token, { account_ref: selectedRef }) as {
+            open_orders?: MetaApiOpenOrder[];
+            provider?: string;
+            reason?: string;
+          };
+          setOpenOrders(Array.isArray(openOrdersPayload.open_orders) ? openOrdersPayload.open_orders : []);
+          setOpenOrdersProvider(typeof openOrdersPayload.provider === 'string' ? openOrdersPayload.provider : '');
+          setOpenOrdersError(openOrdersPayload.reason ?? null);
+          registerRateLimitCooldown(openOrdersPayload.reason);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : 'Unable to load MetaApi open orders';
+          setOpenOrdersError(message);
+          registerRateLimitCooldown(message);
+        }
+        return;
+      }
+
+      try {
+        const openPositionsPayload = await api.listMetaApiPositions(token, { account_ref: selectedRef }) as {
+          positions?: MetaApiPosition[];
+          provider?: string;
+          reason?: string;
+        };
+        setOpenPositions(Array.isArray(openPositionsPayload.positions) ? openPositionsPayload.positions : []);
+        setOpenPositionsProvider(typeof openPositionsPayload.provider === 'string' ? openPositionsPayload.provider : '');
+        setOpenPositionsError(openPositionsPayload.reason ?? null);
+        registerRateLimitCooldown(openPositionsPayload.reason);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Unable to load MetaApi open positions';
+        setOpenPositionsError(message);
+        registerRateLimitCooldown(message);
+      }
+    } finally {
+      openExposureLoadingRef.current = false;
+    }
+  }, [registerRateLimitCooldown, token]);
 
   const loadMetaTrading = useCallback(async (selectedRef: number | null, source: 'auto' | 'manual' = 'auto') => {
     if (!token) return;
@@ -79,43 +194,7 @@ export function useMetaTradingData(token: string | null) {
         setMetaError(reason);
         setMetaFeatureDisabled(reason.includes('ENABLE_METAAPI_REAL_TRADES_DASHBOARD'));
       }
-
-      const [openOrdersResult, openPositionsResult] = await Promise.allSettled([
-        api.listMetaApiOpenOrders(token, { account_ref: selectedRef }),
-        api.listMetaApiPositions(token, { account_ref: selectedRef }),
-      ]);
-
-      if (openOrdersResult.status === 'fulfilled') {
-        const openOrdersPayload = openOrdersResult.value as {
-          open_orders?: MetaApiOpenOrder[];
-          provider?: string;
-          reason?: string;
-        };
-        setOpenOrders(Array.isArray(openOrdersPayload.open_orders) ? openOrdersPayload.open_orders : []);
-        setOpenOrdersProvider(typeof openOrdersPayload.provider === 'string' ? openOrdersPayload.provider : '');
-        setOpenOrdersError(openOrdersPayload.reason ?? null);
-      } else {
-        const message = openOrdersResult.reason instanceof Error ? openOrdersResult.reason.message : 'Unable to load MetaApi open orders';
-        setOpenOrders([]);
-        setOpenOrdersProvider('');
-        setOpenOrdersError(message);
-      }
-
-      if (openPositionsResult.status === 'fulfilled') {
-        const openPositionsPayload = openPositionsResult.value as {
-          positions?: MetaApiPosition[];
-          provider?: string;
-          reason?: string;
-        };
-        setOpenPositions(Array.isArray(openPositionsPayload.positions) ? openPositionsPayload.positions : []);
-        setOpenPositionsProvider(typeof openPositionsPayload.provider === 'string' ? openPositionsPayload.provider : '');
-        setOpenPositionsError(openPositionsPayload.reason ?? null);
-      } else {
-        const message = openPositionsResult.reason instanceof Error ? openPositionsResult.reason.message : 'Unable to load MetaApi open positions';
-        setOpenPositions([]);
-        setOpenPositionsProvider('');
-        setOpenPositionsError(message);
-      }
+      await loadOpenExposure(selectedRef, 'full', source === 'manual' ? 'manual' : 'auto');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to load MetaApi trades';
       setDeals([]);
@@ -133,7 +212,7 @@ export function useMetaTradingData(token: string | null) {
     } finally {
       setMetaLoading(false);
     }
-  }, [days, token]);
+  }, [days, loadOpenExposure, token]);
 
   useEffect(() => {
     if (!token) {
@@ -198,6 +277,25 @@ export function useMetaTradingData(token: string | null) {
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, [token, accountRef, metaFeatureDisabled, initialMetaLoadDone, accounts.length, loadMetaTrading]);
+
+  useEffect(() => {
+    if (!token) return;
+    if (metaFeatureDisabled) return;
+    if (!initialMetaLoadDone) return;
+    if (accounts.length > 0 && accountRef == null) return;
+
+    const refreshOpenExposure = () => {
+      if (document.visibilityState === 'hidden') return;
+      const scope = openExposurePollTargetRef.current;
+      openExposurePollTargetRef.current = scope === 'positions' ? 'orders' : 'positions';
+      void loadOpenExposure(accountRef, scope, 'poll');
+    };
+
+    const intervalId = window.setInterval(refreshOpenExposure, liveExposurePollMs);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [token, accountRef, metaFeatureDisabled, initialMetaLoadDone, accounts.length, loadOpenExposure, liveExposurePollMs]);
 
   useEffect(() => {
     if (!token) return;
@@ -289,5 +387,6 @@ export function useMetaTradingData(token: string | null) {
     metaFeatureDisabled,
     bootstrapLoading,
     loadMetaTrading,
+    liveExposurePollMs,
   };
 }

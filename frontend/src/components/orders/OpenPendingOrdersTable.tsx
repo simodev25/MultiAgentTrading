@@ -1,5 +1,6 @@
 import type { MetaApiOpenOrder } from '../../types';
 import { resolveTicket } from '../../utils/tradingSymbols';
+import { formatPrice } from '../../utils/priceLevels';
 import { displaySymbol, formatMetaTradingTime, formatMetaTradingType } from './formatters';
 import { TableSkeletonRows } from './TableSkeletonRows';
 
@@ -8,6 +9,31 @@ interface OpenPendingOrdersTableProps {
   openOrders: MetaApiOpenOrder[];
   selectedChartTicket: string | null;
   onToggleTicket: (ticket: string) => void;
+}
+
+function toNullableNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value;
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return null;
+}
+
+function resolveLivePrice(snapshot: Record<string, unknown>): number | null {
+  const direct =
+    toNullableNumber(snapshot.currentPrice)
+    ?? toNullableNumber(snapshot.currentTickValue)
+    ?? toNullableNumber(snapshot.lastPrice)
+    ?? toNullableNumber(snapshot.marketPrice)
+    ?? toNullableNumber(snapshot.price);
+  if (direct != null) return direct;
+
+  const bid = toNullableNumber(snapshot.bid);
+  const ask = toNullableNumber(snapshot.ask);
+  if (bid != null && ask != null) return (bid + ask) / 2;
+
+  return toNullableNumber(snapshot.openPrice);
 }
 
 export function OpenPendingOrdersTable({
@@ -43,6 +69,7 @@ export function OpenPendingOrdersTable({
             const ticket = resolveTicket(order as Record<string, unknown>);
             const selected = selectedChartTicket === ticket;
             const selectable = ticket !== '-';
+            const current = resolveLivePrice(order as Record<string, unknown>);
             return (
               <tr key={`${ticket}-${idx}`}>
                 <td>{ticket}</td>
@@ -51,8 +78,8 @@ export function OpenPendingOrdersTable({
                 <td>{formatMetaTradingType(order.type)}</td>
                 <td>{formatMetaTradingType(order.state)}</td>
                 <td>{typeof order.volume === 'number' ? order.volume.toFixed(2) : (typeof order.currentVolume === 'number' ? order.currentVolume.toFixed(2) : '-')}</td>
-                <td>{typeof order.openPrice === 'number' ? order.openPrice.toFixed(5) : '-'}</td>
-                <td>{typeof order.currentPrice === 'number' ? order.currentPrice.toFixed(5) : '-'}</td>
+                <td>{formatPrice(typeof order.openPrice === 'number' ? order.openPrice : null)}</td>
+                <td>{formatPrice(current)}</td>
                 <td>
                   <button
                     type="button"
