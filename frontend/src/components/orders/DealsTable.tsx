@@ -62,16 +62,21 @@ export function DealsTable({
       </table>
 
       {deals.length > 0 && (
-        <div className="form-grid inline">
-          <button type="button" disabled={dealsPage <= 1} onClick={onPreviousPage}>
-            Précédent
-          </button>
-          <span>
-            Page {dealsPage} / {dealsTotalPages} ({dealsPerPage} par page)
-          </span>
-          <button type="button" disabled={dealsPage >= dealsTotalPages} onClick={onNextPage}>
-            Suivant
-          </button>
+        <div className="table-pagination">
+          <p className="table-pagination-meta">
+            {(dealsPage - 1) * dealsPerPage + 1}-{Math.min(deals.length, dealsPage * dealsPerPage)} sur {deals.length}
+          </p>
+          <div className="table-pagination-actions">
+            <button className="btn-ghost btn-small" type="button" disabled={dealsPage <= 1} onClick={onPreviousPage}>
+              Précédent
+            </button>
+            <span>
+              Page {dealsPage} / {dealsTotalPages} ({dealsPerPage} par page)
+            </span>
+            <button className="btn-ghost btn-small" type="button" disabled={dealsPage >= dealsTotalPages} onClick={onNextPage}>
+              Suivant
+            </button>
+          </div>
         </div>
       )}
     </>

@@ -40,7 +40,7 @@ export function LoginPage() {
             <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" required />
           </label>
           {error && <div className="alert">{error}</div>}
-          <button disabled={loading}>{loading ? 'Connexion...' : 'Se connecter'}</button>
+          <button className="btn-primary" disabled={loading}>{loading ? 'Connexion...' : 'Se connecter'}</button>
         </form>
       </div>
     </div>

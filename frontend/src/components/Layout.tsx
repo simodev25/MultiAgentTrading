@@ -2,10 +2,10 @@ import { Link, NavLink } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 
 const navItems = [
-  { to: '/', label: 'Dashboard' },
-  { to: '/orders', label: 'Ordres' },
-  { to: '/backtests', label: 'Backtests' },
-  { to: '/connectors', label: 'Config' },
+  { to: '/', label: 'Dashboard', icon: 'D' },
+  { to: '/orders', label: 'Ordres', icon: 'O' },
+  { to: '/backtests', label: 'Backtests', icon: 'B' },
+  { to: '/connectors', label: 'Paramètres', icon: 'P' },
 ];
 
 export function Layout({ children }: { children: React.ReactNode }) {
@@ -15,27 +15,41 @@ export function Layout({ children }: { children: React.ReactNode }) {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <h1>Forex Desk</h1>
-          <p>Multi-Agent Platform</p>
+          <div className="brand-mark" aria-hidden>
+            FX
+          </div>
+          <div>
+            <h1>Tauric FX</h1>
+            <p>Plateforme Multi-Agent</p>
+          </div>
         </div>
         <nav className="nav">
           {navItems.map((item) => (
             <NavLink key={item.to} to={item.to} end={item.to === '/'} className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
-              {item.label}
+              <span className="nav-icon" aria-hidden>
+                {item.icon}
+              </span>
+              <span>{item.label}</span>
             </NavLink>
           ))}
         </nav>
         <div className="sidebar-footer">
-          <p>{user?.email}</p>
-          <button onClick={logout}>Logout</button>
+          <p>Session active</p>
+          <button className="btn-ghost" onClick={logout}>Logout</button>
         </div>
       </aside>
       <main className="content">
         <header className="topbar">
-          <Link to="/" className="topbar-title">
-            Trading Control Room
-          </Link>
-          <span className="badge role">{user?.role}</span>
+          <div className="topbar-heading">
+            <Link to="/" className="topbar-title">
+              Plateforme Trading Forex
+            </Link>
+            <p className="topbar-subtitle">Dark Premium Control Room</p>
+          </div>
+          <div className="topbar-actions">
+            <span className="badge role">{user?.role}</span>
+            <span className="topbar-user">{user?.email}</span>
+          </div>
         </header>
         {children}
       </main>

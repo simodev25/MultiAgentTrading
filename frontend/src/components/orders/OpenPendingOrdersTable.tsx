@@ -1,6 +1,6 @@
 import type { MetaApiOpenOrder } from '../../types';
 import { resolveTicket } from '../../utils/tradingSymbols';
-import { displaySymbol } from './formatters';
+import { displaySymbol, formatMetaTradingTime, formatMetaTradingType } from './formatters';
 import { TableSkeletonRows } from './TableSkeletonRows';
 
 interface OpenPendingOrdersTableProps {
@@ -46,10 +46,10 @@ export function OpenPendingOrdersTable({
             return (
               <tr key={`${ticket}-${idx}`}>
                 <td>{ticket}</td>
-                <td>{String(order.time ?? order.brokerTime ?? '-')}</td>
+                <td>{formatMetaTradingTime(order.time ?? order.brokerTime)}</td>
                 <td>{displaySymbol(order.symbol)}</td>
-                <td>{String(order.type ?? '-')}</td>
-                <td>{String(order.state ?? '-')}</td>
+                <td>{formatMetaTradingType(order.type)}</td>
+                <td>{formatMetaTradingType(order.state)}</td>
                 <td>{typeof order.volume === 'number' ? order.volume.toFixed(2) : (typeof order.currentVolume === 'number' ? order.currentVolume.toFixed(2) : '-')}</td>
                 <td>{typeof order.openPrice === 'number' ? order.openPrice.toFixed(5) : '-'}</td>
                 <td>{typeof order.currentPrice === 'number' ? order.currentPrice.toFixed(5) : '-'}</td>

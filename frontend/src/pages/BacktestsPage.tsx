@@ -124,7 +124,7 @@ export function BacktestsPage() {
               ))}
             </select>
           </label>
-          <button disabled={loading}>{loading ? 'Calcul...' : 'Lancer backtest'}</button>
+          <button className="btn-primary" disabled={loading}>{loading ? 'Calcul...' : 'Lancer backtest'}</button>
         </form>
         {error && <p className="alert">{error}</p>}
       </section>

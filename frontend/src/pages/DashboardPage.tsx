@@ -23,6 +23,13 @@ const CRON_PRESET_BY_TIMEFRAME: Record<string, string> = {
   H4: '0 */4 * * *',
   D1: '0 0 * * *',
 };
+const TIMEFRAME_HINT_BY_CODE: Record<string, string> = {
+  M5: 'Scalp rapide',
+  M15: 'Intraday',
+  H1: 'Session',
+  H4: 'Swing',
+  D1: 'Tendance',
+};
 const RUNS_PAGE_SIZE = 10;
 
 function parseApiDateMs(value: string): number {
@@ -332,8 +339,8 @@ export function DashboardPage() {
   const runsPageEnd = Math.min(runs.length, runsPage * RUNS_PAGE_SIZE);
 
   return (
-    <div className="dashboard-grid">
-      <section className="card primary">
+    <div className="dashboard-grid dashboard-page">
+      <section className="card primary launch-card">
         <h2>Lancer une analyse Forex</h2>
         <form onSubmit={onSubmit} className="form-grid inline">
           <label>
@@ -375,12 +382,12 @@ export function DashboardPage() {
               ))}
             </select>
           </label>
-          <button disabled={loading}>{loading ? 'En cours...' : 'Démarrer run'}</button>
+          <button className="btn-primary" disabled={loading}>{loading ? 'En cours...' : 'Démarrer run'}</button>
         </form>
         {error && <p className="alert">{error}</p>}
       </section>
 
-      <section className="card stats">
+      <section className="card stats kpi-card">
         <h3>Runs</h3>
         <div className="stats-grid">
           <div>
@@ -402,7 +409,7 @@ export function DashboardPage() {
         </div>
       </section>
 
-      <section className="card primary ai-plan-builder">
+      <section className="card primary ai-plan-builder automation-card">
         <h3>Automatisation intelligente (cron)</h3>
         <form onSubmit={onSubmitSchedule} className="form-grid inline">
           <label>
@@ -478,8 +485,8 @@ export function DashboardPage() {
               required
             />
           </label>
-          <button type="button" onClick={applySmartCronPreset}>Preset timeframe</button>
-          <button disabled={scheduleLoading}>{scheduleLoading ? 'Création...' : 'Créer auto-run'}</button>
+          <button type="button" className="btn-ghost" onClick={applySmartCronPreset}>Preset timeframe</button>
+          <button className="btn-primary" disabled={scheduleLoading}>{scheduleLoading ? 'Création...' : 'Créer auto-run'}</button>
         </form>
         <p className="model-source">
           Exemple cron: <code>*/5 * * * *</code>, <code>0 * * * *</code>, <code>0 8-20 * * 1-5</code>.
@@ -510,21 +517,32 @@ export function DashboardPage() {
               <option value="aggressive">Agressif</option>
             </select>
           </label>
-          <label>
-            TF autorisés
-            <div className="tf-multi-picker">
-              {DEFAULT_TIMEFRAMES.map((item) => (
-                <label key={item} className="tf-chip">
-                  <input
-                    type="checkbox"
-                    checked={autoTimeframes.includes(item)}
-                    onChange={() => setAutoTimeframes((prev) => toggleTf(prev, item))}
-                  />
-                  <span>{item}</span>
-                </label>
-              ))}
+          <div className="tf-field">
+            <div className="tf-field-header">
+              <span className="tf-field-label">TF autorisés</span>
+              <span className="tf-field-meta">{autoTimeframes.length} actifs</span>
             </div>
-          </label>
+            <div className="tf-multi-picker" role="group" aria-label="Timeframes autorisés">
+              {DEFAULT_TIMEFRAMES.map((item) => {
+                const isActive = autoTimeframes.includes(item);
+                return (
+                  <label key={item} className={`tf-chip ${isActive ? 'active' : ''}`}>
+                    <div className="tf-chip-copy">
+                      <span className="tf-chip-code">{item}</span>
+                      <span className="tf-chip-desc">{TIMEFRAME_HINT_BY_CODE[item] ?? 'Personnalisé'}</span>
+                    </div>
+                    <input
+                      className="ui-switch"
+                      type="checkbox"
+                      checked={isActive}
+                      onChange={() => setAutoTimeframes((prev) => toggleTf(prev, item))}
+                      aria-label={`Activer ${item}`}
+                    />
+                  </label>
+                );
+              })}
+            </div>
+          </div>
           <label>
             Mode
             <select value={scheduleMode} onChange={(e) => setScheduleMode(e.target.value as ExecutionMode)}>
@@ -540,12 +558,12 @@ export function DashboardPage() {
               <option value="no">Non (fallback)</option>
             </select>
           </label>
-          <button disabled={autoGenerating}>{autoGenerating ? 'Génération...' : 'Génération automatique'}</button>
+          <button className="btn-primary" disabled={autoGenerating}>{autoGenerating ? 'Génération...' : 'Génération automatique'}</button>
         </form>
         {autoGenerationSummary && <p className="model-source">{autoGenerationSummary}</p>}
         {autoLlmReport && (
           <div className="llm-report-actions">
-            <button type="button" onClick={() => setShowLlmReport((prev) => !prev)}>
+            <button type="button" className="btn-ghost" onClick={() => setShowLlmReport((prev) => !prev)}>
               {showLlmReport ? 'Masquer rapport LLM' : 'Afficher rapport LLM'}
             </button>
           </div>
@@ -558,7 +576,7 @@ export function DashboardPage() {
         )}
       </section>
 
-      <section className="card">
+      <section className="card table-card schedules-card">
         <h3>Planifications actives</h3>
         <table>
           <thead>
@@ -596,11 +614,15 @@ export function DashboardPage() {
                 </td>
                 <td>{schedule.last_error ?? '-'}</td>
                 <td>
-                  <button disabled={scheduleActionId === schedule.id} onClick={() => void runScheduleNow(schedule)}>Run now</button>
-                  <button disabled={scheduleActionId === schedule.id} onClick={() => void toggleSchedule(schedule)}>
+                  <button className="btn-primary btn-small" disabled={scheduleActionId === schedule.id} onClick={() => void runScheduleNow(schedule)}>
+                    Run now
+                  </button>
+                  <button className="btn-warning btn-small" disabled={scheduleActionId === schedule.id} onClick={() => void toggleSchedule(schedule)}>
                     {schedule.is_active ? 'Pause' : 'Activer'}
                   </button>
-                  <button disabled={scheduleActionId === schedule.id} onClick={() => void deleteSchedule(schedule)}>Supprimer</button>
+                  <button className="btn-danger btn-small" disabled={scheduleActionId === schedule.id} onClick={() => void deleteSchedule(schedule)}>
+                    Supprimer
+                  </button>
                 </td>
               </tr>
             ))}
@@ -608,7 +630,7 @@ export function DashboardPage() {
         </table>
       </section>
 
-      <section className="card">
+      <section className="card table-card history-card">
         <h3>Historique récent</h3>
         <table>
           <thead>
@@ -650,12 +672,18 @@ export function DashboardPage() {
               {runsPageStart}-{runsPageEnd} sur {runs.length}
             </p>
             <div className="table-pagination-actions">
-              <button type="button" disabled={runsPage <= 1} onClick={() => setRunsPage((currentPage) => Math.max(1, currentPage - 1))}>
+              <button
+                type="button"
+                className="btn-ghost btn-small"
+                disabled={runsPage <= 1}
+                onClick={() => setRunsPage((currentPage) => Math.max(1, currentPage - 1))}
+              >
                 Précédent
               </button>
               <span>Page {runsPage} / {runsTotalPages}</span>
               <button
                 type="button"
+                className="btn-ghost btn-small"
                 disabled={runsPage >= runsTotalPages}
                 onClick={() => setRunsPage((currentPage) => Math.min(runsTotalPages, currentPage + 1))}
               >

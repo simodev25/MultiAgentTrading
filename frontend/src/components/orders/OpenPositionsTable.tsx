@@ -1,7 +1,7 @@
 import type { MetaApiPosition } from '../../types';
 import { resolveTicket } from '../../utils/tradingSymbols';
 import { formatPrice, resolveStopLoss, resolveTakeProfit } from '../../utils/priceLevels';
-import { displaySymbol } from './formatters';
+import { displaySymbol, formatMetaTradingTime, formatMetaTradingType } from './formatters';
 import { TableSkeletonRows } from './TableSkeletonRows';
 
 interface OpenPositionsTableProps {
@@ -51,9 +51,9 @@ export function OpenPositionsTable({
             return (
               <tr key={`${ticket}-${idx}`}>
                 <td>{ticket}</td>
-                <td>{String(position.time ?? position.brokerTime ?? '-')}</td>
+                <td>{formatMetaTradingTime(position.time ?? position.brokerTime)}</td>
                 <td>{displaySymbol(position.symbol)}</td>
-                <td>{String(position.type ?? '-')}</td>
+                <td>{formatMetaTradingType(position.type)}</td>
                 <td>{typeof position.volume === 'number' ? position.volume.toFixed(2) : '-'}</td>
                 <td>{formatPrice(typeof position.openPrice === 'number' ? position.openPrice : null)}</td>
                 <td>{formatPrice(typeof position.currentPrice === 'number' ? position.currentPrice : null)}</td>

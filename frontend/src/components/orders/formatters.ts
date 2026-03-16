@@ -33,6 +33,43 @@ export function formatExecutionDate(value: unknown): string {
   return EXECUTION_DATE_FORMATTER.format(new Date(ts));
 }
 
+export function formatMetaTradingTime(value: unknown): string {
+  return formatExecutionDate(value);
+}
+
+export function formatMetaTradingType(value: unknown): string {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return '-';
+
+  const normalized = raw
+    .replace(/^POSITION_TYPE_/i, '')
+    .replace(/^ORDER_TYPE_/i, '')
+    .replace(/^ORDER_STATE_/i, '')
+    .replace(/_/g, ' ')
+    .trim()
+    .toLowerCase();
+
+  const aliases: Record<string, string> = {
+    buy: 'Buy',
+    sell: 'Sell',
+    'buy limit': 'Buy Limit',
+    'sell limit': 'Sell Limit',
+    'buy stop': 'Buy Stop',
+    'sell stop': 'Sell Stop',
+    'buy stop limit': 'Buy Stop Limit',
+    'sell stop limit': 'Sell Stop Limit',
+    placed: 'Placed',
+    pending: 'Pending',
+    filled: 'Filled',
+    canceled: 'Canceled',
+    cancelled: 'Cancelled',
+    partial: 'Partial',
+  };
+
+  if (aliases[normalized]) return aliases[normalized];
+  return normalized.replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
 function asText(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();

@@ -101,6 +101,15 @@ const FALLBACK_SYMBOL_GROUPS: MarketSymbolGroup[] = [
   { name: 'crypto', symbols: CRYPTO_PAIRS },
 ];
 
+type ConfigTabId = 'connectors' | 'models' | 'trading' | 'security';
+
+const CONFIG_TABS: Array<{ id: ConfigTabId; label: string }> = [
+  { id: 'connectors', label: 'Connecteurs' },
+  { id: 'models', label: 'Modèles IA' },
+  { id: 'trading', label: 'Trading' },
+  { id: 'security', label: 'Sécurité' },
+];
+
 let editableGroupCounter = 0;
 
 function toEditableGroups(groups: MarketSymbolGroup[]): EditableSymbolGroup[] {
@@ -125,6 +134,7 @@ export function ConnectorsPage() {
 
   const [testResult, setTestResult] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [activeConfigTab, setActiveConfigTab] = useState<ConfigTabId>('models');
 
   const [defaultLlmModel, setDefaultLlmModel] = useState('llama3.1');
   const [agentModels, setAgentModels] = useState<Record<string, string>>(
@@ -480,321 +490,402 @@ export function ConnectorsPage() {
     return specific || fallback;
   };
 
-  return (
-    <div className="dashboard-grid">
-      <section className="card">
-        <h2>Administration config</h2>
-        {error && <p className="alert">{error}</p>}
-        <table>
-          <thead>
-            <tr>
-              <th>Nom</th>
-              <th>Actif</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {connectors.map((connector) => (
-              <tr key={connector.id}>
-                <td>{connector.connector_name}</td>
-                <td>
-                  <span className={`badge ${connector.enabled ? 'ok' : 'blocked'}`}>{connector.enabled ? 'enabled' : 'disabled'}</span>
-                </td>
-                <td>
-                  <button onClick={() => void toggleConnector(connector)}>{connector.enabled ? 'Disable' : 'Enable'}</button>
-                  <button onClick={() => void testConnector(connector.connector_name)}>Test</button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
+  const ollamaConnector = connectors.find((connector) => connector.connector_name === 'ollama');
+  const averageCostPerRun = Number(summary?.successful_calls ?? 0) > 0
+    ? Number(summary?.total_cost_usd ?? 0) / Number(summary?.successful_calls ?? 1)
+    : 0;
+  const averageLatencySeconds = Number(summary?.average_latency_ms ?? 0) / 1000;
 
-      <section className="card stats">
-        <h3>LLM Telemetry</h3>
-        <div className="stats-grid">
-          <div>
-            <span>Calls</span>
-            <strong>{summary?.total_calls ?? 0}</strong>
-          </div>
-          <div>
-            <span>Success</span>
-            <strong>{summary?.successful_calls ?? 0}</strong>
-          </div>
-          <div>
-            <span>Latency ms</span>
-            <strong>{summary?.average_latency_ms ?? 0}</strong>
-          </div>
-          <div>
-            <span>Cost USD</span>
-            <strong>{summary?.total_cost_usd ?? 0}</strong>
+  return (
+    <div className="dashboard-grid config-page">
+      <section className="card primary config-hero">
+        <div className="config-hero-copy">
+          <h2>CONFIGURATION</h2>
+          <p>Gérer les connecteurs, modèles IA et paramètres de trading.</p>
+        </div>
+        <div className="config-hero-status">
+          <p className="config-hero-status-title">
+            <span className={`status-dot ${ollamaConnector?.enabled ? 'ok' : 'blocked'}`} />
+            OLLAMA
+          </p>
+          <div className="config-hero-status-grid">
+            <div>
+              <span>État</span>
+              <strong className={ollamaConnector?.enabled ? 'ok-text' : 'danger-text'}>{ollamaConnector?.enabled ? 'Online' : 'Offline'}</strong>
+            </div>
+            <div>
+              <span>Coût moyen</span>
+              <strong>${averageCostPerRun.toFixed(3)} / run</strong>
+            </div>
+            <div>
+              <span>Latence</span>
+              <strong>{averageLatencySeconds > 0 ? `${averageLatencySeconds.toFixed(1)} s` : '-'}</strong>
+            </div>
           </div>
         </div>
       </section>
 
-      <section className="card">
-        <h3>Modèles LLM par agent</h3>
-        <form className="form-grid" onSubmit={saveAgentModels}>
-          <label>
-            Modèle par défaut (fallback)
-            <input
-              list="ollama-model-choices"
-              value={defaultLlmModel}
-              onChange={(e) => setDefaultLlmModel(e.target.value)}
-              placeholder="llama3.1"
-              required
-            />
-          </label>
-          <datalist id="ollama-model-choices">
-            {modelChoices.map((modelName) => (
-              <option key={modelName} value={modelName} />
-            ))}
-          </datalist>
-          {modelSource && <p className="model-source">Catalogue modèles: <code>{modelSource}</code></p>}
-          {modelsUsage.length > 0 && (
-            <table>
-              <thead>
-                <tr>
-                  <th>LLM réellement utilisé</th>
-                  <th>Calls</th>
-                  <th>Succès</th>
-                  <th>Last seen</th>
-                </tr>
-              </thead>
-              <tbody>
-                {modelsUsage.map((row) => (
-                  <tr key={row.model}>
-                    <td><code>{row.model}</code></td>
-                    <td>{row.calls}</td>
-                    <td>{row.success_calls}</td>
-                    <td>{row.last_seen ? new Date(row.last_seen).toLocaleString() : '-'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-
-          <table>
-            <thead>
-              <tr>
-                <th>Agent</th>
-                <th>LLM actif</th>
-                <th>Modèle</th>
-                <th>LLM effectif</th>
-                <th>Prompt</th>
-              </tr>
-            </thead>
-            <tbody>
-              {ORCHESTRATION_AGENTS.map((agentName) => (
-                <tr key={agentName}>
-                  <td>{agentName}</td>
-                  <td>
-                    <input
-                      type="checkbox"
-                      checked={Boolean(agentLlmEnabled[agentName])}
-                      disabled={!SWITCHABLE_LLM_AGENTS.has(agentName)}
-                      onChange={(e) => setAgentLlmEnabled((prev) => ({ ...prev, [agentName]: e.target.checked }))}
-                    />
-                  </td>
-                  <td>
-                    <input
-                      list="ollama-model-choices"
-                      value={agentModels[agentName] ?? ''}
-                      onChange={(e) => setAgentModels((prev) => ({ ...prev, [agentName]: e.target.value }))}
-                      placeholder={`hérite: ${defaultLlmModel || 'llama3.1'}`}
-                      disabled={!SWITCHABLE_LLM_AGENTS.has(agentName)}
-                    />
-                  </td>
-                  <td>
-                    <code>{effectiveModelFor(agentName)}</code>
-                  </td>
-                  <td>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setPromptAgent(agentName);
-                        document.getElementById('agent-prompts-editor')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                      }}
-                    >
-                      Éditer prompt
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-
-          <button disabled={savingModels}>{savingModels ? 'Enregistrement...' : 'Enregistrer les modèles'}</button>
-        </form>
-      </section>
-
-      <section className="card">
-        <h3>Comptes MetaApi</h3>
-        <form className="form-grid inline" onSubmit={createAccount}>
-          <label>
-            Label
-            <input value={accountLabel} onChange={(e) => setAccountLabel(e.target.value)} required />
-          </label>
-          <label>
-            Account ID
-            <input value={accountId} onChange={(e) => setAccountId(e.target.value)} required />
-          </label>
-          <label>
-            Region
-            <input value={accountRegion} onChange={(e) => setAccountRegion(e.target.value)} required />
-          </label>
-          <button>Ajouter compte</button>
-        </form>
-        <table>
-          <thead>
-            <tr>
-              <th>Label</th>
-              <th>Account ID</th>
-              <th>Region</th>
-              <th>Status</th>
-              <th>Default</th>
-            </tr>
-          </thead>
-          <tbody>
-            {accounts.map((account) => (
-              <tr key={account.id}>
-                <td>{account.label}</td>
-                <td>{account.account_id}</td>
-                <td>{account.region}</td>
-                <td><span className={`badge ${account.enabled ? 'ok' : 'blocked'}`}>{account.enabled ? 'enabled' : 'disabled'}</span></td>
-                <td>
-                  {account.is_default ? (
-                    <span className="badge ok">default</span>
-                  ) : (
-                    <button onClick={() => void setDefaultAccount(account)}>Set default</button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
-
-      <section className="card" id="agent-prompts-editor">
-        <h3>Prompts versionnés (par agent)</h3>
-        <form className="form-grid" onSubmit={createPrompt}>
-          <label>
-            Agent
-            <select value={promptAgent} onChange={(e) => setPromptAgent(e.target.value)}>
-              {ORCHESTRATION_AGENTS.map((agentName) => (
-                <option key={agentName} value={agentName}>
-                  {agentName}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            System prompt
-            <textarea value={promptSystem} onChange={(e) => setPromptSystem(e.target.value)} rows={3} />
-          </label>
-          <label>
-            User template
-            <textarea value={promptUser} onChange={(e) => setPromptUser(e.target.value)} rows={4} />
-          </label>
-          <button disabled={promptSaving}>{promptSaving ? 'Enregistrement...' : 'Créer + activer version'}</button>
-        </form>
-        <p className="model-source">
-          Agent sélectionné: <code>{promptAgent}</code> | version active: <code>v{activePromptByAgent.get(promptAgent)?.version ?? 0}</code>
-        </p>
-        <table>
-          <thead>
-            <tr>
-              <th>Agent</th>
-              <th>Version</th>
-              <th>Status</th>
-              <th>Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {prompts.map((prompt) => (
-              <tr key={prompt.id}>
-                <td>{prompt.agent_name}</td>
-                <td>v{prompt.version}</td>
-                <td><span className={`badge ${prompt.is_active ? 'ok' : 'blocked'}`}>{prompt.is_active ? 'active' : 'inactive'}</span></td>
-                <td>
-                  {!prompt.is_active && <button onClick={() => void activatePrompt(prompt)}>Activer</button>}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
-
-      <section className="card">
-        <h3>Symboles marché</h3>
-        <p className="model-source">
-          Source active: <code>{marketSymbols.source}</code>
-        </p>
-        <form className="form-grid" onSubmit={saveMarketSymbols}>
-          {symbolGroupsInput.map((group) => (
-            <div key={group.id} className="form-grid inline">
-              <label>
-                Groupe
-                <input
-                  value={group.name}
-                  onChange={(e) => updateSymbolGroupRow(group.id, { name: e.target.value })}
-                  placeholder="ex: indices"
-                />
-              </label>
-              <label>
-                Symboles (CSV)
-                <textarea
-                  value={group.symbolsInput}
-                  onChange={(e) => updateSymbolGroupRow(group.id, { symbolsInput: e.target.value })}
-                  rows={2}
-                  placeholder="ex: SPX500,NSDQ100"
-                />
-              </label>
-              <button type="button" onClick={() => removeSymbolGroupRow(group.id)}>
-                Supprimer groupe
-              </button>
-            </div>
-          ))}
-          <div className="form-grid inline">
-            <button type="button" onClick={addSymbolGroupRow}>
-              Ajouter groupe
+      <section className="card config-shell">
+        <div className="config-tabs" role="tablist" aria-label="Configuration tabs">
+          {CONFIG_TABS.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              className={`config-tab ${activeConfigTab === tab.id ? 'active' : ''}`}
+              onClick={() => setActiveConfigTab(tab.id)}
+              role="tab"
+              aria-selected={activeConfigTab === tab.id}
+            >
+              {tab.label}
             </button>
+          ))}
+        </div>
+        {error && <p className="alert">{error}</p>}
+
+        {activeConfigTab === 'connectors' && (
+          <div className="config-panel-grid">
+            <section className="card config-inner-card">
+              <h3>Connecteurs</h3>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Nom</th>
+                    <th>Actif</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {connectors.map((connector) => (
+                    <tr key={connector.id}>
+                      <td>{connector.connector_name}</td>
+                      <td>
+                        <span className={`badge ${connector.enabled ? 'ok' : 'blocked'}`}>{connector.enabled ? 'enabled' : 'disabled'}</span>
+                      </td>
+                      <td>
+                        <button className="btn-ghost btn-small" type="button" onClick={() => void toggleConnector(connector)}>
+                          {connector.enabled ? 'Disable' : 'Enable'}
+                        </button>
+                        <button className="btn-primary btn-small" type="button" onClick={() => void testConnector(connector.connector_name)}>
+                          Test
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+
+            <section className="card config-inner-card">
+              <h3>Résultat test connecteur</h3>
+              <pre>{JSON.stringify(testResult, null, 2)}</pre>
+            </section>
           </div>
-          <button disabled={symbolsSaving}>{symbolsSaving ? 'Enregistrement...' : 'Enregistrer symboles'}</button>
-        </form>
-      </section>
+        )}
 
-      <section className="card">
-        <h3>Mémoire long-terme</h3>
-        <form className="form-grid inline" onSubmit={searchMemory}>
-          <label>
-            Pair
-            <select value={memoryPair} onChange={(e) => setMemoryPair(e.target.value)}>
-              {memoryPairOptions.map((item) => (
-                <option key={item}>{item}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Timeframe
-            <select value={memoryTimeframe} onChange={(e) => setMemoryTimeframe(e.target.value)}>
-              {DEFAULT_TIMEFRAMES.map((item) => (
-                <option key={item}>{item}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Query
-            <input value={memoryQuery} onChange={(e) => setMemoryQuery(e.target.value)} />
-          </label>
-          <button>Search</button>
-        </form>
-        <pre>{JSON.stringify(memoryResults, null, 2)}</pre>
-      </section>
+        {activeConfigTab === 'models' && (
+          <div className="config-panel-grid">
+            <section className="card stats config-inner-card">
+              <h3>LLM Telemetry</h3>
+              <div className="stats-grid">
+                <div>
+                  <span>Calls</span>
+                  <strong>{summary?.total_calls ?? 0}</strong>
+                </div>
+                <div>
+                  <span>Success</span>
+                  <strong>{summary?.successful_calls ?? 0}</strong>
+                </div>
+                <div>
+                  <span>Latency ms</span>
+                  <strong>{summary?.average_latency_ms ?? 0}</strong>
+                </div>
+                <div>
+                  <span>Cost USD</span>
+                  <strong>{summary?.total_cost_usd ?? 0}</strong>
+                </div>
+              </div>
+            </section>
 
-      <section className="card">
-        <h3>Résultat test connecteur</h3>
-        <pre>{JSON.stringify(testResult, null, 2)}</pre>
+            <section className="card config-inner-card">
+              <h3>Modèles LLM par agent</h3>
+              <form className="form-grid" onSubmit={saveAgentModels}>
+                <label>
+                  Modèle principal
+                  <input
+                    list="ollama-model-choices"
+                    value={defaultLlmModel}
+                    onChange={(e) => setDefaultLlmModel(e.target.value)}
+                    placeholder="llama3.1"
+                    required
+                  />
+                </label>
+                <datalist id="ollama-model-choices">
+                  {modelChoices.map((modelName) => (
+                    <option key={modelName} value={modelName} />
+                  ))}
+                </datalist>
+                {modelSource && <p className="model-source">Catalogue modèles: <code>{modelSource}</code></p>}
+                {modelsUsage.length > 0 && (
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>LLM réellement utilisé</th>
+                        <th>Calls</th>
+                        <th>Succès</th>
+                        <th>Last seen</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {modelsUsage.map((row) => (
+                        <tr key={row.model}>
+                          <td><code>{row.model}</code></td>
+                          <td>{row.calls}</td>
+                          <td>{row.success_calls}</td>
+                          <td>{row.last_seen ? new Date(row.last_seen).toLocaleString() : '-'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Agent</th>
+                      <th>LLM actif</th>
+                      <th>Modèle</th>
+                      <th>LLM effectif</th>
+                      <th>Prompt</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ORCHESTRATION_AGENTS.map((agentName) => (
+                      <tr key={agentName}>
+                        <td>{agentName}</td>
+                        <td>
+                          <input
+                            className="ui-switch"
+                            type="checkbox"
+                            checked={Boolean(agentLlmEnabled[agentName])}
+                            disabled={!SWITCHABLE_LLM_AGENTS.has(agentName)}
+                            onChange={(e) => setAgentLlmEnabled((prev) => ({ ...prev, [agentName]: e.target.checked }))}
+                          />
+                        </td>
+                        <td>
+                          <input
+                            list="ollama-model-choices"
+                            value={agentModels[agentName] ?? ''}
+                            onChange={(e) => setAgentModels((prev) => ({ ...prev, [agentName]: e.target.value }))}
+                            placeholder={`hérite: ${defaultLlmModel || 'llama3.1'}`}
+                            disabled={!SWITCHABLE_LLM_AGENTS.has(agentName)}
+                          />
+                        </td>
+                        <td>
+                          <code>{effectiveModelFor(agentName)}</code>
+                        </td>
+                        <td>
+                          <button
+                            type="button"
+                            className="btn-ghost btn-small"
+                            onClick={() => {
+                              setPromptAgent(agentName);
+                              setActiveConfigTab('models');
+                              requestAnimationFrame(() => {
+                                document.getElementById('agent-prompts-editor')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                              });
+                            }}
+                          >
+                            Éditer prompt
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+
+                <button className="btn-primary" disabled={savingModels}>{savingModels ? 'Enregistrement...' : 'Enregistrer les modèles'}</button>
+              </form>
+            </section>
+
+            <section className="card config-inner-card" id="agent-prompts-editor">
+              <h3>Prompts versionnés (par agent)</h3>
+              <form className="form-grid" onSubmit={createPrompt}>
+                <label>
+                  Agent
+                  <select value={promptAgent} onChange={(e) => setPromptAgent(e.target.value)}>
+                    {ORCHESTRATION_AGENTS.map((agentName) => (
+                      <option key={agentName} value={agentName}>
+                        {agentName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  System prompt
+                  <textarea value={promptSystem} onChange={(e) => setPromptSystem(e.target.value)} rows={3} />
+                </label>
+                <label>
+                  User template
+                  <textarea value={promptUser} onChange={(e) => setPromptUser(e.target.value)} rows={4} />
+                </label>
+                <button className="btn-primary" disabled={promptSaving}>{promptSaving ? 'Enregistrement...' : 'Créer + activer version'}</button>
+              </form>
+              <p className="model-source">
+                Agent sélectionné: <code>{promptAgent}</code> | version active: <code>v{activePromptByAgent.get(promptAgent)?.version ?? 0}</code>
+              </p>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Agent</th>
+                    <th>Version</th>
+                    <th>Status</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {prompts.map((prompt) => (
+                    <tr key={prompt.id}>
+                      <td>{prompt.agent_name}</td>
+                      <td>v{prompt.version}</td>
+                      <td><span className={`badge ${prompt.is_active ? 'ok' : 'blocked'}`}>{prompt.is_active ? 'active' : 'inactive'}</span></td>
+                      <td>
+                        {!prompt.is_active && (
+                          <button className="btn-ghost btn-small" type="button" onClick={() => void activatePrompt(prompt)}>
+                            Activer
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          </div>
+        )}
+
+        {activeConfigTab === 'trading' && (
+          <div className="config-panel-grid">
+            <section className="card config-inner-card">
+              <h3>Comptes MetaApi</h3>
+              <form className="form-grid inline" onSubmit={createAccount}>
+                <label>
+                  Label
+                  <input value={accountLabel} onChange={(e) => setAccountLabel(e.target.value)} required />
+                </label>
+                <label>
+                  Account ID
+                  <input value={accountId} onChange={(e) => setAccountId(e.target.value)} required />
+                </label>
+                <label>
+                  Region
+                  <input value={accountRegion} onChange={(e) => setAccountRegion(e.target.value)} required />
+                </label>
+                <button className="btn-primary">Ajouter compte</button>
+              </form>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Label</th>
+                    <th>Account ID</th>
+                    <th>Region</th>
+                    <th>Status</th>
+                    <th>Default</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {accounts.map((account) => (
+                    <tr key={account.id}>
+                      <td>{account.label}</td>
+                      <td>{account.account_id}</td>
+                      <td>{account.region}</td>
+                      <td><span className={`badge ${account.enabled ? 'ok' : 'blocked'}`}>{account.enabled ? 'enabled' : 'disabled'}</span></td>
+                      <td>
+                        {account.is_default ? (
+                          <span className="badge ok">default</span>
+                        ) : (
+                          <button className="btn-ghost btn-small" type="button" onClick={() => void setDefaultAccount(account)}>
+                            Set default
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+
+            <section className="card config-inner-card">
+              <h3>Symboles marché</h3>
+              <p className="model-source">
+                Source active: <code>{marketSymbols.source}</code>
+              </p>
+              <form className="form-grid" onSubmit={saveMarketSymbols}>
+                {symbolGroupsInput.map((group) => (
+                  <div key={group.id} className="form-grid inline symbol-group-row">
+                    <label>
+                      Groupe
+                      <input
+                        value={group.name}
+                        onChange={(e) => updateSymbolGroupRow(group.id, { name: e.target.value })}
+                        placeholder="ex: indices"
+                      />
+                    </label>
+                    <label>
+                      Symboles (CSV)
+                      <textarea
+                        value={group.symbolsInput}
+                        onChange={(e) => updateSymbolGroupRow(group.id, { symbolsInput: e.target.value })}
+                        rows={2}
+                        placeholder="ex: SPX500,NSDQ100"
+                      />
+                    </label>
+                    <button className="btn-danger" type="button" onClick={() => removeSymbolGroupRow(group.id)}>
+                      Supprimer groupe
+                    </button>
+                  </div>
+                ))}
+                <div className="form-grid inline">
+                  <button className="btn-ghost" type="button" onClick={addSymbolGroupRow}>
+                    Ajouter groupe
+                  </button>
+                </div>
+                <button className="btn-primary" disabled={symbolsSaving}>{symbolsSaving ? 'Enregistrement...' : 'Enregistrer symboles'}</button>
+              </form>
+            </section>
+          </div>
+        )}
+
+        {activeConfigTab === 'security' && (
+          <div className="config-panel-grid">
+            <section className="card config-inner-card">
+              <h3>Mémoire long-terme</h3>
+              <form className="form-grid inline" onSubmit={searchMemory}>
+                <label>
+                  Pair
+                  <select value={memoryPair} onChange={(e) => setMemoryPair(e.target.value)}>
+                    {memoryPairOptions.map((item) => (
+                      <option key={item}>{item}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Timeframe
+                  <select value={memoryTimeframe} onChange={(e) => setMemoryTimeframe(e.target.value)}>
+                    {DEFAULT_TIMEFRAMES.map((item) => (
+                      <option key={item}>{item}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Query
+                  <input value={memoryQuery} onChange={(e) => setMemoryQuery(e.target.value)} />
+                </label>
+                <button className="btn-primary">Search</button>
+              </form>
+              <pre>{JSON.stringify(memoryResults, null, 2)}</pre>
+            </section>
+          </div>
+        )}
       </section>
     </div>
   );
