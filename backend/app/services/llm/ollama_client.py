@@ -1,4 +1,5 @@
 import logging
+import threading
 import time
 from typing import Any
 from urllib.parse import urlparse, urlunparse
@@ -30,8 +31,33 @@ def _is_retryable_ollama_error(exc: BaseException) -> bool:
 
 
 class OllamaCloudClient:
+    _shared_client: httpx.Client | None = None
+    _shared_client_timeout_seconds: float | None = None
+    _shared_client_lock = threading.Lock()
+
     def __init__(self) -> None:
         self.settings = get_settings()
+
+    @classmethod
+    def _get_http_client(cls, timeout_seconds: float) -> httpx.Client:
+        safe_timeout = max(float(timeout_seconds), 1.0)
+        with cls._shared_client_lock:
+            if (
+                cls._shared_client is not None
+                and not cls._shared_client.is_closed
+                and cls._shared_client_timeout_seconds == safe_timeout
+            ):
+                return cls._shared_client
+
+            if cls._shared_client is not None and not cls._shared_client.is_closed:
+                cls._shared_client.close()
+
+            cls._shared_client = httpx.Client(
+                timeout=safe_timeout,
+                limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
+            )
+            cls._shared_client_timeout_seconds = safe_timeout
+            return cls._shared_client
 
     def _normalized_api_key(self) -> str:
         key = (self.settings.ollama_api_key or '').strip()
@@ -121,10 +147,10 @@ class OllamaCloudClient:
         reraise=True,
     )
     def _call_remote(self, url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
-        with httpx.Client(timeout=self.settings.ollama_timeout_seconds) as client:
-            response = client.post(url, json=payload, headers=headers)
-            response.raise_for_status()
-            return response.json()
+        client = self._get_http_client(self.settings.ollama_timeout_seconds)
+        response = client.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        return response.json()
 
     @staticmethod
     def _extract_usage(data: dict[str, Any]) -> tuple[str, int, int]:

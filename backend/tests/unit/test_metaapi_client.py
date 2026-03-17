@@ -1,7 +1,9 @@
 import asyncio
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+from app.observability.metrics import metaapi_sdk_circuit_open_total
 from app.services.trading.metaapi_client import MetaApiClient
 
 
@@ -209,6 +211,7 @@ def test_get_market_candles_sdk_skips_empty_symbol_candidate(monkeypatch) -> Non
 
 def test_get_market_candles_rest_skips_empty_symbol_candidate(monkeypatch) -> None:
     client = MetaApiClient()
+    client.settings.metaapi_cache_enabled = False
     monkeypatch.setattr(client, '_resolve_account_id', lambda account_id=None: 'acc-1')
     monkeypatch.setattr(client, '_get_sdk', lambda region=None: None)
     monkeypatch.setattr(client, '_resolve_token', lambda: 'token')
@@ -257,6 +260,258 @@ def test_get_market_candles_rest_skips_empty_symbol_candidate(monkeypatch) -> No
     assert result.get('provider') == 'rest'
     assert result.get('symbol') == 'EURUSD'
     assert len(result.get('candles', [])) == 1
+
+
+def test_get_market_candles_uses_redis_cache(monkeypatch) -> None:
+    client = MetaApiClient()
+    client.settings.metaapi_cache_enabled = True
+    client.settings.metaapi_market_candles_cache_min_ttl_seconds = 5
+    client.settings.metaapi_market_candles_cache_max_ttl_seconds = 5
+    monkeypatch.setattr(client, '_resolve_account_id', lambda account_id=None: 'acc-1')
+
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.store: dict[str, str] = {}
+
+        async def get(self, key: str):
+            return self.store.get(key)
+
+        async def set(self, key: str, value: str, ex: int | None = None):
+            self.store[key] = value
+            return True
+
+        async def scan(self, cursor=0, match: str | None = None, count: int = 200):
+            return 0, []
+
+        async def delete(self, *keys):
+            for key in keys:
+                self.store.pop(key, None)
+            return len(keys)
+
+    candles_call_count = {'count': 0}
+
+    class FakeAccount:
+        state = 'DEPLOYED'
+
+        async def get_historical_candles(self, symbol: str, timeframe: str, start_time, limit: int):
+            candles_call_count['count'] += 1
+            return [
+                {
+                    'time': '2026-03-15T12:00:00Z',
+                    'open': 1.1400,
+                    'high': 1.1420,
+                    'low': 1.1390,
+                    'close': 1.1410,
+                }
+            ]
+
+    class FakeAccountApi:
+        async def get_account(self, account_id: str):
+            return FakeAccount()
+
+    fake_sdk = SimpleNamespace(metatrader_account_api=FakeAccountApi())
+    monkeypatch.setattr(client, '_get_sdk', lambda region=None: fake_sdk)
+    monkeypatch.setattr(client, '_redis', FakeRedis())
+    monkeypatch.setattr(client, '_redis_unavailable_until', 0.0)
+
+    first = asyncio.run(client.get_market_candles(pair='EURUSD.PRO', timeframe='H1', limit=50))
+    second = asyncio.run(client.get_market_candles(pair='EURUSD.PRO', timeframe='H1', limit=50))
+
+    assert first.get('degraded') is False
+    assert second.get('degraded') is False
+    assert candles_call_count['count'] == 1
+    assert first.get('candles') == second.get('candles')
+
+
+def test_get_market_candles_refreshes_cache_on_new_bucket(monkeypatch) -> None:
+    client = MetaApiClient()
+    client.settings.metaapi_cache_enabled = True
+    client.settings.metaapi_market_candles_cache_min_ttl_seconds = 5
+    client.settings.metaapi_market_candles_cache_max_ttl_seconds = 5
+    monkeypatch.setattr(client, '_resolve_account_id', lambda account_id=None: 'acc-1')
+
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.store: dict[str, str] = {}
+
+        async def get(self, key: str):
+            return self.store.get(key)
+
+        async def set(self, key: str, value: str, ex: int | None = None):
+            self.store[key] = value
+            return True
+
+        async def scan(self, cursor=0, match: str | None = None, count: int = 200):
+            return 0, []
+
+        async def delete(self, *keys):
+            for key in keys:
+                self.store.pop(key, None)
+            return len(keys)
+
+    candles_call_count = {'count': 0}
+
+    class FakeAccount:
+        state = 'DEPLOYED'
+
+        async def get_historical_candles(self, symbol: str, timeframe: str, start_time, limit: int):
+            candles_call_count['count'] += 1
+            close = 1.1410 if candles_call_count['count'] == 1 else 1.1425
+            return [
+                {
+                    'time': '2026-03-15T12:00:00Z',
+                    'open': 1.1400,
+                    'high': 1.1430,
+                    'low': 1.1390,
+                    'close': close,
+                }
+            ]
+
+    class FakeAccountApi:
+        async def get_account(self, account_id: str):
+            return FakeAccount()
+
+    fake_sdk = SimpleNamespace(metatrader_account_api=FakeAccountApi())
+    monkeypatch.setattr(client, '_get_sdk', lambda region=None: fake_sdk)
+    monkeypatch.setattr(client, '_redis', FakeRedis())
+    monkeypatch.setattr(client, '_redis_unavailable_until', 0.0)
+
+    buckets = iter([100, 100, 101])
+    monkeypatch.setattr(client, '_market_candles_cache_bucket', lambda normalized_timeframe: next(buckets))
+
+    first = asyncio.run(client.get_market_candles(pair='EURUSD.PRO', timeframe='H1', limit=50))
+    second = asyncio.run(client.get_market_candles(pair='EURUSD.PRO', timeframe='H1', limit=50))
+    third = asyncio.run(client.get_market_candles(pair='EURUSD.PRO', timeframe='H1', limit=50))
+
+    assert candles_call_count['count'] == 2
+    assert first.get('candles') == second.get('candles')
+    assert third.get('candles') != second.get('candles')
+
+
+def test_get_account_information_uses_redis_cache(monkeypatch) -> None:
+    client = MetaApiClient()
+    client.settings.metaapi_cache_enabled = True
+    client.settings.metaapi_account_info_cache_ttl_seconds = 10
+    monkeypatch.setattr(client, '_resolve_account_id', lambda account_id=None: 'acc-1')
+
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.store: dict[str, str] = {}
+
+        async def get(self, key: str):
+            return self.store.get(key)
+
+        async def set(self, key: str, value: str, ex: int | None = None):
+            self.store[key] = value
+            return True
+
+        async def scan(self, cursor=0, match: str | None = None, count: int = 200):
+            return 0, []
+
+        async def delete(self, *keys):
+            for key in keys:
+                self.store.pop(key, None)
+            return len(keys)
+
+    account_info_call_count = {'count': 0}
+
+    class FakeConnection:
+        async def connect(self):
+            return None
+
+        async def wait_synchronized(self):
+            return None
+
+        async def get_account_information(self):
+            account_info_call_count['count'] += 1
+            return {'balance': 1000 + account_info_call_count['count']}
+
+        async def close(self):
+            return None
+
+    class FakeAccount:
+        state = 'DEPLOYED'
+        connection_status = 'CONNECTED'
+
+        def get_rpc_connection(self):
+            return FakeConnection()
+
+    class FakeAccountApi:
+        async def get_account(self, account_id: str):
+            return FakeAccount()
+
+    fake_sdk = SimpleNamespace(metatrader_account_api=FakeAccountApi())
+    monkeypatch.setattr(client, '_get_sdk', lambda region=None: fake_sdk)
+    monkeypatch.setattr(client, '_redis', FakeRedis())
+    monkeypatch.setattr(client, '_redis_unavailable_until', 0.0)
+
+    first = asyncio.run(client.get_account_information())
+    second = asyncio.run(client.get_account_information())
+
+    assert first.get('degraded') is False
+    assert second.get('degraded') is False
+    assert account_info_call_count['count'] == 1
+    assert first.get('account_info') == second.get('account_info')
+
+
+def test_get_account_information_sdk_timeout_uses_rest_and_opens_circuit(monkeypatch) -> None:
+    client = MetaApiClient()
+    client.settings.metaapi_sdk_request_timeout_seconds = 0.01
+    client.settings.metaapi_sdk_circuit_breaker_seconds = 30
+    monkeypatch.setattr(client, '_resolve_account_id', lambda account_id=None: 'acc-1')
+
+    class FakeAccountApi:
+        async def get_account(self, account_id: str):
+            await asyncio.sleep(0.05)
+            return SimpleNamespace(state='DEPLOYED', connection_status='CONNECTED')
+
+    fake_sdk = SimpleNamespace(metatrader_account_api=FakeAccountApi())
+    monkeypatch.setattr(client, '_get_sdk', lambda region=None: fake_sdk)
+
+    async def fake_rest_get(*args, **kwargs):
+        return {'degraded': False, 'payload': {'balance': 1234}, 'endpoint': 'mock'}
+
+    monkeypatch.setattr(client, '_rest_get', fake_rest_get)
+
+    counter = metaapi_sdk_circuit_open_total.labels(region='london', operation='account_info')
+    before = counter._value.get()
+
+    result = asyncio.run(client.get_account_information(region='london'))
+    after = counter._value.get()
+
+    assert result.get('degraded') is False
+    assert result.get('provider') == 'rest'
+    assert result.get('account_info', {}).get('balance') == 1234
+    assert client._sdk_circuit_remaining_seconds('acc-1', 'london') > 0
+    assert after > before
+
+
+def test_get_account_information_skips_sdk_when_circuit_is_open(monkeypatch) -> None:
+    client = MetaApiClient()
+    monkeypatch.setattr(client, '_resolve_account_id', lambda account_id=None: 'acc-1')
+
+    calls = {'sdk': 0}
+
+    class FakeAccountApi:
+        async def get_account(self, account_id: str):
+            calls['sdk'] += 1
+            return SimpleNamespace(state='DEPLOYED', connection_status='CONNECTED')
+
+    fake_sdk = SimpleNamespace(metatrader_account_api=FakeAccountApi())
+    monkeypatch.setattr(client, '_get_sdk', lambda region=None: fake_sdk)
+
+    async def fake_rest_get(*args, **kwargs):
+        return {'degraded': False, 'payload': {'balance': 2000}, 'endpoint': 'mock'}
+
+    monkeypatch.setattr(client, '_rest_get', fake_rest_get)
+    client._sdk_circuit_open_until[client._sdk_circuit_key('acc-1', 'london')] = time.monotonic() + 30
+
+    result = asyncio.run(client.get_account_information(region='london'))
+
+    assert result.get('degraded') is False
+    assert result.get('provider') == 'rest'
+    assert result.get('account_info', {}).get('balance') == 2000
+    assert calls['sdk'] == 0
 
 
 def test_get_deals_uses_sdk_even_when_market_data_flag_disabled(monkeypatch) -> None:

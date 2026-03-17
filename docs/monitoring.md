@@ -30,6 +30,11 @@ Métriques clés:
 - `llm_prompt_tokens_total{model}`
 - `llm_completion_tokens_total{model}`
 - `external_provider_failures_total{provider}`
+- `backend_http_requests_total{method,route,status}`
+- `backend_http_request_duration_seconds_*`
+- `metaapi_sdk_circuit_open_total{region,operation}`
+- `metaapi_cache_hits_total{resource}`, `metaapi_cache_misses_total{resource}`
+- `yfinance_cache_hits_total{resource}`, `yfinance_cache_misses_total{resource}`
 
 ## Grafana
 
@@ -38,6 +43,8 @@ Métriques clés:
 - Dashboard provisionné:
   - `Forex Platform - LLM & Orchestrator`
   - fichier: `infra/docker/grafana/dashboards/llm-observability.json`
+  - `Forex Platform - Backend Performance & Cache`
+  - fichier: `infra/docker/grafana/dashboards/backend-performance.json`
 
 Panels disponibles:
 
@@ -45,6 +52,10 @@ Panels disponibles:
 - LLM Latency p95
 - LLM Estimated Cost USD/min par modèle
 - Orchestrator Step Latency p95 par agent
+- HTTP throughput/latence par route
+- HTTP error rate 5xx
+- MetaApi SDK circuit opens/min
+- Cache hit ratio et volume d'opérations cache (MetaApi + yfinance)
 
 ## Analytics API (complément Grafana)
 

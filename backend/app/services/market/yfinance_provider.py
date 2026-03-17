@@ -1,23 +1,39 @@
 import logging
+import json
 import re
+import time
+from datetime import datetime, timezone
+from io import StringIO
 from typing import Any
 
 import pandas as pd
+import redis
 import yfinance as yf
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator, MACD
 from ta.volatility import AverageTrueRange
 
+from app.core.config import get_settings
+from app.observability.metrics import yfinance_cache_hits_total, yfinance_cache_misses_total
+
 logger = logging.getLogger(__name__)
 
 
 class YFinanceMarketProvider:
+    _CACHE_PREFIX = 'yfinance:v1'
     interval_map = {
         'M5': ('5m', '7d'),
         'M15': ('15m', '30d'),
         'H1': ('60m', '90d'),
         'H4': ('60m', '180d'),
         'D1': ('1d', '365d'),
+    }
+    timeframe_seconds_map = {
+        'M5': 300,
+        'M15': 900,
+        'H1': 3600,
+        'H4': 14400,
+        'D1': 86400,
     }
     index_alias_map = {
         'SPX500': '^GSPC',
@@ -33,6 +49,109 @@ class YFinanceMarketProvider:
         'JP225': '^N225',
         'NIKKEI225': '^N225',
     }
+
+    def __init__(self) -> None:
+        self.settings = get_settings()
+        self._redis = None
+        self._redis_unavailable_until = 0.0
+        if self.settings.yfinance_cache_enabled:
+            try:
+                self._redis = redis.from_url(
+                    self.settings.redis_url,
+                    encoding='utf-8',
+                    decode_responses=True,
+                    socket_connect_timeout=self.settings.yfinance_cache_connect_timeout_seconds,
+                    socket_timeout=self.settings.yfinance_cache_connect_timeout_seconds,
+                )
+            except Exception as exc:  # pragma: no cover
+                logger.warning('yfinance redis cache unavailable: %s', exc)
+                self._redis = None
+
+    def _cache_enabled(self) -> bool:
+        if not self.settings.yfinance_cache_enabled or self._redis is None:
+            return False
+        return time.monotonic() >= self._redis_unavailable_until
+
+    def _cache_degrade(self, exc: Exception) -> None:
+        self._redis_unavailable_until = time.monotonic() + 15.0
+        logger.debug('yfinance redis cache degraded temporarily: %s', exc)
+
+    @classmethod
+    def _cache_key(cls, *parts: Any) -> str:
+        normalized = [str(part).strip().replace(' ', '_') for part in parts]
+        return ':'.join([cls._CACHE_PREFIX, *normalized])
+
+    def _cache_get_json(self, key: str, resource: str = 'unknown') -> dict[str, Any] | None:
+        if not self._cache_enabled():
+            return None
+        try:
+            raw = self._redis.get(key)
+            if not raw:
+                yfinance_cache_misses_total.labels(resource=resource).inc()
+                return None
+            payload = json.loads(raw)
+            if isinstance(payload, dict):
+                yfinance_cache_hits_total.labels(resource=resource).inc()
+                return payload
+            yfinance_cache_misses_total.labels(resource=resource).inc()
+            return None
+        except Exception as exc:  # pragma: no cover
+            self._cache_degrade(exc)
+            return None
+
+    def _cache_set_json(self, key: str, payload: dict[str, Any], ttl_seconds: int) -> None:
+        if not self._cache_enabled():
+            return
+        safe_ttl = max(int(ttl_seconds or 0), 1)
+        try:
+            self._redis.set(
+                key,
+                json.dumps(payload, default=str, ensure_ascii=True, separators=(',', ':')),
+                ex=safe_ttl,
+            )
+        except Exception as exc:  # pragma: no cover
+            self._cache_degrade(exc)
+
+    def _cache_get_frame(self, key: str, resource: str = 'historical') -> pd.DataFrame | None:
+        payload = self._cache_get_json(key, resource=resource)
+        if payload is None:
+            return None
+        frame_payload = payload.get('frame')
+        if not isinstance(frame_payload, str) or not frame_payload:
+            return None
+        try:
+            frame = pd.read_json(StringIO(frame_payload), orient='split')
+            if not isinstance(frame, pd.DataFrame):
+                return None
+            return frame
+        except Exception as exc:  # pragma: no cover
+            self._cache_degrade(exc)
+            return None
+
+    def _cache_set_frame(self, key: str, frame: pd.DataFrame, ttl_seconds: int) -> None:
+        if frame.empty:
+            return
+        if len(frame) > max(int(self.settings.yfinance_cache_frame_max_rows), 100):
+            return
+        try:
+            frame_json = frame.to_json(orient='split', date_format='iso')
+        except Exception:  # pragma: no cover
+            return
+        self._cache_set_json(key, {'frame': frame_json}, ttl_seconds)
+
+    def _timeframe_seconds(self, timeframe: str) -> int:
+        return self.timeframe_seconds_map.get(str(timeframe or '').strip().upper(), 3600)
+
+    def _snapshot_ttl_seconds(self, timeframe: str) -> int:
+        min_ttl = max(int(self.settings.yfinance_snapshot_cache_min_ttl_seconds), 1)
+        max_ttl = max(int(self.settings.yfinance_snapshot_cache_max_ttl_seconds), min_ttl)
+        adaptive = max(2, self._timeframe_seconds(timeframe) // 120)
+        return max(min_ttl, min(max_ttl, adaptive))
+
+    def _timeframe_cache_bucket(self, timeframe: str, now: datetime | None = None) -> int:
+        timeframe_seconds = max(self._timeframe_seconds(timeframe), 1)
+        ts = (now or datetime.now(timezone.utc)).timestamp()
+        return int(ts // timeframe_seconds)
 
     @staticmethod
     def _normalize_pair(pair: str) -> str:
@@ -127,6 +246,18 @@ class YFinanceMarketProvider:
         return frame
 
     def get_market_snapshot(self, pair: str, timeframe: str) -> dict[str, Any]:
+        pair_key = self._normalize_pair(pair) or str(pair or '').strip().upper()
+        timeframe_key = str(timeframe or '').strip().upper() or 'H1'
+        snapshot_cache_key = self._cache_key(
+            'snapshot',
+            pair_key,
+            timeframe_key,
+            self._timeframe_cache_bucket(timeframe_key),
+        )
+        cached_snapshot = self._cache_get_json(snapshot_cache_key, resource='snapshot')
+        if cached_snapshot is not None:
+            return cached_snapshot
+
         try:
             frame, used_symbol = self._fetch_history_with_fallback(pair, timeframe)
             if frame.empty:
@@ -150,7 +281,7 @@ class YFinanceMarketProvider:
             if abs(ema_fast - ema_slow) < latest * 0.0003:
                 trend = 'neutral'
 
-            return {
+            resolved = {
                 'degraded': False,
                 'pair': pair,
                 'timeframe': timeframe,
@@ -164,11 +295,30 @@ class YFinanceMarketProvider:
                 'atr': round(float(atr), 6),
                 'trend': trend,
             }
+            self._cache_set_json(
+                snapshot_cache_key,
+                resolved,
+                self._snapshot_ttl_seconds(timeframe_key),
+            )
+            return resolved
         except Exception as exc:  # pragma: no cover - third-party failures are expected in degraded mode
             logger.exception('yfinance market snapshot failure pair=%s timeframe=%s', pair, timeframe)
             return {'degraded': True, 'error': str(exc), 'pair': pair, 'timeframe': timeframe}
 
     def get_historical_candles(self, pair: str, timeframe: str, start_date: str, end_date: str) -> pd.DataFrame:
+        pair_key = self._normalize_pair(pair) or str(pair or '').strip().upper()
+        timeframe_key = str(timeframe or '').strip().upper() or 'H1'
+        history_cache_key = self._cache_key(
+            'historical',
+            pair_key,
+            timeframe_key,
+            str(start_date or ''),
+            str(end_date or ''),
+        )
+        cached_frame = self._cache_get_frame(history_cache_key, resource='historical')
+        if cached_frame is not None:
+            return cached_frame
+
         try:
             frame, _ = self._fetch_history_with_fallback(
                 pair,
@@ -176,12 +326,24 @@ class YFinanceMarketProvider:
                 start_date=start_date,
                 end_date=end_date,
             )
+            self._cache_set_frame(
+                history_cache_key,
+                frame,
+                self.settings.yfinance_historical_cache_ttl_seconds,
+            )
             return frame
         except Exception as exc:  # pragma: no cover
             logger.exception('yfinance historical retrieval failure pair=%s timeframe=%s', pair, timeframe)
             return pd.DataFrame()
 
     def get_news_context(self, pair: str, limit: int = 5) -> dict[str, Any]:
+        pair_key = self._normalize_pair(pair) or str(pair or '').strip().upper()
+        safe_limit = max(int(limit or 1), 1)
+        news_cache_key = self._cache_key('news', pair_key, safe_limit)
+        cached_news = self._cache_get_json(news_cache_key, resource='news')
+        if cached_news is not None:
+            return cached_news
+
         try:
             last_symbol: str | None = None
             for symbol in self._ticker_candidates(pair):
@@ -205,9 +367,13 @@ class YFinanceMarketProvider:
                     )
 
                 if selected:
-                    return {'degraded': False, 'pair': pair, 'symbol': symbol, 'news': selected}
+                    resolved = {'degraded': False, 'pair': pair, 'symbol': symbol, 'news': selected}
+                    self._cache_set_json(news_cache_key, resolved, self.settings.yfinance_news_cache_ttl_seconds)
+                    return resolved
 
-            return {'degraded': False, 'pair': pair, 'symbol': last_symbol, 'news': []}
+            resolved = {'degraded': False, 'pair': pair, 'symbol': last_symbol, 'news': []}
+            self._cache_set_json(news_cache_key, resolved, self.settings.yfinance_news_cache_ttl_seconds)
+            return resolved
         except Exception as exc:  # pragma: no cover
             logger.exception('yfinance news retrieval failure pair=%s', pair)
             return {'degraded': True, 'pair': pair, 'news': [], 'error': str(exc)}

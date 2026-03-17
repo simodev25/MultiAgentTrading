@@ -1,8 +1,9 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from time import perf_counter
 
-from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
@@ -21,6 +22,7 @@ from app.db.models.metaapi_account import MetaApiAccount
 from app.db.models.run import AnalysisRun
 from app.db.models.user import User
 from app.db.session import SessionLocal, engine, get_db
+from app.observability.metrics import backend_http_request_duration_seconds, backend_http_requests_total
 from app.services.prompts.registry import PromptTemplateService
 
 logger = logging.getLogger(__name__)
@@ -96,6 +98,30 @@ if settings.open_telemetry_enabled:
     FastAPIInstrumentor.instrument_app(app)
 
 
+def _request_route_template(request: Request) -> str:
+    route = request.scope.get('route')
+    path_template = getattr(route, 'path', None)
+    if isinstance(path_template, str) and path_template:
+        return path_template
+    return request.url.path or 'unknown'
+
+
+@app.middleware('http')
+async def prometheus_request_metrics(request: Request, call_next):
+    started = perf_counter()
+    method = (request.method or 'UNKNOWN').upper()
+    status = '500'
+    try:
+        response = await call_next(request)
+        status = str(getattr(response, 'status_code', 500))
+        return response
+    finally:
+        duration = max(perf_counter() - started, 0.0)
+        route = _request_route_template(request)
+        backend_http_requests_total.labels(method=method, route=route, status=status).inc()
+        backend_http_request_duration_seconds.labels(method=method, route=route).observe(duration)
+
+
 @app.get('/metrics')
 def metrics() -> PlainTextResponse:
     return PlainTextResponse(generate_latest().decode('utf-8'), media_type=CONTENT_TYPE_LATEST)
@@ -104,30 +130,48 @@ def metrics() -> PlainTextResponse:
 @app.websocket('/ws/runs/{run_id}')
 async def run_updates_socket(websocket: WebSocket, run_id: int) -> None:
     await websocket.accept()
+    poll_interval = max(float(settings.ws_run_poll_seconds), 0.5)
+    last_signature: tuple[str, str] | None = None
     try:
         while True:
             db: Session = SessionLocal()
             try:
-                run = db.get(AnalysisRun, run_id)
-                if not run:
+                row = (
+                    db.query(
+                        AnalysisRun.id,
+                        AnalysisRun.status,
+                        AnalysisRun.decision,
+                        AnalysisRun.updated_at,
+                    )
+                    .filter(AnalysisRun.id == run_id)
+                    .first()
+                )
+                if not row:
                     await websocket.send_json({'error': 'Run not found'})
                     await websocket.close(code=1008)
                     return
-                await websocket.send_json(
-                    {
-                        'id': run.id,
-                        'status': run.status,
-                        'decision': run.decision,
-                        'updated_at': run.updated_at.isoformat(),
-                    }
-                )
-                if run.status in {'completed', 'failed'}:
+                decision = row.decision
+                if isinstance(decision, dict):
+                    decision = decision.get('decision') or decision
+                updated_at = row.updated_at.isoformat()
+                signature = (str(row.status), updated_at)
+                if signature != last_signature:
+                    await websocket.send_json(
+                        {
+                            'id': row.id,
+                            'status': row.status,
+                            'decision': decision,
+                            'updated_at': updated_at,
+                        }
+                    )
+                    last_signature = signature
+                if row.status in {'completed', 'failed'}:
                     await websocket.close(code=1000)
                     return
             finally:
                 db.close()
 
-            await asyncio.sleep(2)
+            await asyncio.sleep(poll_interval)
     except WebSocketDisconnect:
         return
 
@@ -135,12 +179,24 @@ async def run_updates_socket(websocket: WebSocket, run_id: int) -> None:
 @app.websocket('/ws/trading/orders')
 async def trading_orders_socket(websocket: WebSocket) -> None:
     await websocket.accept()
+    poll_interval = max(float(settings.ws_trading_orders_poll_seconds), 0.5)
     last_order_id: int | None = None
     try:
         while True:
             db: Session = SessionLocal()
             try:
-                order = db.query(ExecutionOrder).order_by(ExecutionOrder.id.desc()).first()
+                order = (
+                    db.query(
+                        ExecutionOrder.id,
+                        ExecutionOrder.run_id,
+                        ExecutionOrder.mode,
+                        ExecutionOrder.status,
+                        ExecutionOrder.symbol,
+                        ExecutionOrder.created_at,
+                    )
+                    .order_by(ExecutionOrder.id.desc())
+                    .first()
+                )
                 if order and order.id != last_order_id:
                     event_type = 'snapshot' if last_order_id is None else 'execution-order'
                     await websocket.send_json(
@@ -160,7 +216,7 @@ async def trading_orders_socket(websocket: WebSocket) -> None:
             finally:
                 db.close()
 
-            await asyncio.sleep(2)
+            await asyncio.sleep(poll_interval)
     except WebSocketDisconnect:
         return
 

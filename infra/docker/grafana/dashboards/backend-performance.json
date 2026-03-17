@@ -1,0 +1,228 @@
+{
+  "id": null,
+  "title": "Forex Platform - Backend Performance & Cache",
+  "tags": ["forex", "backend", "performance", "cache", "metaapi"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "HTTP Requests / s",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "targets": [
+        {
+          "expr": "sum(rate(backend_http_requests_total[1m]))",
+          "legendFormat": "req/s"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 2
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "HTTP Error Rate 5xx (%)",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "targets": [
+        {
+          "expr": "100 * sum(rate(backend_http_requests_total{status=~\"5..\"}[5m])) / clamp_min(sum(rate(backend_http_requests_total[5m])), 0.0001)",
+          "legendFormat": "5xx %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "MetaApi Cache Hit Ratio (%)",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "targets": [
+        {
+          "expr": "100 * sum(rate(metaapi_cache_hits_total[5m])) / clamp_min(sum(rate(metaapi_cache_hits_total[5m])) + sum(rate(metaapi_cache_misses_total[5m])), 0.0001)",
+          "legendFormat": "metaapi hit ratio %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "YFinance Cache Hit Ratio (%)",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "targets": [
+        {
+          "expr": "100 * sum(rate(yfinance_cache_hits_total[5m])) / clamp_min(sum(rate(yfinance_cache_hits_total[5m])) + sum(rate(yfinance_cache_misses_total[5m])), 0.0001)",
+          "legendFormat": "yfinance hit ratio %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "HTTP Throughput by Status (req/s)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "targets": [
+        {
+          "expr": "sum(rate(backend_http_requests_total[1m])) by (status)",
+          "legendFormat": "status {{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 2
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "API Latency p95 by Route (s)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(backend_http_request_duration_seconds_bucket[5m])) by (le, route))",
+          "legendFormat": "{{route}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 3
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "API Mean Latency by Route (s)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "targets": [
+        {
+          "expr": "sum(rate(backend_http_request_duration_seconds_sum[5m])) by (route) / clamp_min(sum(rate(backend_http_request_duration_seconds_count[5m])) by (route), 0.0001)",
+          "legendFormat": "{{route}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 3
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "MetaApi SDK Circuit Opens / min",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+      "targets": [
+        {
+          "expr": "sum(rate(metaapi_sdk_circuit_open_total[5m])) by (region, operation) * 60",
+          "legendFormat": "{{region}} / {{operation}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cpm",
+          "decimals": 2
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "MetaApi Cache Ops / min",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
+      "targets": [
+        {
+          "expr": "sum(rate(metaapi_cache_hits_total[5m])) by (resource) * 60",
+          "legendFormat": "hit {{resource}}"
+        },
+        {
+          "expr": "sum(rate(metaapi_cache_misses_total[5m])) by (resource) * 60",
+          "legendFormat": "miss {{resource}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cpm",
+          "decimals": 2
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "YFinance Cache Ops / min",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20},
+      "targets": [
+        {
+          "expr": "sum(rate(yfinance_cache_hits_total[5m])) by (resource) * 60",
+          "legendFormat": "hit {{resource}}"
+        },
+        {
+          "expr": "sum(rate(yfinance_cache_misses_total[5m])) by (resource) * 60",
+          "legendFormat": "miss {{resource}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cpm",
+          "decimals": 2
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "External Provider Failures / min",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 28},
+      "targets": [
+        {
+          "expr": "sum(rate(external_provider_failures_total[5m])) by (provider) * 60",
+          "legendFormat": "{{provider}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cpm",
+          "decimals": 2
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

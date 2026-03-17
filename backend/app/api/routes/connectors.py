@@ -8,6 +8,7 @@ from app.db.models.connector_config import ConnectorConfig
 from app.db.session import get_db
 from app.schemas.connector import ConnectorConfigOut, ConnectorConfigUpdate, MarketSymbolsOut, MarketSymbolsUpdate
 from app.services.llm.ollama_client import OllamaCloudClient
+from app.services.llm.model_selector import AgentModelSelector
 from app.services.market.symbols import get_market_symbols_config, save_market_symbols_config
 from app.services.market.yfinance_provider import YFinanceMarketProvider
 from app.services.memory.vector_memory import VectorMemoryService
@@ -125,6 +126,8 @@ def update_connector(
     conn.settings = payload.settings
     db.commit()
     db.refresh(conn)
+    if connector_name == 'ollama':
+        AgentModelSelector.clear_cache()
     return ConnectorConfigOut.model_validate(conn)
 
 

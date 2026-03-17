@@ -6,6 +6,7 @@ import type { MetaApiAccount, MetaApiDeal, MetaApiHistoryOrder, MetaApiOpenOrder
 const REFRESH_DEBOUNCE_MS = 1200;
 const WS_RECONNECT_DELAY_MS = 3000;
 const WS_REFRESH_DEBOUNCE_MS = 1500;
+const WS_HEAVY_REFRESH_MIN_INTERVAL_MS = 45000;
 const LIVE_EXPOSURE_POLL_MS = runtimeConfig.metaApiRealtimePricesPollMs;
 const LIVE_EXPOSURE_SDK_MIN_POLL_MS = 20000;
 const LIVE_EXPOSURE_RATE_LIMIT_COOLDOWN_MS = 65000;
@@ -44,6 +45,7 @@ export function useMetaTradingData(token: string | null) {
   const openExposureCooldownUntilMsRef = useRef(0);
   const lastManualRefreshMsRef = useRef(0);
   const lastEventRefreshMsRef = useRef(0);
+  const lastHeavyRefreshMsRef = useRef(0);
   const liveExposurePollMs = useMemo(() => {
     const sdkProvider = openPositionsProvider === 'sdk' || openOrdersProvider === 'sdk';
     if (!sdkProvider) return LIVE_EXPOSURE_POLL_MS;
@@ -195,6 +197,7 @@ export function useMetaTradingData(token: string | null) {
         setMetaFeatureDisabled(reason.includes('ENABLE_METAAPI_REAL_TRADES_DASHBOARD'));
       }
       await loadOpenExposure(selectedRef, 'full', source === 'manual' ? 'manual' : 'auto');
+      lastHeavyRefreshMsRef.current = Date.now();
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to load MetaApi trades';
       setDeals([]);
@@ -338,7 +341,11 @@ export function useMetaTradingData(token: string | null) {
         const now = Date.now();
         if (now - lastEventRefreshMsRef.current < WS_REFRESH_DEBOUNCE_MS) return;
         lastEventRefreshMsRef.current = now;
-        void loadMetaTrading(accountRef);
+        if (now - lastHeavyRefreshMsRef.current >= WS_HEAVY_REFRESH_MIN_INTERVAL_MS) {
+          void loadMetaTrading(accountRef);
+          return;
+        }
+        void loadOpenExposure(accountRef, 'full', 'auto');
       };
 
       socket.onerror = () => {
@@ -364,7 +371,7 @@ export function useMetaTradingData(token: string | null) {
         socket.close();
       }
     };
-  }, [token, accountRef, metaFeatureDisabled, initialMetaLoadDone, accounts.length, loadMetaTrading]);
+  }, [token, accountRef, metaFeatureDisabled, initialMetaLoadDone, accounts.length, loadMetaTrading, loadOpenExposure]);
 
   return {
     accounts,

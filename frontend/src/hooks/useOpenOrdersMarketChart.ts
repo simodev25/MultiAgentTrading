@@ -130,6 +130,7 @@ export function useOpenOrdersMarketChart(
     lastAutoRefreshBoundaryRef.current = Math.floor(now / chartTimeframeMs);
 
     const intervalId = window.setInterval(() => {
+      if (document.visibilityState === 'hidden') return;
       const current = Date.now();
       setChartClockMs(current);
       const currentBoundary = Math.floor(current / chartTimeframeMs);

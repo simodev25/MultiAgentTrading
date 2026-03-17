@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api/client';
 import { DEFAULT_PAIR, DEFAULT_TIMEFRAMES } from '../constants/markets';
@@ -31,6 +31,7 @@ const TIMEFRAME_HINT_BY_CODE: Record<string, string> = {
   D1: 'Tendance',
 };
 const RUNS_PAGE_SIZE = 10;
+const SCHEDULES_POLL_EVERY_N_TICKS = 3;
 
 function parseApiDateMs(value: string): number {
   const raw = String(value ?? '').trim();
@@ -107,30 +108,44 @@ export function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(Date.now());
   const [runsPage, setRunsPage] = useState(1);
+  const runsLoadingRef = useRef(false);
+  const schedulesLoadingRef = useRef(false);
+  const schedulesPollTickRef = useRef(0);
 
-  const loadRuns = async () => {
-    if (!token) return;
+  const loadRuns = useCallback(async () => {
+    if (!token || runsLoadingRef.current) return;
+    runsLoadingRef.current = true;
     try {
       const data = (await api.listRuns(token)) as Run[];
       setRuns(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load runs');
+    } finally {
+      runsLoadingRef.current = false;
     }
-  };
+  }, [token]);
 
-  const loadSchedules = async () => {
-    if (!token) return;
+  const loadSchedules = useCallback(async (force = true) => {
+    if (!token || schedulesLoadingRef.current) return;
+    if (!force) {
+      schedulesPollTickRef.current = (schedulesPollTickRef.current + 1) % SCHEDULES_POLL_EVERY_N_TICKS;
+      if (schedulesPollTickRef.current !== 0) return;
+    }
+    schedulesLoadingRef.current = true;
     try {
       const data = (await api.listSchedules(token)) as ScheduledRun[];
       setSchedules(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load schedules');
+    } finally {
+      schedulesLoadingRef.current = false;
     }
-  };
+  }, [token]);
 
   useEffect(() => {
     void loadRuns();
-    void loadSchedules();
+    void loadSchedules(true);
+    schedulesPollTickRef.current = 0;
     if (token) {
       void api
         .listMetaApiAccounts(token)
@@ -148,12 +163,24 @@ export function DashboardPage() {
           setScheduleMetaapiAccountRef(null);
         });
     }
-    const interval = setInterval(() => {
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'hidden') return;
       void loadRuns();
-      void loadSchedules();
+      void loadSchedules(false);
     }, 5000);
-    return () => clearInterval(interval);
-  }, [token]);
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') return;
+      void loadRuns();
+      void loadSchedules(true);
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [loadRuns, loadSchedules, token]);
 
   useEffect(() => {
     const ticker = setInterval(() => setNowMs(Date.now()), 1000);

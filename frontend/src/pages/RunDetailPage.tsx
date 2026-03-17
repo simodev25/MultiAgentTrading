@@ -1,8 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../hooks/useAuth';
 import type { RunDetail } from '../types';
+
+const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed']);
 
 function asPrettyJson(value: unknown): string {
   try {
@@ -17,25 +19,47 @@ export function RunDetailPage() {
   const { token } = useAuth();
   const [run, setRun] = useState<RunDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const inFlightRef = useRef(false);
 
   useEffect(() => {
     if (!token || !runId) return;
+    let cancelled = false;
     const load = async () => {
+      if (inFlightRef.current) return;
+      if (document.visibilityState === 'hidden') return;
+      inFlightRef.current = true;
       try {
         const data = (await api.getRun(token, runId)) as RunDetail;
+        if (cancelled) return;
         setRun(data);
+        setError(null);
       } catch (err) {
+        if (cancelled) return;
         setError(err instanceof Error ? err.message : 'Unable to load run');
+      } finally {
+        inFlightRef.current = false;
       }
     };
     void load();
 
-    const interval = setInterval(() => {
+    const interval = window.setInterval(() => {
+      if (run && TERMINAL_RUN_STATUSES.has(run.status)) return;
       void load();
-    }, 3000);
+    }, 4000);
 
-    return () => clearInterval(interval);
-  }, [token, runId]);
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (run && TERMINAL_RUN_STATUSES.has(run.status)) return;
+      void load();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [token, runId, run?.status]);
 
   if (error) return <div className="alert">{error}</div>;
   if (!run) return <div>Chargement...</div>;
