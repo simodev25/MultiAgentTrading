@@ -336,6 +336,7 @@ class ForexOrchestrator:
 
             execution_result: dict[str, Any] = {
                 'status': 'skipped',
+                'executed': False,
                 'reason': execution_plan.get('reason', 'Execution blocked by execution-manager'),
             }
             if bool(execution_plan.get('should_execute')) and execution_plan.get('side') in {'BUY', 'SELL'}:
@@ -355,7 +356,7 @@ class ForexOrchestrator:
             execution_output = {
                 **execution_plan,
                 'execution': execution_result,
-                'status': execution_result.get('status', 'completed' if execution_result.get('executed') else 'skipped'),
+                'status': execution_result.get('status', 'failed'),
             }
             self._record_step(db, run, 'execution-manager', execution_input, execution_output)
             if self.settings.log_agent_steps:

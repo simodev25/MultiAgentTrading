@@ -8,3 +8,22 @@ def test_json_safe_serializes_datetime() -> None:
     safe = ExecutionService._json_safe(payload)
     assert isinstance(safe['ts'], str)
     assert safe['value'] == 1
+
+
+def test_normalized_result_contains_status_and_executed() -> None:
+    payload = {'simulated': True}
+    normalized = ExecutionService._normalized_result(payload, status='simulated', executed=False, reason='Simulation mode')
+
+    assert normalized['status'] == 'simulated'
+    assert normalized['executed'] is False
+    assert normalized['reason'] == 'Simulation mode'
+    assert normalized['simulated'] is True
+
+
+def test_normalized_result_keeps_existing_reason() -> None:
+    payload = {'reason': 'Upstream reason'}
+    normalized = ExecutionService._normalized_result(payload, status='failed', executed=False, reason='Fallback reason')
+
+    assert normalized['status'] == 'failed'
+    assert normalized['executed'] is False
+    assert normalized['reason'] == 'Upstream reason'

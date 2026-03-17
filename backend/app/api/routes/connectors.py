@@ -16,6 +16,17 @@ from app.services.trading.metaapi_client import MetaApiClient
 router = APIRouter(prefix='/connectors', tags=['connectors'])
 
 SUPPORTED_CONNECTORS = ['ollama', 'metaapi', 'yfinance', 'qdrant']
+DETERMINISTIC_ONLY_AGENTS = {'risk-manager', 'execution-manager'}
+
+
+def _sanitize_ollama_settings(raw_settings: dict) -> dict:
+    settings = dict(raw_settings or {})
+    raw_enabled = settings.get('agent_llm_enabled')
+    enabled = dict(raw_enabled) if isinstance(raw_enabled, dict) else {}
+    for agent_name in DETERMINISTIC_ONLY_AGENTS:
+        enabled[agent_name] = False
+    settings['agent_llm_enabled'] = enabled
+    return settings
 
 
 @router.get('', response_model=list[ConnectorConfigOut])
@@ -98,7 +109,10 @@ def update_connector(
         db.add(conn)
 
     conn.enabled = payload.enabled
-    conn.settings = payload.settings
+    if connector_name == 'ollama':
+        conn.settings = _sanitize_ollama_settings(payload.settings)
+    else:
+        conn.settings = payload.settings
     db.commit()
     db.refresh(conn)
     if connector_name == 'ollama':

@@ -82,6 +82,30 @@ def test_agent_model_selector_reads_enabled_overrides() -> None:
         assert selector.is_enabled(db, 'macro-analyst') is True
 
 
+def test_agent_model_selector_forces_deterministic_agents_off() -> None:
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(bind=engine)
+
+    with Session(engine) as db:
+        db.add(
+            ConnectorConfig(
+                connector_name='ollama',
+                enabled=True,
+                settings={
+                    'agent_llm_enabled': {
+                        'risk-manager': True,
+                        'execution-manager': True,
+                    },
+                },
+            )
+        )
+        db.commit()
+
+        selector = AgentModelSelector()
+        assert selector.is_enabled(db, 'risk-manager') is False
+        assert selector.is_enabled(db, 'execution-manager') is False
+
+
 def test_agent_model_selector_supports_provider_override_and_provider_default_model() -> None:
     engine = create_engine('sqlite:///:memory:')
     Base.metadata.create_all(bind=engine)

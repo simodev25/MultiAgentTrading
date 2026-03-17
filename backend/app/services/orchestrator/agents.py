@@ -543,14 +543,22 @@ class TraderAgent:
         bearish: dict[str, Any],
         db: Session | None = None,
     ) -> dict[str, Any]:
-        net_score = round(sum(v.get('score', 0.0) for v in agent_outputs.values()), 3)
-        decision = 'HOLD'
-        confidence = min(abs(net_score), 1.0)
+        net_score = round(sum(float(v.get('score', 0.0) or 0.0) for v in agent_outputs.values()), 3)
+        bullish_confidence = min(max(float(bullish.get('confidence', 0.0) or 0.0), 0.0), 1.0)
+        bearish_confidence = min(max(float(bearish.get('confidence', 0.0) or 0.0), 0.0), 1.0)
+        debate_balance = round(bullish_confidence - bearish_confidence, 3)
+        debate_score = round(debate_balance * 0.3, 3)
+        combined_score = round(net_score + debate_score, 3)
+        strong_conflict = abs(debate_balance) <= 0.1 and abs(net_score) < 0.35
 
-        if net_score > 0.2:
-            decision = 'BUY'
-        elif net_score < -0.2:
-            decision = 'SELL'
+        decision = 'HOLD'
+        if not strong_conflict:
+            if combined_score > 0.2:
+                decision = 'BUY'
+            elif combined_score < -0.2:
+                decision = 'SELL'
+
+        confidence = min(abs(combined_score) + max(abs(debate_balance) - 0.05, 0.0) * 0.2, 1.0)
 
         last_price = ctx.market_snapshot.get('last_price')
         atr = ctx.market_snapshot.get('atr', 0)
@@ -575,12 +583,22 @@ class TraderAgent:
             'decision': decision,
             'confidence': round(float(confidence), 3),
             'net_score': net_score,
+            'debate_score': debate_score,
+            'combined_score': combined_score,
+            'debate_balance': debate_balance,
+            'signal_conflict': strong_conflict,
             'entry': last_price,
             'stop_loss': stop_loss,
             'take_profit': take_profit,
             'rationale': {
                 'bullish_arguments': bullish.get('arguments', []),
                 'bearish_arguments': bearish.get('arguments', []),
+                'bullish_confidence': bullish_confidence,
+                'bearish_confidence': bearish_confidence,
+                'base_net_score': net_score,
+                'debate_score': debate_score,
+                'combined_score': combined_score,
+                'signal_conflict': strong_conflict,
                 'bullish_llm_debate': bullish.get('llm_debate', ''),
                 'bearish_llm_debate': bearish.get('llm_debate', ''),
                 'memory_refs': [m.get('summary', '') for m in ctx.memory_context[:3]],
@@ -600,7 +618,7 @@ class TraderAgent:
         fallback_system = "Tu es un assistant trader Forex. Résume la justification finale en note d'exécution compacte."
         fallback_user = (
             "Pair: {pair}\nTimeframe: {timeframe}\nDecision: {decision}\nBullish: {bullish_args}\n"
-            "Bearish: {bearish_args}\nNotes de risque: {risk_notes}\nNet score: {net_score}"
+            "Bearish: {bearish_args}\nNotes de risque: {risk_notes}\nNet score: {net_score}\nCombined score: {combined_score}"
         )
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
         if db is not None:
@@ -615,8 +633,17 @@ class TraderAgent:
                     'decision': decision,
                     'bullish_args': json.dumps(bullish.get('arguments', []), ensure_ascii=True),
                     'bearish_args': json.dumps(bearish.get('arguments', []), ensure_ascii=True),
-                    'risk_notes': json.dumps([f'net_score={net_score}'], ensure_ascii=True),
+                    'risk_notes': json.dumps(
+                        [
+                            f'net_score={net_score}',
+                            f'debate_score={debate_score}',
+                            f'combined_score={combined_score}',
+                            f'strong_conflict={strong_conflict}',
+                        ],
+                        ensure_ascii=True,
+                    ),
                     'net_score': net_score,
+                    'combined_score': combined_score,
                 },
             )
             system_prompt = prompt_info['system_prompt']
@@ -629,8 +656,17 @@ class TraderAgent:
                 decision=decision,
                 bullish_args=json.dumps(bullish.get('arguments', []), ensure_ascii=True),
                 bearish_args=json.dumps(bearish.get('arguments', []), ensure_ascii=True),
-                risk_notes=json.dumps([f'net_score={net_score}'], ensure_ascii=True),
+                risk_notes=json.dumps(
+                    [
+                        f'net_score={net_score}',
+                        f'debate_score={debate_score}',
+                        f'combined_score={combined_score}',
+                        f'strong_conflict={strong_conflict}',
+                    ],
+                    ensure_ascii=True,
+                ),
                 net_score=net_score,
+                combined_score=combined_score,
             )
         llm_res = self.llm.chat(
             system_prompt,
@@ -654,9 +690,6 @@ class RiskManagerAgent:
 
     def __init__(self) -> None:
         self.risk_engine = RiskEngine()
-        self.llm = LlmClient()
-        self.model_selector = AgentModelSelector()
-        self.prompt_service = PromptTemplateService()
 
     def run(
         self,
@@ -680,87 +713,12 @@ class RiskManagerAgent:
             'accepted': risk.accepted,
             'reasons': risk.reasons,
             'suggested_volume': risk.suggested_volume,
-        }
-
-        llm_enabled = self.model_selector.is_enabled(db, self.name)
-        llm_model = _resolve_llm_model(ctx, self.model_selector, db, self.name)
-        output['prompt_meta'] = {
-            'prompt_id': None,
-            'prompt_version': 0,
-            'llm_enabled': llm_enabled,
-            'llm_model': llm_model,
-        }
-        if not llm_enabled:
-            return output
-
-        fallback_system = (
-            "Tu es un risk manager Forex. "
-            "Valide ou refuse l'exposition proposée et explique brièvement la décision."
-        )
-        fallback_user = (
-            "Pair: {pair}\nTimeframe: {timeframe}\nMode: {mode}\nDecision: {decision}\n"
-            "Entry: {entry}\nStop loss: {stop_loss}\nTake profit: {take_profit}\nRisk %: {risk_percent}\n"
-            "Sortie déterministe: accepted={accepted}, suggested_volume={suggested_volume}, reasons={reasons}\n"
-            "Réponds avec APPROVE ou REJECT puis une justification concise."
-        )
-        prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
-        if db is not None:
-            prompt_info = self.prompt_service.render(
-                db=db,
-                agent_name=self.name,
-                fallback_system=fallback_system,
-                fallback_user=fallback_user,
-                variables={
-                    'pair': ctx.pair,
-                    'timeframe': ctx.timeframe,
-                    'mode': ctx.mode,
-                    'decision': decision,
-                    'entry': entry,
-                    'stop_loss': stop_loss,
-                    'take_profit': trader_decision.get('take_profit'),
-                    'risk_percent': ctx.risk_percent,
-                    'accepted': output.get('accepted'),
-                    'suggested_volume': output.get('suggested_volume'),
-                    'reasons': json.dumps(output.get('reasons', []), ensure_ascii=True),
-                },
-            )
-            system_prompt = prompt_info['system_prompt']
-            user_prompt = prompt_info['user_prompt']
-        else:
-            system_prompt = fallback_system
-            user_prompt = fallback_user.format(
-                pair=ctx.pair,
-                timeframe=ctx.timeframe,
-                mode=ctx.mode,
-                decision=decision,
-                entry=entry,
-                stop_loss=stop_loss,
-                take_profit=trader_decision.get('take_profit'),
-                risk_percent=ctx.risk_percent,
-                accepted=output.get('accepted'),
-                suggested_volume=output.get('suggested_volume'),
-                reasons=json.dumps(output.get('reasons', []), ensure_ascii=True),
-            )
-
-        llm_res = self.llm.chat(system_prompt, user_prompt, model=llm_model, db=db)
-        llm_acceptance = _parse_risk_acceptance_from_text(llm_res.get('text', ''), bool(output.get('accepted')))
-        if bool(output.get('accepted')) and not llm_acceptance:
-            output['accepted'] = False
-            output['reasons'] = [*output.get('reasons', []), 'LLM risk veto: validation refusée.']
-            output['suggested_volume'] = 0.0
-        elif not bool(output.get('accepted')) and llm_acceptance:
-            output['reasons'] = [
-                *output.get('reasons', []),
-                'LLM favorable, mais blocage conservé par les règles déterministes.',
-            ]
-
-        output['llm_review'] = llm_res.get('text', '')
-        output['degraded'] = llm_res.get('degraded', False)
-        output['prompt_meta'] = {
-            'prompt_id': prompt_info.get('prompt_id'),
-            'prompt_version': prompt_info.get('version', 0),
-            'llm_enabled': llm_enabled,
-            'llm_model': llm_model,
+            'prompt_meta': {
+                'prompt_id': None,
+                'prompt_version': 0,
+                'llm_enabled': False,
+                'llm_model': None,
+            },
         }
         return output
 
@@ -769,9 +727,7 @@ class ExecutionManagerAgent:
     name = 'execution-manager'
 
     def __init__(self) -> None:
-        self.llm = LlmClient()
-        self.model_selector = AgentModelSelector()
-        self.prompt_service = PromptTemplateService()
+        pass
 
     def run(
         self,
@@ -794,90 +750,14 @@ class ExecutionManagerAgent:
         output: dict[str, Any] = {
             'decision': decision,
             'should_execute': deterministic_allowed,
-            'side': decision if decision in {'BUY', 'SELL'} else None,
-            'volume': suggested_volume,
+            'side': decision if deterministic_allowed else None,
+            'volume': suggested_volume if deterministic_allowed else 0.0,
             'reason': reason,
-        }
-
-        llm_enabled = self.model_selector.is_enabled(db, self.name)
-        llm_model = _resolve_llm_model(ctx, self.model_selector, db, self.name)
-        output['prompt_meta'] = {
-            'prompt_id': None,
-            'prompt_version': 0,
-            'llm_enabled': llm_enabled,
-            'llm_model': llm_model,
-        }
-        if not llm_enabled:
-            return output
-
-        fallback_system = (
-            "Tu es un execution manager Forex. "
-            "Confirme la décision exécutable (BUY/SELL) ou impose HOLD si le contexte impose la prudence."
-        )
-        fallback_user = (
-            "Pair: {pair}\nTimeframe: {timeframe}\nMode: {mode}\nDecision trader: {decision}\n"
-            "Risk accepted: {risk_accepted}\nSuggested volume: {suggested_volume}\n"
-            "Stop loss: {stop_loss}\nTake profit: {take_profit}\n"
-            "Réponds par BUY, SELL ou HOLD puis une justification concise."
-        )
-        prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
-        if db is not None:
-            prompt_info = self.prompt_service.render(
-                db=db,
-                agent_name=self.name,
-                fallback_system=fallback_system,
-                fallback_user=fallback_user,
-                variables={
-                    'pair': ctx.pair,
-                    'timeframe': ctx.timeframe,
-                    'mode': ctx.mode,
-                    'decision': decision,
-                    'risk_accepted': bool(risk_output.get('accepted')),
-                    'suggested_volume': suggested_volume,
-                    'stop_loss': trader_decision.get('stop_loss'),
-                    'take_profit': trader_decision.get('take_profit'),
-                },
-            )
-            system_prompt = prompt_info['system_prompt']
-            user_prompt = prompt_info['user_prompt']
-        else:
-            system_prompt = fallback_system
-            user_prompt = fallback_user.format(
-                pair=ctx.pair,
-                timeframe=ctx.timeframe,
-                mode=ctx.mode,
-                decision=decision,
-                risk_accepted=bool(risk_output.get('accepted')),
-                suggested_volume=suggested_volume,
-                stop_loss=trader_decision.get('stop_loss'),
-                take_profit=trader_decision.get('take_profit'),
-            )
-
-        llm_res = self.llm.chat(system_prompt, user_prompt, model=llm_model, db=db)
-        llm_decision = _parse_trade_decision_from_text(llm_res.get('text', ''))
-        llm_reason = 'LLM validated deterministic execution plan.'
-        if output['should_execute']:
-            if llm_decision == 'HOLD':
-                output['should_execute'] = False
-                output['side'] = None
-                output['volume'] = 0.0
-                llm_reason = 'LLM switched to HOLD for safety.'
-            elif llm_decision in {'BUY', 'SELL'} and llm_decision != decision:
-                output['should_execute'] = False
-                output['side'] = None
-                output['volume'] = 0.0
-                llm_reason = f'LLM reported conflict ({llm_decision} vs {decision}), execution blocked.'
-        elif llm_decision in {'BUY', 'SELL'}:
-            llm_reason = f'LLM suggested {llm_decision}, but deterministic gates kept execution blocked.'
-
-        output['reason'] = llm_reason
-        output['llm_decision'] = llm_decision
-        output['llm_review'] = llm_res.get('text', '')
-        output['degraded'] = llm_res.get('degraded', False)
-        output['prompt_meta'] = {
-            'prompt_id': prompt_info.get('prompt_id'),
-            'prompt_version': prompt_info.get('version', 0),
-            'llm_enabled': llm_enabled,
-            'llm_model': llm_model,
+            'prompt_meta': {
+                'prompt_id': None,
+                'prompt_version': 0,
+                'llm_enabled': False,
+                'llm_model': None,
+            },
         }
         return output

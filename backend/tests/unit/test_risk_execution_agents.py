@@ -13,7 +13,7 @@ def _context() -> AgentContext:
     )
 
 
-def test_risk_manager_agent_llm_can_veto_trade() -> None:
+def test_risk_manager_agent_is_deterministic() -> None:
     agent = RiskManagerAgent()
     context = _context()
     trader_decision = {
@@ -23,18 +23,15 @@ def test_risk_manager_agent_llm_can_veto_trade() -> None:
         'take_profit': 1.11,
     }
 
-    agent.model_selector.is_enabled = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
-    agent.model_selector.resolve = lambda *_args, **_kwargs: 'gpt-oss:120b-cloud'  # type: ignore[method-assign]
-    agent.llm.chat = lambda *_args, **_kwargs: {'text': 'REJECT trade, risk too high', 'degraded': False}  # type: ignore[method-assign]
-
     result = agent.run(context, trader_decision, db=None)
 
-    assert result['accepted'] is False
-    assert result['suggested_volume'] == 0.0
-    assert 'LLM risk veto' in ' '.join(result['reasons'])
+    assert isinstance(result['accepted'], bool)
+    assert isinstance(result['suggested_volume'], float)
+    assert result['prompt_meta']['llm_enabled'] is False
+    assert result['prompt_meta']['llm_model'] is None
 
 
-def test_execution_manager_agent_llm_can_switch_to_hold() -> None:
+def test_execution_manager_agent_executes_when_risk_accepts() -> None:
     agent = ExecutionManagerAgent()
     context = _context()
     trader_decision = {
@@ -45,13 +42,28 @@ def test_execution_manager_agent_llm_can_switch_to_hold() -> None:
     }
     risk_output = {'accepted': True, 'suggested_volume': 0.2, 'reasons': ['Risk checks passed.']}
 
-    agent.model_selector.is_enabled = lambda *_args, **_kwargs: True  # type: ignore[method-assign]
-    agent.model_selector.resolve = lambda *_args, **_kwargs: 'gpt-oss:120b-cloud'  # type: ignore[method-assign]
-    agent.llm.chat = lambda *_args, **_kwargs: {'text': 'HOLD pour prudence', 'degraded': False}  # type: ignore[method-assign]
+    result = agent.run(context, trader_decision, risk_output, db=None)
+
+    assert result['should_execute'] is True
+    assert result['side'] == 'BUY'
+    assert result['volume'] == 0.2
+    assert result['prompt_meta']['llm_enabled'] is False
+    assert result['prompt_meta']['llm_model'] is None
+
+
+def test_execution_manager_agent_blocks_when_risk_rejects() -> None:
+    agent = ExecutionManagerAgent()
+    context = _context()
+    trader_decision = {
+        'decision': 'BUY',
+        'entry': 1.1,
+        'stop_loss': 1.095,
+        'take_profit': 1.11,
+    }
+    risk_output = {'accepted': False, 'suggested_volume': 0.2, 'reasons': ['Risk checks blocked.']}
 
     result = agent.run(context, trader_decision, risk_output, db=None)
 
     assert result['should_execute'] is False
     assert result['side'] is None
-    assert result['volume'] == 0.0
-    assert result['llm_decision'] == 'HOLD'
+    assert result['prompt_meta']['llm_enabled'] is False

@@ -22,6 +22,7 @@ DEFAULT_AGENT_LLM_ENABLED: dict[str, bool] = {
 }
 
 SUPPORTED_LLM_PROVIDERS = {'ollama', 'openai', 'mistral'}
+DETERMINISTIC_ONLY_AGENTS = {'risk-manager', 'execution-manager'}
 
 
 def normalize_llm_provider(value: str | None, fallback: str = 'ollama') -> str:
@@ -93,6 +94,8 @@ class AgentModelSelector:
         return str(self.settings.ollama_model or '').strip() or 'llama3.1'
 
     def is_enabled(self, db: Session | None, agent_name: str) -> bool:
+        if agent_name in DETERMINISTIC_ONLY_AGENTS:
+            return False
         default_enabled = DEFAULT_AGENT_LLM_ENABLED.get(agent_name, False)
         settings = self._load_llm_settings(db)
         raw_enabled = settings.get('agent_llm_enabled', {})

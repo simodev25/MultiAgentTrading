@@ -26,7 +26,8 @@ const ORCHESTRATION_AGENTS = [
 ];
 const MODEL_EDIT_AGENTS = [...ORCHESTRATION_AGENTS, 'order-guardian'];
 const PROMPT_EDITABLE_AGENTS = [...MODEL_EDIT_AGENTS];
-const SWITCHABLE_LLM_AGENTS = new Set(MODEL_EDIT_AGENTS);
+const NON_SWITCHABLE_LLM_AGENTS = new Set(['risk-manager', 'execution-manager']);
+const SWITCHABLE_LLM_AGENTS = new Set(MODEL_EDIT_AGENTS.filter((agentName) => !NON_SWITCHABLE_LLM_AGENTS.has(agentName)));
 const MODEL_OVERRIDE_EDITABLE_AGENTS = new Set(MODEL_EDIT_AGENTS);
 const DEFAULT_AGENT_LLM_ENABLED: Record<string, boolean> = {
   'technical-analyst': false,
@@ -237,6 +238,10 @@ export function ConnectorsPage() {
     MODEL_EDIT_AGENTS.forEach((agentName) => {
       const value = rawMap[agentName];
       next[agentName] = typeof value === 'string' ? value : '';
+      if (!SWITCHABLE_LLM_AGENTS.has(agentName)) {
+        nextEnabled[agentName] = false;
+        return;
+      }
       const enabledValue = rawEnabled[agentName];
       nextEnabled[agentName] = typeof enabledValue === 'boolean'
         ? enabledValue
@@ -738,8 +743,13 @@ export function ConnectorsPage() {
                           <input
                             className="ui-switch"
                             type="checkbox"
-                            checked={Boolean(agentLlmEnabled[agentName])}
-                            onChange={(e) => setAgentLlmEnabled((prev) => ({ ...prev, [agentName]: e.target.checked }))}
+                            checked={SWITCHABLE_LLM_AGENTS.has(agentName) ? Boolean(agentLlmEnabled[agentName]) : false}
+                            onChange={(e) => {
+                              if (!SWITCHABLE_LLM_AGENTS.has(agentName)) return;
+                              setAgentLlmEnabled((prev) => ({ ...prev, [agentName]: e.target.checked }));
+                            }}
+                            disabled={!SWITCHABLE_LLM_AGENTS.has(agentName)}
+                            title={!SWITCHABLE_LLM_AGENTS.has(agentName) ? 'Deterministic only' : undefined}
                           />
                         </td>
                         <td>

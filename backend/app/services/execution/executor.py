@@ -25,6 +25,24 @@ class ExecutionService:
             return encoded
         return {'value': encoded}
 
+    @classmethod
+    def _normalized_result(
+        cls,
+        payload: Any,
+        *,
+        status: str,
+        executed: bool,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        result = cls._json_safe(payload)
+        result['status'] = status
+        result['executed'] = bool(executed)
+        if reason:
+            existing_reason = str(result.get('reason', '') or '').strip()
+            if not existing_reason:
+                result['reason'] = reason
+        return result
+
     async def execute(
         self,
         db: Session,
@@ -38,7 +56,8 @@ class ExecutionService:
         metaapi_account_ref: int | None = None,
     ) -> dict[str, Any]:
         if side == 'HOLD':
-            return {'status': 'skipped', 'reason': 'No order executed for HOLD decision.'}
+            reason = 'No order executed for HOLD decision.'
+            return self._normalized_result({'reason': reason}, status='skipped', executed=False, reason=reason)
 
         request_payload = {
             'symbol': symbol,
@@ -63,7 +82,12 @@ class ExecutionService:
         db.flush()
 
         if mode == 'simulation':
-            response = self._json_safe({'simulated': True, 'fill_price': None, 'message': 'Simulation order accepted'})
+            response = self._normalized_result(
+                {'simulated': True, 'fill_price': None, 'message': 'Simulation order accepted'},
+                status='simulated',
+                executed=False,
+                reason='Simulation mode: order not sent to broker.',
+            )
             order.status = 'simulated'
             order.response_payload = response
             db.commit()
@@ -72,14 +96,18 @@ class ExecutionService:
         if mode == 'paper' and not self.settings.enable_paper_execution:
             order.status = 'blocked'
             order.error = 'Paper trading disabled by configuration.'
+            response = self._normalized_result({'error': order.error}, status='blocked', executed=False, reason=order.error)
+            order.response_payload = response
             db.commit()
-            return {'executed': False, 'error': order.error}
+            return response
 
         if mode == 'live' and not self.settings.allow_live_trading:
             order.status = 'blocked'
             order.error = 'Live trading is disabled by default.'
+            response = self._normalized_result({'error': order.error}, status='blocked', executed=False, reason=order.error)
+            order.response_payload = response
             db.commit()
-            return {'executed': False, 'error': order.error}
+            return response
 
         if mode in {'paper', 'live'}:
             selected_account = self.account_selector.resolve(db, metaapi_account_ref)
@@ -95,28 +123,49 @@ class ExecutionService:
             safe_metaapi_response = self._json_safe(metaapi_response)
             if metaapi_response.get('executed'):
                 safe_metaapi_response['account_label'] = selected_account.label if selected_account else 'default'
+                response = self._normalized_result(
+                    safe_metaapi_response,
+                    status='submitted',
+                    executed=True,
+                    reason='Order submitted to broker.',
+                )
                 order.status = 'submitted'
-                order.response_payload = safe_metaapi_response
+                order.response_payload = response
                 db.commit()
-                return safe_metaapi_response
+                return response
 
             # Degraded fallback: emulate paper execution without external broker.
             if mode == 'paper':
+                fallback_reason = str(metaapi_response.get('reason') or 'MetaApi unavailable')
                 fallback = self._json_safe(
-                    {'simulated': True, 'paper_fallback': True, 'reason': metaapi_response.get('reason', 'MetaApi unavailable')}
+                    {'simulated': True, 'paper_fallback': True, 'reason': fallback_reason}
+                )
+                response = self._normalized_result(
+                    fallback,
+                    status='paper-simulated',
+                    executed=False,
+                    reason=fallback_reason,
                 )
                 order.status = 'paper-simulated'
-                order.response_payload = fallback
+                order.response_payload = response
                 db.commit()
-                return fallback
+                return response
 
             order.status = 'failed'
             order.error = metaapi_response.get('reason', 'MetaApi execution failed')
-            order.response_payload = safe_metaapi_response
+            response = self._normalized_result(
+                {'error': order.error, 'details': safe_metaapi_response},
+                status='failed',
+                executed=False,
+                reason=order.error,
+            )
+            order.response_payload = response
             db.commit()
-            return self._json_safe({'executed': False, 'error': order.error, 'details': safe_metaapi_response})
+            return response
 
         order.status = 'failed'
         order.error = f'Unsupported execution mode: {mode}'
+        response = self._normalized_result({'error': order.error}, status='failed', executed=False, reason=order.error)
+        order.response_payload = response
         db.commit()
-        return {'executed': False, 'error': order.error}
+        return response
