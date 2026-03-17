@@ -4,6 +4,7 @@ import inspect
 import json
 import re
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
@@ -107,6 +108,10 @@ class MetaApiClient:
         normalized = [str(part).strip().replace(' ', '_') for part in parts]
         return ':'.join([cls._CACHE_PREFIX, *normalized])
 
+    @classmethod
+    def _cache_lock_key(cls, base_key: str) -> str:
+        return f'{base_key}:lock'
+
     async def _cache_get_json(self, key: str, resource: str = 'unknown') -> dict[str, Any] | None:
         if not self._cache_enabled():
             return None
@@ -134,6 +139,47 @@ class MetaApiClient:
             await self._redis.set(key, serialized, ex=safe_ttl)
         except Exception as exc:  # pragma: no cover
             self._cache_degrade(exc)
+
+    async def _cache_acquire_lock(self, key: str, ttl_seconds: float) -> str | None:
+        if not self._cache_enabled():
+            return None
+        token = uuid.uuid4().hex
+        lock_key = self._cache_lock_key(key)
+        safe_ttl = max(int(round(float(ttl_seconds or 0.0))), 1)
+        try:
+            acquired = await self._redis.set(lock_key, token, nx=True, ex=safe_ttl)
+            return token if acquired else None
+        except Exception as exc:  # pragma: no cover
+            self._cache_degrade(exc)
+            return None
+
+    async def _cache_release_lock(self, key: str, token: str | None) -> None:
+        if not token or not self._cache_enabled():
+            return
+        lock_key = self._cache_lock_key(key)
+        try:
+            current = await self._redis.get(lock_key)
+            if current == token:
+                await self._redis.delete(lock_key)
+        except Exception as exc:  # pragma: no cover
+            self._cache_degrade(exc)
+
+    async def _cache_wait_for_json(self, key: str, wait_seconds: float) -> dict[str, Any] | None:
+        if not self._cache_enabled():
+            return None
+        deadline = time.monotonic() + max(float(wait_seconds or 0.0), 0.0)
+        while time.monotonic() < deadline:
+            try:
+                raw = await self._redis.get(key)
+                if raw:
+                    payload = json.loads(raw)
+                    if isinstance(payload, dict):
+                        return payload
+            except Exception as exc:  # pragma: no cover
+                self._cache_degrade(exc)
+                return None
+            await asyncio.sleep(0.05)
+        return None
 
     @staticmethod
     def _parse_market_timeframe_seconds(normalized_timeframe: str) -> int:
@@ -571,7 +617,7 @@ class MetaApiClient:
 
         headers = self._auth_headers()
         base_url = self._resolve_base_url()
-        timeout = max(self.settings.ollama_timeout_seconds, 30)
+        timeout = max(float(self.settings.metaapi_rest_timeout_seconds), 1.0)
         errors: list[str] = []
 
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -596,7 +642,7 @@ class MetaApiClient:
         url = f'{base_url}{path}'
 
         try:
-            async with httpx.AsyncClient(timeout=max(self.settings.ollama_timeout_seconds, 30)) as client:
+            async with httpx.AsyncClient(timeout=max(float(self.settings.metaapi_rest_timeout_seconds), 1.0)) as client:
                 response = await client.post(url, headers=headers, json=payload)
                 if 200 <= response.status_code < 300:
                     result_payload: Any = response.json()
@@ -768,119 +814,127 @@ class MetaApiClient:
         cached_account_info = await self._cache_get_json(account_cache_key, resource='account_info')
         if cached_account_info is not None:
             return cached_account_info
+        cache_lock_token = await self._cache_acquire_lock(account_cache_key, self.settings.metaapi_cache_lock_ttl_seconds)
+        if cache_lock_token is None:
+            waited_cache = await self._cache_wait_for_json(account_cache_key, self.settings.metaapi_cache_wait_timeout_seconds)
+            if waited_cache is not None:
+                return waited_cache
 
-        sdk = self._get_sdk(region)
-        sdk_skip_reason: str | None = None
-        if sdk:
-            circuit_remaining = self._sdk_circuit_remaining_seconds(resolved_account_id, resolved_region)
-            if circuit_remaining > 0:
-                sdk_skip_reason = (
-                    f'MetaApi SDK circuit open for {circuit_remaining:.1f}s '
-                    '(recent websocket instability, using REST fallback).'
-                )
-                logger.info(
-                    'metaapi sdk account info skipped account_id=%s region=%s reason=%s',
-                    resolved_account_id,
-                    resolved_region,
-                    sdk_skip_reason,
-                )
-            else:
-                connection = None
-                try:
-                    account = await self._sdk_call_with_timeout(
-                        sdk.metatrader_account_api.get_account(resolved_account_id),
-                        timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
-                        account_id=resolved_account_id,
-                        operation='get-account',
+        try:
+            sdk = self._get_sdk(region)
+            sdk_skip_reason: str | None = None
+            if sdk:
+                circuit_remaining = self._sdk_circuit_remaining_seconds(resolved_account_id, resolved_region)
+                if circuit_remaining > 0:
+                    sdk_skip_reason = (
+                        f'MetaApi SDK circuit open for {circuit_remaining:.1f}s '
+                        '(recent websocket instability, using REST fallback).'
                     )
-                    if account.state != 'DEPLOYED':
-                        await self._sdk_call_with_timeout(
-                            account.deploy(),
-                            timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
-                            account_id=resolved_account_id,
-                            operation='deploy-account',
-                        )
-                        await self._sdk_call_with_timeout(
-                            account.wait_connected(),
-                            timeout_seconds=self.settings.metaapi_sdk_connect_timeout_seconds,
-                            account_id=resolved_account_id,
-                            operation='wait-account-connected',
-                        )
-                    sdk_skip_reason = self._account_rpc_unavailable_reason(account)
-                    if sdk_skip_reason is None:
-                        connection = account.get_rpc_connection()
-                        await self._sdk_call_with_timeout(
-                            connection.connect(),
-                            timeout_seconds=self.settings.metaapi_sdk_connect_timeout_seconds,
-                            account_id=resolved_account_id,
-                            operation='rpc-connect',
-                        )
-                        await self._sdk_call_with_timeout(
-                            connection.wait_synchronized(),
-                            timeout_seconds=self.settings.metaapi_sdk_sync_timeout_seconds,
-                            account_id=resolved_account_id,
-                            operation='rpc-wait-synchronized',
-                        )
-                        result = {
-                            'degraded': False,
-                            'account_info': await self._sdk_call_with_timeout(
-                                connection.get_account_information(),
-                                timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
-                                account_id=resolved_account_id,
-                                operation='get-account-information',
-                            ),
-                            'provider': 'sdk',
-                        }
-                        await self._cache_set_json(
-                            account_cache_key,
-                            result,
-                            self.settings.metaapi_account_info_cache_ttl_seconds,
-                        )
-                        self._close_sdk_circuit(resolved_account_id, resolved_region)
-                        return result
-                    self._open_sdk_circuit(
+                    logger.info(
+                        'metaapi sdk account info skipped account_id=%s region=%s reason=%s',
                         resolved_account_id,
                         resolved_region,
                         sdk_skip_reason,
-                        operation='account_info',
                     )
-                    logger.info('metaapi sdk account info skipped account_id=%s reason=%s', resolved_account_id, sdk_skip_reason)
-                except Exception as exc:  # pragma: no cover
-                    self._open_sdk_circuit(
-                        resolved_account_id,
-                        resolved_region,
-                        str(exc),
-                        operation='account_info',
-                    )
-                    logger.warning('metaapi sdk account info failed, trying REST fallback: %s', exc)
-                finally:
-                    await self._close_connection(connection)
+                else:
+                    connection = None
+                    try:
+                        account = await self._sdk_call_with_timeout(
+                            sdk.metatrader_account_api.get_account(resolved_account_id),
+                            timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
+                            account_id=resolved_account_id,
+                            operation='get-account',
+                        )
+                        if account.state != 'DEPLOYED':
+                            await self._sdk_call_with_timeout(
+                                account.deploy(),
+                                timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
+                                account_id=resolved_account_id,
+                                operation='deploy-account',
+                            )
+                            await self._sdk_call_with_timeout(
+                                account.wait_connected(),
+                                timeout_seconds=self.settings.metaapi_sdk_connect_timeout_seconds,
+                                account_id=resolved_account_id,
+                                operation='wait-account-connected',
+                            )
+                        sdk_skip_reason = self._account_rpc_unavailable_reason(account)
+                        if sdk_skip_reason is None:
+                            connection = account.get_rpc_connection()
+                            await self._sdk_call_with_timeout(
+                                connection.connect(),
+                                timeout_seconds=self.settings.metaapi_sdk_connect_timeout_seconds,
+                                account_id=resolved_account_id,
+                                operation='rpc-connect',
+                            )
+                            await self._sdk_call_with_timeout(
+                                connection.wait_synchronized(),
+                                timeout_seconds=self.settings.metaapi_sdk_sync_timeout_seconds,
+                                account_id=resolved_account_id,
+                                operation='rpc-wait-synchronized',
+                            )
+                            result = {
+                                'degraded': False,
+                                'account_info': await self._sdk_call_with_timeout(
+                                    connection.get_account_information(),
+                                    timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
+                                    account_id=resolved_account_id,
+                                    operation='get-account-information',
+                                ),
+                                'provider': 'sdk',
+                            }
+                            await self._cache_set_json(
+                                account_cache_key,
+                                result,
+                                self.settings.metaapi_account_info_cache_ttl_seconds,
+                            )
+                            self._close_sdk_circuit(resolved_account_id, resolved_region)
+                            return result
+                        self._open_sdk_circuit(
+                            resolved_account_id,
+                            resolved_region,
+                            sdk_skip_reason,
+                            operation='account_info',
+                        )
+                        logger.info('metaapi sdk account info skipped account_id=%s reason=%s', resolved_account_id, sdk_skip_reason)
+                    except Exception as exc:  # pragma: no cover
+                        self._open_sdk_circuit(
+                            resolved_account_id,
+                            resolved_region,
+                            str(exc),
+                            operation='account_info',
+                        )
+                        logger.warning('metaapi sdk account info failed, trying REST fallback: %s', exc)
+                    finally:
+                        await self._close_connection(connection)
 
-        result = await self._rest_get(
-            resolved_account_id,
-            [
-                f'/users/current/accounts/{resolved_account_id}/account-information',
-                f'/users/current/accounts/{resolved_account_id}/accountInformation',
-            ],
-        )
-        if result.get('degraded'):
-            return {
-                'degraded': True,
-                'reason': sdk_skip_reason or result.get('reason', 'REST fallback failed'),
-                'errors': result.get('errors', []),
+            result = await self._rest_get(
+                resolved_account_id,
+                [
+                    f'/users/current/accounts/{resolved_account_id}/account-information',
+                    f'/users/current/accounts/{resolved_account_id}/accountInformation',
+                ],
+            )
+            if result.get('degraded'):
+                return {
+                    'degraded': True,
+                    'reason': sdk_skip_reason or result.get('reason', 'REST fallback failed'),
+                    'errors': result.get('errors', []),
+                }
+            resolved = {
+                'degraded': False,
+                'account_info': result.get('payload', {}),
+                'provider': 'rest',
+                'endpoint': result.get('endpoint'),
             }
-        resolved = {
-            'degraded': False,
-            'account_info': result.get('payload', {}),
-            'provider': 'rest',
-            'endpoint': result.get('endpoint'),
-        }
-        await self._cache_set_json(
-            account_cache_key,
-            resolved,
-            self.settings.metaapi_account_info_cache_ttl_seconds,
-        )
-        return resolved
+            await self._cache_set_json(
+                account_cache_key,
+                resolved,
+                self.settings.metaapi_account_info_cache_ttl_seconds,
+            )
+            return resolved
+        finally:
+            await self._cache_release_lock(account_cache_key, cache_lock_token)
 
     async def get_positions(self, account_id: str | None = None, region: str | None = None) -> dict[str, Any]:
         resolved_account_id = self._resolve_account_id(account_id)
@@ -1455,60 +1509,154 @@ class MetaApiClient:
         cached_candles = await self._cache_get_json(candles_cache_key, resource='market_candles')
         if cached_candles is not None:
             return cached_candles
+        cache_lock_token = await self._cache_acquire_lock(candles_cache_key, self.settings.metaapi_cache_lock_ttl_seconds)
+        if cache_lock_token is None:
+            waited_cache = await self._cache_wait_for_json(candles_cache_key, self.settings.metaapi_cache_wait_timeout_seconds)
+            if waited_cache is not None:
+                return waited_cache
 
-        symbol_candidates = self._market_symbol_candidates(symbol)
-        if not symbol_candidates:
-            return {
-                'degraded': True,
-                'pair': pair,
-                'timeframe': timeframe,
-                'candles': [],
-                'reason': 'Invalid symbol',
-            }
+        try:
+            symbol_candidates = self._market_symbol_candidates(symbol)
+            if not symbol_candidates:
+                return {
+                    'degraded': True,
+                    'pair': pair,
+                    'timeframe': timeframe,
+                    'candles': [],
+                    'reason': 'Invalid symbol',
+                }
 
-        sdk = self._get_sdk(region)
-        if sdk:
-            circuit_remaining = self._sdk_circuit_remaining_seconds(resolved_account_id, resolved_region)
-            if circuit_remaining <= 0:
-                try:
-                    account = await self._sdk_call_with_timeout(
-                        sdk.metatrader_account_api.get_account(resolved_account_id),
-                        timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
-                        account_id=resolved_account_id,
-                        operation='get-account',
-                    )
-                    if account.state != 'DEPLOYED':
-                        await self._sdk_call_with_timeout(
-                            account.deploy(),
+            sdk = self._get_sdk(region)
+            if sdk:
+                circuit_remaining = self._sdk_circuit_remaining_seconds(resolved_account_id, resolved_region)
+                if circuit_remaining <= 0:
+                    try:
+                        account = await self._sdk_call_with_timeout(
+                            sdk.metatrader_account_api.get_account(resolved_account_id),
                             timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
                             account_id=resolved_account_id,
-                            operation='deploy-account',
+                            operation='get-account',
                         )
-                        await self._sdk_call_with_timeout(
-                            account.wait_connected(),
-                            timeout_seconds=self.settings.metaapi_sdk_connect_timeout_seconds,
-                            account_id=resolved_account_id,
-                            operation='wait-account-connected',
-                        )
-                    last_sdk_error: str | None = None
-                    for candidate in symbol_candidates:
-                        try:
-                            candles = await self._sdk_call_with_timeout(
-                                account.get_historical_candles(candidate, normalized_timeframe, None, safe_limit),
+                        if account.state != 'DEPLOYED':
+                            await self._sdk_call_with_timeout(
+                                account.deploy(),
                                 timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
                                 account_id=resolved_account_id,
-                                operation=f'get-historical-candles:{candidate}',
+                                operation='deploy-account',
                             )
+                            await self._sdk_call_with_timeout(
+                                account.wait_connected(),
+                                timeout_seconds=self.settings.metaapi_sdk_connect_timeout_seconds,
+                                account_id=resolved_account_id,
+                                operation='wait-account-connected',
+                            )
+                        last_sdk_error: str | None = None
+                        for candidate in symbol_candidates:
+                            try:
+                                candles = await self._sdk_call_with_timeout(
+                                    account.get_historical_candles(candidate, normalized_timeframe, None, safe_limit),
+                                    timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
+                                    account_id=resolved_account_id,
+                                    operation=f'get-historical-candles:{candidate}',
+                                )
+                                normalized_candles = [
+                                    normalized
+                                    for item in (candles or [])
+                                    for normalized in [self._normalize_market_candle(item)]
+                                    if normalized is not None
+                                ]
+                                if not normalized_candles:
+                                    # Continue trying the next candidate symbol instead of
+                                    # returning an empty success payload on the first 200 response.
+                                    last_sdk_error = f'No candles returned for symbol {candidate}'
+                                    continue
+                                resolved = {
+                                    'degraded': False,
+                                    'pair': pair,
+                                    'symbol': candidate,
+                                    'timeframe': timeframe,
+                                    'candles': normalized_candles,
+                                    'provider': 'sdk',
+                                    'account_id': resolved_account_id,
+                                    'requested_symbol': symbol,
+                                    'tried_symbols': symbol_candidates,
+                                }
+                                await self._cache_set_json(
+                                    candles_cache_key,
+                                    resolved,
+                                    self._market_candles_ttl_seconds(normalized_timeframe),
+                                )
+                                self._close_sdk_circuit(resolved_account_id, resolved_region)
+                                return resolved
+                            except Exception as exc:  # pragma: no cover
+                                last_sdk_error = str(exc)
+                        if last_sdk_error:
+                            self._open_sdk_circuit(
+                                resolved_account_id,
+                                resolved_region,
+                                last_sdk_error,
+                                operation='market_candles',
+                            )
+                            logger.warning(
+                                'metaapi sdk market candles failed for all symbols account_id=%s symbols=%s error=%s; trying REST fallback',
+                                resolved_account_id,
+                                symbol_candidates,
+                                last_sdk_error,
+                            )
+                    except Exception as exc:  # pragma: no cover
+                        self._open_sdk_circuit(
+                            resolved_account_id,
+                            resolved_region,
+                            str(exc),
+                            operation='market_candles',
+                        )
+                        logger.warning('metaapi sdk market candles failed, trying REST fallback: %s', exc)
+                else:
+                    logger.info(
+                        'metaapi sdk market candles skipped account_id=%s region=%s reason=circuit-open remaining=%.1fs',
+                        resolved_account_id,
+                        resolved_region,
+                        circuit_remaining,
+                    )
+
+            if not self._resolve_token():
+                return {
+                    'degraded': True,
+                    'pair': pair,
+                    'timeframe': timeframe,
+                    'candles': [],
+                    'reason': 'MetaApi token not configured',
+                }
+
+            market_base_url = self.settings.metaapi_market_base_url.rstrip('/')
+            headers = self._auth_headers()
+            try:
+                async with httpx.AsyncClient(timeout=max(float(self.settings.metaapi_rest_timeout_seconds), 1.0)) as client:
+                    last_response: httpx.Response | None = None
+                    last_url: str | None = None
+                    had_success_without_candles = False
+                    for candidate in symbol_candidates:
+                        symbol_encoded = quote(candidate, safe='')
+                        url = (
+                            f'{market_base_url}/users/current/accounts/{resolved_account_id}/historical-market-data/symbols/'
+                            f'{symbol_encoded}/timeframes/{normalized_timeframe}/candles'
+                        )
+                        response = await client.get(url, headers=headers, params={'limit': safe_limit})
+                        last_response = response
+                        last_url = url
+                        if response.status_code == 200:
+                            payload = response.json()
+                            raw_candles = payload if isinstance(payload, list) else []
                             normalized_candles = [
                                 normalized
-                                for item in (candles or [])
+                                for item in raw_candles
                                 for normalized in [self._normalize_market_candle(item)]
                                 if normalized is not None
                             ]
                             if not normalized_candles:
-                                # Continue trying the next candidate symbol instead of
-                                # returning an empty success payload on the first 200 response.
-                                last_sdk_error = f'No candles returned for symbol {candidate}'
+                                # A 200 response with no candles can happen for an invalid
+                                # broker symbol variant. Keep trying fallback candidates.
+                                had_success_without_candles = True
                                 continue
                             resolved = {
                                 'degraded': False,
@@ -1516,8 +1664,9 @@ class MetaApiClient:
                                 'symbol': candidate,
                                 'timeframe': timeframe,
                                 'candles': normalized_candles,
-                                'provider': 'sdk',
+                                'provider': 'rest',
                                 'account_id': resolved_account_id,
+                                'endpoint': url,
                                 'requested_symbol': symbol,
                                 'tried_symbols': symbol_candidates,
                             }
@@ -1526,97 +1675,29 @@ class MetaApiClient:
                                 resolved,
                                 self._market_candles_ttl_seconds(normalized_timeframe),
                             )
-                            self._close_sdk_circuit(resolved_account_id, resolved_region)
                             return resolved
-                        except Exception as exc:  # pragma: no cover
-                            last_sdk_error = str(exc)
-                    if last_sdk_error:
-                        self._open_sdk_circuit(
-                            resolved_account_id,
-                            resolved_region,
-                            last_sdk_error,
-                            operation='market_candles',
-                        )
-                        logger.warning(
-                            'metaapi sdk market candles failed for all symbols account_id=%s symbols=%s error=%s; trying REST fallback',
-                            resolved_account_id,
-                            symbol_candidates,
-                            last_sdk_error,
-                        )
-                except Exception as exc:  # pragma: no cover
-                    self._open_sdk_circuit(
-                        resolved_account_id,
-                        resolved_region,
-                        str(exc),
-                        operation='market_candles',
-                    )
-                    logger.warning('metaapi sdk market candles failed, trying REST fallback: %s', exc)
-            else:
-                logger.info(
-                    'metaapi sdk market candles skipped account_id=%s region=%s reason=circuit-open remaining=%.1fs',
-                    resolved_account_id,
-                    resolved_region,
-                    circuit_remaining,
-                )
-
-        if not self._resolve_token():
-            return {
-                'degraded': True,
-                'pair': pair,
-                'timeframe': timeframe,
-                'candles': [],
-                'reason': 'MetaApi token not configured',
-            }
-
-        market_base_url = self.settings.metaapi_market_base_url.rstrip('/')
-        headers = self._auth_headers()
-        try:
-            async with httpx.AsyncClient(timeout=max(self.settings.ollama_timeout_seconds, 30)) as client:
-                last_response: httpx.Response | None = None
-                last_url: str | None = None
-                had_success_without_candles = False
-                for candidate in symbol_candidates:
-                    symbol_encoded = quote(candidate, safe='')
-                    url = (
-                        f'{market_base_url}/users/current/accounts/{resolved_account_id}/historical-market-data/symbols/'
-                        f'{symbol_encoded}/timeframes/{normalized_timeframe}/candles'
-                    )
-                    response = await client.get(url, headers=headers, params={'limit': safe_limit})
-                    last_response = response
-                    last_url = url
-                    if response.status_code == 200:
-                        payload = response.json()
-                        raw_candles = payload if isinstance(payload, list) else []
-                        normalized_candles = [
-                            normalized
-                            for item in raw_candles
-                            for normalized in [self._normalize_market_candle(item)]
-                            if normalized is not None
-                        ]
-                        if not normalized_candles:
-                            # A 200 response with no candles can happen for an invalid
-                            # broker symbol variant. Keep trying fallback candidates.
-                            had_success_without_candles = True
-                            continue
-                        resolved = {
-                            'degraded': False,
+                    if last_response is None:
+                        return {
+                            'degraded': True,
                             'pair': pair,
-                            'symbol': candidate,
+                            'symbol': symbol,
                             'timeframe': timeframe,
-                            'candles': normalized_candles,
+                            'candles': [],
                             'provider': 'rest',
-                            'account_id': resolved_account_id,
-                            'endpoint': url,
-                            'requested_symbol': symbol,
+                            'reason': 'No symbol candidate available',
+                        }
+                    if had_success_without_candles:
+                        return {
+                            'degraded': True,
+                            'pair': pair,
+                            'symbol': symbol,
+                            'timeframe': timeframe,
+                            'candles': [],
+                            'provider': 'rest',
+                            'reason': 'No market candles returned for symbol candidates',
+                            'endpoint': last_url,
                             'tried_symbols': symbol_candidates,
                         }
-                        await self._cache_set_json(
-                            candles_cache_key,
-                            resolved,
-                            self._market_candles_ttl_seconds(normalized_timeframe),
-                        )
-                        return resolved
-                if last_response is None:
                     return {
                         'degraded': True,
                         'pair': pair,
@@ -1624,20 +1705,12 @@ class MetaApiClient:
                         'timeframe': timeframe,
                         'candles': [],
                         'provider': 'rest',
-                        'reason': 'No symbol candidate available',
-                    }
-                if had_success_without_candles:
-                    return {
-                        'degraded': True,
-                        'pair': pair,
-                        'symbol': symbol,
-                        'timeframe': timeframe,
-                        'candles': [],
-                        'provider': 'rest',
-                        'reason': 'No market candles returned for symbol candidates',
+                        'reason': f'HTTP {last_response.status_code}',
                         'endpoint': last_url,
                         'tried_symbols': symbol_candidates,
                     }
+            except Exception as exc:  # pragma: no cover
+                logger.exception('metaapi rest market candles failure account_id=%s symbol=%s', resolved_account_id, symbol)
                 return {
                     'degraded': True,
                     'pair': pair,
@@ -1645,22 +1718,11 @@ class MetaApiClient:
                     'timeframe': timeframe,
                     'candles': [],
                     'provider': 'rest',
-                    'reason': f'HTTP {last_response.status_code}',
-                    'endpoint': last_url,
+                    'reason': str(exc),
                     'tried_symbols': symbol_candidates,
                 }
-        except Exception as exc:  # pragma: no cover
-            logger.exception('metaapi rest market candles failure account_id=%s symbol=%s', resolved_account_id, symbol)
-            return {
-                'degraded': True,
-                'pair': pair,
-                'symbol': symbol,
-                'timeframe': timeframe,
-                'candles': [],
-                'provider': 'rest',
-                'reason': str(exc),
-                'tried_symbols': symbol_candidates,
-            }
+        finally:
+            await self._cache_release_lock(candles_cache_key, cache_lock_token)
 
     async def place_order(
         self,

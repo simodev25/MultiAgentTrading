@@ -68,7 +68,7 @@ async def create_run(
         try:
             run_analysis_task.apply_async(
                 args=[run.id, payload.risk_percent, payload.metaapi_account_ref],
-                queue='analysis',
+                queue=settings.celery_analysis_queue,
                 ignore_result=True,
             )
             run.status = 'queued'

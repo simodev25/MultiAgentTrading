@@ -48,6 +48,27 @@ docker compose up --build
 - Grafana: `http://localhost:3000` (`admin/admin`)
 - RabbitMQ UI: `http://localhost:15672` (`guest/guest`)
 
+## Déploiement production Docker
+
+1. Créer l'env production:
+```bash
+cp .env.prod.example .env.prod
+```
+2. Déployer:
+```bash
+./scripts/install-prod-docker.sh
+```
+3. Avec monitoring:
+```bash
+./scripts/install-prod-docker.sh --with-monitoring
+```
+4. Profil workers Mac M4 Pro (12/14 coeurs):
+```bash
+./scripts/install-prod-docker.sh --tune-m4-pro
+```
+
+Documentation complète: `docs/production-docker-install.md`.
+
 Compte seed local:
 - email: `admin@local.dev`
 - mot de passe: `admin1234`
@@ -134,6 +155,7 @@ npm run test:e2e
 - [Données et news](docs/data-news.md)
 - [Orchestration](docs/orchestration.md)
 - [Monitoring](docs/monitoring.md)
+- [Installation Production Docker](docs/production-docker-install.md)
 - [Tests](docs/testing.md)
 - [Limites](docs/limits.md)
 - [Troubleshooting](docs/troubleshooting.md)

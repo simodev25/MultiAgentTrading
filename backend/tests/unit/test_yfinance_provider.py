@@ -24,9 +24,16 @@ class _FakeRedis:
     def get(self, key: str):
         return self.store.get(key)
 
-    def set(self, key: str, value: str, ex: int | None = None):
+    def set(self, key: str, value: str, ex: int | None = None, nx: bool | None = None):
+        if nx and key in self.store:
+            return False
         self.store[key] = value
         return True
+
+    def delete(self, *keys: str):
+        for key in keys:
+            self.store.pop(key, None)
+        return len(keys)
 
 
 def test_ticker_candidates_include_suffixless_fx_variant() -> None:

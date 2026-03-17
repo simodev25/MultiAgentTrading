@@ -2,6 +2,7 @@ import logging
 import json
 import re
 import time
+import uuid
 from datetime import datetime, timezone
 from io import StringIO
 from typing import Any
@@ -111,6 +112,65 @@ class YFinanceMarketProvider:
             )
         except Exception as exc:  # pragma: no cover
             self._cache_degrade(exc)
+
+    @classmethod
+    def _cache_lock_key(cls, base_key: str) -> str:
+        return f'{base_key}:lock'
+
+    def _cache_acquire_lock(self, key: str, ttl_seconds: float) -> str | None:
+        if not self._cache_enabled():
+            return None
+        token = uuid.uuid4().hex
+        lock_key = self._cache_lock_key(key)
+        safe_ttl = max(int(round(float(ttl_seconds or 0.0))), 1)
+        try:
+            acquired = self._redis.set(lock_key, token, nx=True, ex=safe_ttl)
+            return token if acquired else None
+        except Exception as exc:  # pragma: no cover
+            self._cache_degrade(exc)
+            return None
+
+    def _cache_release_lock(self, key: str, token: str | None) -> None:
+        if not token or not self._cache_enabled():
+            return
+        lock_key = self._cache_lock_key(key)
+        try:
+            current = self._redis.get(lock_key)
+            if current == token:
+                self._redis.delete(lock_key)
+        except Exception as exc:  # pragma: no cover
+            self._cache_degrade(exc)
+
+    def _cache_wait_for_json(self, key: str, wait_seconds: float) -> dict[str, Any] | None:
+        if not self._cache_enabled():
+            return None
+        deadline = time.monotonic() + max(float(wait_seconds or 0.0), 0.0)
+        while time.monotonic() < deadline:
+            try:
+                raw = self._redis.get(key)
+                if raw:
+                    payload = json.loads(raw)
+                    if isinstance(payload, dict):
+                        return payload
+            except Exception as exc:  # pragma: no cover
+                self._cache_degrade(exc)
+                return None
+            time.sleep(0.05)
+        return None
+
+    def _cache_wait_for_frame(self, key: str, wait_seconds: float) -> pd.DataFrame | None:
+        payload = self._cache_wait_for_json(key, wait_seconds)
+        if payload is None:
+            return None
+        frame_payload = payload.get('frame')
+        if not isinstance(frame_payload, str) or not frame_payload:
+            return None
+        try:
+            frame = pd.read_json(StringIO(frame_payload), orient='split')
+            return frame if isinstance(frame, pd.DataFrame) else None
+        except Exception as exc:  # pragma: no cover
+            self._cache_degrade(exc)
+            return None
 
     def _cache_get_frame(self, key: str, resource: str = 'historical') -> pd.DataFrame | None:
         payload = self._cache_get_json(key, resource=resource)
@@ -257,53 +317,61 @@ class YFinanceMarketProvider:
         cached_snapshot = self._cache_get_json(snapshot_cache_key, resource='snapshot')
         if cached_snapshot is not None:
             return cached_snapshot
+        cache_lock_token = self._cache_acquire_lock(snapshot_cache_key, self.settings.yfinance_cache_lock_ttl_seconds)
+        if cache_lock_token is None:
+            waited_snapshot = self._cache_wait_for_json(snapshot_cache_key, self.settings.yfinance_cache_wait_timeout_seconds)
+            if waited_snapshot is not None:
+                return waited_snapshot
 
         try:
-            frame, used_symbol = self._fetch_history_with_fallback(pair, timeframe)
-            if frame.empty:
-                return {'degraded': True, 'error': 'No market data available', 'pair': pair, 'timeframe': timeframe}
+            try:
+                frame, used_symbol = self._fetch_history_with_fallback(pair, timeframe)
+                if frame.empty:
+                    return {'degraded': True, 'error': 'No market data available', 'pair': pair, 'timeframe': timeframe}
 
-            close = frame['Close']
-            high = frame['High']
-            low = frame['Low']
+                close = frame['Close']
+                high = frame['High']
+                low = frame['Low']
 
-            rsi = RSIIndicator(close=close, window=14).rsi().iloc[-1]
-            ema_fast = EMAIndicator(close=close, window=20).ema_indicator().iloc[-1]
-            ema_slow = EMAIndicator(close=close, window=50).ema_indicator().iloc[-1]
-            macd_diff = MACD(close=close).macd_diff().iloc[-1]
-            atr = AverageTrueRange(high=high, low=low, close=close).average_true_range().iloc[-1]
+                rsi = RSIIndicator(close=close, window=14).rsi().iloc[-1]
+                ema_fast = EMAIndicator(close=close, window=20).ema_indicator().iloc[-1]
+                ema_slow = EMAIndicator(close=close, window=50).ema_indicator().iloc[-1]
+                macd_diff = MACD(close=close).macd_diff().iloc[-1]
+                atr = AverageTrueRange(high=high, low=low, close=close).average_true_range().iloc[-1]
 
-            latest = float(close.iloc[-1])
-            prev = float(close.iloc[-2]) if len(close) > 1 else latest
-            pct_change = ((latest - prev) / prev) * 100 if prev else 0.0
+                latest = float(close.iloc[-1])
+                prev = float(close.iloc[-2]) if len(close) > 1 else latest
+                pct_change = ((latest - prev) / prev) * 100 if prev else 0.0
 
-            trend = 'bullish' if ema_fast > ema_slow else 'bearish'
-            if abs(ema_fast - ema_slow) < latest * 0.0003:
-                trend = 'neutral'
+                trend = 'bullish' if ema_fast > ema_slow else 'bearish'
+                if abs(ema_fast - ema_slow) < latest * 0.0003:
+                    trend = 'neutral'
 
-            resolved = {
-                'degraded': False,
-                'pair': pair,
-                'timeframe': timeframe,
-                'symbol': used_symbol,
-                'last_price': latest,
-                'change_pct': round(float(pct_change), 5),
-                'rsi': round(float(rsi), 3),
-                'ema_fast': round(float(ema_fast), 6),
-                'ema_slow': round(float(ema_slow), 6),
-                'macd_diff': round(float(macd_diff), 6),
-                'atr': round(float(atr), 6),
-                'trend': trend,
-            }
-            self._cache_set_json(
-                snapshot_cache_key,
-                resolved,
-                self._snapshot_ttl_seconds(timeframe_key),
-            )
-            return resolved
-        except Exception as exc:  # pragma: no cover - third-party failures are expected in degraded mode
-            logger.exception('yfinance market snapshot failure pair=%s timeframe=%s', pair, timeframe)
-            return {'degraded': True, 'error': str(exc), 'pair': pair, 'timeframe': timeframe}
+                resolved = {
+                    'degraded': False,
+                    'pair': pair,
+                    'timeframe': timeframe,
+                    'symbol': used_symbol,
+                    'last_price': latest,
+                    'change_pct': round(float(pct_change), 5),
+                    'rsi': round(float(rsi), 3),
+                    'ema_fast': round(float(ema_fast), 6),
+                    'ema_slow': round(float(ema_slow), 6),
+                    'macd_diff': round(float(macd_diff), 6),
+                    'atr': round(float(atr), 6),
+                    'trend': trend,
+                }
+                self._cache_set_json(
+                    snapshot_cache_key,
+                    resolved,
+                    self._snapshot_ttl_seconds(timeframe_key),
+                )
+                return resolved
+            except Exception as exc:  # pragma: no cover - third-party failures are expected in degraded mode
+                logger.exception('yfinance market snapshot failure pair=%s timeframe=%s', pair, timeframe)
+                return {'degraded': True, 'error': str(exc), 'pair': pair, 'timeframe': timeframe}
+        finally:
+            self._cache_release_lock(snapshot_cache_key, cache_lock_token)
 
     def get_historical_candles(self, pair: str, timeframe: str, start_date: str, end_date: str) -> pd.DataFrame:
         pair_key = self._normalize_pair(pair) or str(pair or '').strip().upper()
@@ -318,23 +386,31 @@ class YFinanceMarketProvider:
         cached_frame = self._cache_get_frame(history_cache_key, resource='historical')
         if cached_frame is not None:
             return cached_frame
+        cache_lock_token = self._cache_acquire_lock(history_cache_key, self.settings.yfinance_cache_lock_ttl_seconds)
+        if cache_lock_token is None:
+            waited_frame = self._cache_wait_for_frame(history_cache_key, self.settings.yfinance_cache_wait_timeout_seconds)
+            if waited_frame is not None:
+                return waited_frame
 
         try:
-            frame, _ = self._fetch_history_with_fallback(
-                pair,
-                timeframe,
-                start_date=start_date,
-                end_date=end_date,
-            )
-            self._cache_set_frame(
-                history_cache_key,
-                frame,
-                self.settings.yfinance_historical_cache_ttl_seconds,
-            )
-            return frame
-        except Exception as exc:  # pragma: no cover
-            logger.exception('yfinance historical retrieval failure pair=%s timeframe=%s', pair, timeframe)
-            return pd.DataFrame()
+            try:
+                frame, _ = self._fetch_history_with_fallback(
+                    pair,
+                    timeframe,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                self._cache_set_frame(
+                    history_cache_key,
+                    frame,
+                    self.settings.yfinance_historical_cache_ttl_seconds,
+                )
+                return frame
+            except Exception as exc:  # pragma: no cover
+                logger.exception('yfinance historical retrieval failure pair=%s timeframe=%s', pair, timeframe)
+                return pd.DataFrame()
+        finally:
+            self._cache_release_lock(history_cache_key, cache_lock_token)
 
     def get_news_context(self, pair: str, limit: int = 5) -> dict[str, Any]:
         pair_key = self._normalize_pair(pair) or str(pair or '').strip().upper()
@@ -343,37 +419,45 @@ class YFinanceMarketProvider:
         cached_news = self._cache_get_json(news_cache_key, resource='news')
         if cached_news is not None:
             return cached_news
+        cache_lock_token = self._cache_acquire_lock(news_cache_key, self.settings.yfinance_cache_lock_ttl_seconds)
+        if cache_lock_token is None:
+            waited_news = self._cache_wait_for_json(news_cache_key, self.settings.yfinance_cache_wait_timeout_seconds)
+            if waited_news is not None:
+                return waited_news
 
         try:
-            last_symbol: str | None = None
-            for symbol in self._ticker_candidates(pair):
-                try:
-                    last_symbol = symbol
-                    ticker = yf.Ticker(symbol)
-                    news_items = ticker.news or []
-                except Exception:  # pragma: no cover
-                    logger.debug('yfinance news candidate failed pair=%s symbol=%s', pair, symbol, exc_info=True)
-                    continue
+            try:
+                last_symbol: str | None = None
+                for symbol in self._ticker_candidates(pair):
+                    try:
+                        last_symbol = symbol
+                        ticker = yf.Ticker(symbol)
+                        news_items = ticker.news or []
+                    except Exception:  # pragma: no cover
+                        logger.debug('yfinance news candidate failed pair=%s symbol=%s', pair, symbol, exc_info=True)
+                        continue
 
-                selected = []
-                for item in news_items[:limit]:
-                    selected.append(
-                        {
-                            'title': item.get('title', ''),
-                            'publisher': item.get('publisher', ''),
-                            'link': item.get('link', ''),
-                            'published': item.get('providerPublishTime'),
-                        }
-                    )
+                    selected = []
+                    for item in news_items[:limit]:
+                        selected.append(
+                            {
+                                'title': item.get('title', ''),
+                                'publisher': item.get('publisher', ''),
+                                'link': item.get('link', ''),
+                                'published': item.get('providerPublishTime'),
+                            }
+                        )
 
-                if selected:
-                    resolved = {'degraded': False, 'pair': pair, 'symbol': symbol, 'news': selected}
-                    self._cache_set_json(news_cache_key, resolved, self.settings.yfinance_news_cache_ttl_seconds)
-                    return resolved
+                    if selected:
+                        resolved = {'degraded': False, 'pair': pair, 'symbol': symbol, 'news': selected}
+                        self._cache_set_json(news_cache_key, resolved, self.settings.yfinance_news_cache_ttl_seconds)
+                        return resolved
 
-            resolved = {'degraded': False, 'pair': pair, 'symbol': last_symbol, 'news': []}
-            self._cache_set_json(news_cache_key, resolved, self.settings.yfinance_news_cache_ttl_seconds)
-            return resolved
-        except Exception as exc:  # pragma: no cover
-            logger.exception('yfinance news retrieval failure pair=%s', pair)
-            return {'degraded': True, 'pair': pair, 'news': [], 'error': str(exc)}
+                resolved = {'degraded': False, 'pair': pair, 'symbol': last_symbol, 'news': []}
+                self._cache_set_json(news_cache_key, resolved, self.settings.yfinance_news_cache_ttl_seconds)
+                return resolved
+            except Exception as exc:  # pragma: no cover
+                logger.exception('yfinance news retrieval failure pair=%s', pair)
+                return {'degraded': True, 'pair': pair, 'news': [], 'error': str(exc)}
+        finally:
+            self._cache_release_lock(news_cache_key, cache_lock_token)

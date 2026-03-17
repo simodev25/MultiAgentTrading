@@ -9,10 +9,14 @@ from app.services.scheduler.cron import next_run_after
 from app.services.scheduler.runner import create_and_enqueue_run, validate_schedule_target
 from app.tasks.celery_app import celery_app
 
+settings = get_settings()
 
-@celery_app.task(name='app.tasks.scheduler_task.dispatch_due_schedules')
+@celery_app.task(
+    name='app.tasks.scheduler_task.dispatch_due_schedules',
+    soft_time_limit=settings.celery_scheduler_soft_time_limit_seconds,
+    time_limit=settings.celery_scheduler_time_limit_seconds,
+)
 def dispatch_due_schedules() -> dict:
-    settings = get_settings()
     if not settings.scheduler_enabled:
         return {'enabled': False, 'processed': 0, 'triggered': 0, 'failed': 0}
 

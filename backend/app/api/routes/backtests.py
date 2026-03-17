@@ -13,6 +13,7 @@ from app.db.session import get_db
 from app.schemas.backtest import BacktestCreateRequest, BacktestRunDetailOut, BacktestRunOut
 from app.services.backtest.engine import BacktestEngine
 from app.services.market.symbols import canonical_symbol, get_market_symbols_config
+from app.tasks.backtest_task import execute as execute_backtest_task
 
 router = APIRouter(prefix='/backtests', tags=['backtests'])
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ def list_backtests(
 @router.post('', response_model=BacktestRunOut)
 def create_backtest(
     payload: BacktestCreateRequest,
+    async_execution: bool = Query(default=True),
     db: Session = Depends(get_db),
     user: User = Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN, Role.TRADER_OPERATOR, Role.ANALYST)),
 ) -> BacktestRunOut:
@@ -57,7 +59,7 @@ def create_backtest(
         start_date=payload.start_date,
         end_date=payload.end_date,
         strategy=normalized_strategy,
-        status='running',
+        status='pending',
         metrics={},
         equity_curve=[],
         created_by_id=user.id,
@@ -66,7 +68,20 @@ def create_backtest(
     db.commit()
     db.refresh(run)
 
+    if async_execution:
+        try:
+            execute_backtest_task.apply_async(args=[run.id], queue=settings.celery_backtest_queue, ignore_result=True)
+            run.status = 'queued'
+            db.commit()
+            db.refresh(run)
+            return BacktestRunOut.model_validate(run)
+        except Exception:
+            logger.warning('backtest enqueue failed; falling back to in-request execution run_id=%s', run.id, exc_info=True)
+
     try:
+        run.status = 'running'
+        db.commit()
+        db.refresh(run)
         logger.info(
             'backtest_start run_id=%s pair=%s timeframe=%s strategy_in=%s strategy=%s',
             run.id,

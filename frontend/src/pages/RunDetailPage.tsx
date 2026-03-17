@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { api } from '../api/client';
+import { api, wsRunUrl } from '../api/client';
 import { useAuth } from '../hooks/useAuth';
 import type { RunDetail } from '../types';
 
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed']);
+const WS_RECONNECT_DELAY_MS = 3000;
+const FALLBACK_POLL_MS = 15000;
 
 function asPrettyJson(value: unknown): string {
   try {
@@ -20,10 +22,20 @@ export function RunDetailPage() {
   const [run, setRun] = useState<RunDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const inFlightRef = useRef(false);
+  const runStatusRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    runStatusRef.current = run?.status ?? null;
+  }, [run?.status]);
 
   useEffect(() => {
     if (!token || !runId) return;
+    const parsedRunId = Number(runId);
+    if (!Number.isFinite(parsedRunId)) return;
     let cancelled = false;
+    let socket: WebSocket | null = null;
+    let reconnectTimer: number | null = null;
+    let socketConnected = false;
     const load = async () => {
       if (inFlightRef.current) return;
       if (document.visibilityState === 'hidden') return;
@@ -42,24 +54,89 @@ export function RunDetailPage() {
     };
     void load();
 
+    const scheduleReconnect = () => {
+      if (cancelled) return;
+      if (runStatusRef.current && TERMINAL_RUN_STATUSES.has(runStatusRef.current)) return;
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        connect();
+      }, WS_RECONNECT_DELAY_MS);
+    };
+
+    const connect = () => {
+      if (cancelled) return;
+      socket = new WebSocket(wsRunUrl(parsedRunId));
+      socket.onopen = () => {
+        socketConnected = true;
+      };
+      socket.onmessage = (event: MessageEvent<string>) => {
+        let payload: { error?: string; status?: string; decision?: unknown; updated_at?: string } | null = null;
+        try {
+          payload = JSON.parse(event.data) as { error?: string; status?: string; decision?: unknown; updated_at?: string };
+        } catch {
+          return;
+        }
+        if (!payload) return;
+        if (payload.error) {
+          setError(payload.error);
+          return;
+        }
+        setRun((current) => {
+          if (!current) return current;
+          const nextDecision = payload?.decision && typeof payload.decision === 'object'
+            ? payload.decision as Record<string, unknown>
+            : current.decision;
+          return {
+            ...current,
+            status: payload?.status ?? current.status,
+            decision: nextDecision,
+            updated_at: payload?.updated_at ?? current.updated_at,
+          };
+        });
+        void load();
+        if (payload.status && TERMINAL_RUN_STATUSES.has(payload.status)) {
+          socket?.close();
+        }
+      };
+      socket.onerror = () => {
+        if (socket && socket.readyState < WebSocket.CLOSING) {
+          socket.close();
+        }
+      };
+      socket.onclose = () => {
+        socketConnected = false;
+        if (cancelled) return;
+        scheduleReconnect();
+      };
+    };
+
+    connect();
+
     const interval = window.setInterval(() => {
-      if (run && TERMINAL_RUN_STATUSES.has(run.status)) return;
+      if (socketConnected) return;
+      if (runStatusRef.current && TERMINAL_RUN_STATUSES.has(runStatusRef.current)) return;
       void load();
-    }, 4000);
+    }, FALLBACK_POLL_MS);
 
     const onVisibilityChange = () => {
       if (document.visibilityState !== 'visible') return;
-      if (run && TERMINAL_RUN_STATUSES.has(run.status)) return;
+      if (runStatusRef.current && TERMINAL_RUN_STATUSES.has(runStatusRef.current)) return;
       void load();
     };
     document.addEventListener('visibilitychange', onVisibilityChange);
 
     return () => {
       cancelled = true;
+      if (reconnectTimer != null) {
+        window.clearTimeout(reconnectTimer);
+      }
+      if (socket && socket.readyState < WebSocket.CLOSING) {
+        socket.close();
+      }
       window.clearInterval(interval);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [token, runId, run?.status]);
+  }, [token, runId]);
 
   if (error) return <div className="alert">{error}</div>;
   if (!run) return <div>Chargement...</div>;

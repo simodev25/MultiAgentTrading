@@ -1,5 +1,7 @@
 import asyncio
+import fcntl
 import logging
+import os
 from contextlib import asynccontextmanager
 from time import perf_counter
 
@@ -9,6 +11,7 @@ from fastapi.responses import PlainTextResponse
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.router import api_router
@@ -28,55 +31,100 @@ from app.services.prompts.registry import PromptTemplateService
 logger = logging.getLogger(__name__)
 
 
+def _is_pgvector_extension_race(exc: Exception) -> bool:
+    """Return True when concurrent startup attempted to create the same extension."""
+    if isinstance(exc, IntegrityError):
+        pgcode = getattr(getattr(exc, 'orig', None), 'pgcode', None)
+        if pgcode in {'23505', '42710'}:
+            return True
+    message = str(exc).lower()
+    return 'pg_extension_name_index' in message and 'vector' in message
+
+
+def _acquire_startup_lock() -> tuple[int, bool]:
+    """
+    Acquire an inter-process startup lock.
+    Returns (fd, already_initialized) where already_initialized means another
+    worker has already finished bootstrap in this container lifecycle.
+    """
+    lock_path = '/tmp/forex_startup.lock'
+    done_path = '/tmp/forex_startup.done'
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd, os.path.exists(done_path)
+
+
+def _release_startup_lock(fd: int, mark_done: bool) -> None:
+    if mark_done:
+        done_path = '/tmp/forex_startup.done'
+        with open(done_path, 'w', encoding='utf-8') as marker:
+            marker.write('ok\n')
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     configure_logging()
-    if settings.enable_pgvector and engine.dialect.name == 'postgresql':
-        try:
-            with engine.begin() as conn:
-                conn.execute(text('CREATE EXTENSION IF NOT EXISTS vector'))
-        except Exception as exc:
-            logger.error(
-                'ENABLE_PGVECTOR=true but pgvector extension is not available. '
-                'Use a pgvector-enabled Postgres image or set ENABLE_PGVECTOR=false. error=%s',
-                exc,
-            )
-            raise
-    Base.metadata.create_all(bind=engine)
-
-    db = SessionLocal()
+    lock_fd, already_initialized = _acquire_startup_lock()
     try:
-        if db.query(User).count() == 0:
-            admin = User(
-                email='admin@local.dev',
-                hashed_password=get_password_hash('admin1234'),
-                role=Role.SUPER_ADMIN,
-                is_active=True,
-            )
-            db.add(admin)
+        if not already_initialized:
+            if settings.enable_pgvector and engine.dialect.name == 'postgresql':
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(text('CREATE EXTENSION IF NOT EXISTS vector'))
+                except Exception as exc:
+                    if _is_pgvector_extension_race(exc):
+                        logger.warning(
+                            'Concurrent pgvector extension initialization detected; continuing startup. error=%s',
+                            exc,
+                        )
+                    else:
+                        logger.error(
+                            'ENABLE_PGVECTOR=true but pgvector extension is not available. '
+                            'Use a pgvector-enabled Postgres image or set ENABLE_PGVECTOR=false. error=%s',
+                            exc,
+                        )
+                        raise
+            Base.metadata.create_all(bind=engine)
 
-        for name in ['ollama', 'metaapi', 'yfinance', 'qdrant', 'order-guardian']:
-            exists = db.query(ConnectorConfig).filter(ConnectorConfig.connector_name == name).first()
-            if not exists:
-                enabled = name != 'order-guardian'
-                db.add(ConnectorConfig(connector_name=name, enabled=enabled, settings={}))
+            db = SessionLocal()
+            try:
+                if db.query(User).count() == 0:
+                    admin = User(
+                        email='admin@local.dev',
+                        hashed_password=get_password_hash('admin1234'),
+                        role=Role.SUPER_ADMIN,
+                        is_active=True,
+                    )
+                    db.add(admin)
 
-        if settings.metaapi_account_id and not db.query(MetaApiAccount).count():
-            db.add(
-                MetaApiAccount(
-                    label='Default MetaApi Account',
-                    account_id=settings.metaapi_account_id,
-                    region=settings.metaapi_region,
-                    enabled=True,
-                    is_default=True,
-                )
-            )
+                for name in ['ollama', 'metaapi', 'yfinance', 'qdrant', 'order-guardian']:
+                    exists = db.query(ConnectorConfig).filter(ConnectorConfig.connector_name == name).first()
+                    if not exists:
+                        enabled = name != 'order-guardian'
+                        db.add(ConnectorConfig(connector_name=name, enabled=enabled, settings={}))
 
-        db.commit()
+                if settings.metaapi_account_id and not db.query(MetaApiAccount).count():
+                    db.add(
+                        MetaApiAccount(
+                            label='Default MetaApi Account',
+                            account_id=settings.metaapi_account_id,
+                            region=settings.metaapi_region,
+                            enabled=True,
+                            is_default=True,
+                        )
+                    )
 
-        PromptTemplateService().seed_defaults(db)
-    finally:
-        db.close()
+                db.commit()
+
+                PromptTemplateService().seed_defaults(db)
+            finally:
+                db.close()
+        _release_startup_lock(lock_fd, mark_done=True)
+    except Exception:
+        _release_startup_lock(lock_fd, mark_done=False)
+        raise
 
     yield
 

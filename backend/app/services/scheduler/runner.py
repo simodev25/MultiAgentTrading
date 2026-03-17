@@ -6,7 +6,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
 from app.db.models.metaapi_account import MetaApiAccount
 from app.db.models.run import AnalysisRun
 from app.services.market.symbols import canonical_symbol, get_market_symbols_config
@@ -58,6 +58,7 @@ def create_and_enqueue_run(
     trace_context: dict[str, Any] | None = None,
 ) -> AnalysisRun:
     from app.tasks.run_analysis_task import execute as run_analysis_task
+    settings = get_settings()
 
     base_trace = {'requested_metaapi_account_ref': metaapi_account_ref}
     if trace_context:
@@ -79,7 +80,7 @@ def create_and_enqueue_run(
     try:
         run_analysis_task.apply_async(
             args=[run.id, float(risk_percent), metaapi_account_ref],
-            queue='analysis',
+            queue=settings.celery_analysis_queue,
             ignore_result=True,
         )
         run.status = 'queued'

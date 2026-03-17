@@ -276,7 +276,9 @@ def test_get_market_candles_uses_redis_cache(monkeypatch) -> None:
         async def get(self, key: str):
             return self.store.get(key)
 
-        async def set(self, key: str, value: str, ex: int | None = None):
+        async def set(self, key: str, value: str, ex: int | None = None, nx: bool | None = None):
+            if nx and key in self.store:
+                return False
             self.store[key] = value
             return True
 
@@ -337,7 +339,9 @@ def test_get_market_candles_refreshes_cache_on_new_bucket(monkeypatch) -> None:
         async def get(self, key: str):
             return self.store.get(key)
 
-        async def set(self, key: str, value: str, ex: int | None = None):
+        async def set(self, key: str, value: str, ex: int | None = None, nx: bool | None = None):
+            if nx and key in self.store:
+                return False
             self.store[key] = value
             return True
 
@@ -401,7 +405,9 @@ def test_get_account_information_uses_redis_cache(monkeypatch) -> None:
         async def get(self, key: str):
             return self.store.get(key)
 
-        async def set(self, key: str, value: str, ex: int | None = None):
+        async def set(self, key: str, value: str, ex: int | None = None, nx: bool | None = None):
+            if nx and key in self.store:
+                return False
             self.store[key] = value
             return True
 

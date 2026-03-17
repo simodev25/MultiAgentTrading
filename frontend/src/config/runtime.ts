@@ -54,5 +54,10 @@ export const runtimeConfig = {
   metaApiRealTradesDashboardLimit: parseIntClamped(import.meta.env.VITE_METAAPI_REAL_TRADES_DASHBOARD_LIMIT, 8, 1, 1000),
   metaApiRealTradesTableLimit: parseIntClamped(import.meta.env.VITE_METAAPI_REAL_TRADES_TABLE_LIMIT, 15, 1, 1000),
   metaApiRealTradesOrdersPageLimit: parseIntClamped(import.meta.env.VITE_METAAPI_REAL_TRADES_ORDERS_PAGE_LIMIT, 25, 1, 1000),
-  metaApiRealtimePricesPollMs: parseIntClamped(import.meta.env.VITE_METAAPI_REALTIME_PRICES_POLL_MS, 4000, 1000, 60000),
+  metaApiRealtimePricesPollMs: parseIntClamped(
+    import.meta.env.VITE_METAAPI_REALTIME_PRICES_POLL_MS ?? import.meta.env.VITE_METAAPI_REAL_TRADES_REFRESH_MS,
+    4000,
+    1000,
+    60000,
+  ),
 };

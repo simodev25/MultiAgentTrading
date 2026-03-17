@@ -1,5 +1,7 @@
 import logging
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
 from sqlalchemy.orm import Session
@@ -7,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.models.agent_step import AgentStep
 from app.db.models.run import AnalysisRun
+from app.db.session import SessionLocal
 from app.observability.metrics import analysis_runs_total, orchestrator_step_duration_seconds
 from app.services.execution.executor import ExecutionService
 from app.services.market.yfinance_provider import YFinanceMarketProvider
@@ -40,6 +43,8 @@ class ForexOrchestrator:
         'risk-manager',
         'execution-manager',
     )
+    _prompt_seed_lock = threading.Lock()
+    _prompt_defaults_seeded = False
 
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -57,6 +62,16 @@ class ForexOrchestrator:
         self.trader_agent = TraderAgent()
         self.risk_manager_agent = RiskManagerAgent()
         self.execution_manager_agent = ExecutionManagerAgent()
+
+    @classmethod
+    def _ensure_prompt_defaults(cls, prompt_service: PromptTemplateService, db: Session) -> None:
+        if cls._prompt_defaults_seeded:
+            return
+        with cls._prompt_seed_lock:
+            if cls._prompt_defaults_seeded:
+                return
+            prompt_service.seed_defaults(db)
+            cls._prompt_defaults_seeded = True
 
     def _record_step(self, db: Session, run: AnalysisRun, agent_name: str, input_payload: dict[str, Any], output_payload: dict[str, Any]) -> None:
         step = AgentStep(
@@ -143,47 +158,103 @@ class ForexOrchestrator:
                 )
             return output
 
+        def execute_parallel_steps(
+            steps: list[tuple[str, dict[str, Any], Callable[[Session | None], dict[str, Any]]]],
+        ) -> dict[str, dict[str, Any]]:
+            if len(steps) <= 1 or self.settings.orchestrator_parallel_workers <= 1:
+                outputs: dict[str, dict[str, Any]] = {}
+                for agent_name, input_payload, fn in steps:
+                    outputs[agent_name] = execute_step(agent_name, input_payload, lambda fn=fn: fn(db))
+                return outputs
+
+            max_workers = min(len(steps), int(self.settings.orchestrator_parallel_workers))
+            finished: dict[str, tuple[dict[str, Any], float]] = {}
+
+            def run_one(agent_name: str, fn: Callable[[Session | None], dict[str, Any]]) -> tuple[dict[str, Any], float]:
+                started = time.perf_counter()
+                local_db: Session | None = None
+                try:
+                    if db is not None:
+                        local_db = SessionLocal()
+                    output = fn(local_db if local_db is not None else db)
+                    elapsed = time.perf_counter() - started
+                    return output, elapsed
+                finally:
+                    if local_db is not None:
+                        local_db.close()
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_map = {
+                    executor.submit(run_one, agent_name, fn): (agent_name, input_payload)
+                    for agent_name, input_payload, fn in steps
+                }
+                for future in as_completed(future_map):
+                    agent_name, _ = future_map[future]
+                    output, elapsed = future.result()
+                    finished[agent_name] = (output, elapsed)
+
+            ordered: dict[str, dict[str, Any]] = {}
+            for agent_name, input_payload, _ in steps:
+                output, elapsed = finished[agent_name]
+                orchestrator_step_duration_seconds.labels(agent=agent_name).observe(elapsed)
+                if record_steps and db is not None and run is not None:
+                    self._record_step(db, run, agent_name, input_payload, output)
+                if self.settings.log_agent_steps and emit_step_logs:
+                    logger.info(
+                        'agent_step mode=%s pair=%s timeframe=%s agent=%s summary=%s',
+                        context.mode,
+                        context.pair,
+                        context.timeframe,
+                        agent_name,
+                        summarize_output(output),
+                    )
+                ordered[agent_name] = output
+            return ordered
+
         analysis_outputs: dict[str, dict[str, Any]] = {}
-
-        tech_out = execute_step(
-            self.technical_agent.name,
-            {'pair': context.pair, 'timeframe': context.timeframe},
-            lambda: self.technical_agent.run(context, db=db),
+        initial_outputs = execute_parallel_steps(
+            [
+                (
+                    self.technical_agent.name,
+                    {'pair': context.pair, 'timeframe': context.timeframe},
+                    lambda local_db: self.technical_agent.run(context, db=local_db),
+                ),
+                (
+                    self.news_agent.name,
+                    {'news_count': len(context.news_context.get('news', [])), 'memory_context': context.memory_context},
+                    lambda local_db: self.news_agent.run(context, db=local_db),
+                ),
+                (
+                    self.macro_agent.name,
+                    {'market': context.market_snapshot},
+                    lambda local_db: self.macro_agent.run(context, db=local_db),
+                ),
+                (
+                    self.sentiment_agent.name,
+                    {'market': context.market_snapshot},
+                    lambda local_db: self.sentiment_agent.run(context, db=local_db),
+                ),
+            ]
         )
-        analysis_outputs[self.technical_agent.name] = tech_out
+        analysis_outputs.update(initial_outputs)
 
-        news_out = execute_step(
-            self.news_agent.name,
-            {'news_count': len(context.news_context.get('news', [])), 'memory_context': context.memory_context},
-            lambda: self.news_agent.run(context, db=db),
+        analysis_snapshot = dict(analysis_outputs)
+        debate_outputs = execute_parallel_steps(
+            [
+                (
+                    self.bullish_researcher.name,
+                    {'analysis_outputs': analysis_snapshot, 'memory_context': context.memory_context},
+                    lambda local_db: self.bullish_researcher.run(context, analysis_snapshot, db=local_db),
+                ),
+                (
+                    self.bearish_researcher.name,
+                    {'analysis_outputs': analysis_snapshot, 'memory_context': context.memory_context},
+                    lambda local_db: self.bearish_researcher.run(context, analysis_snapshot, db=local_db),
+                ),
+            ]
         )
-        analysis_outputs[self.news_agent.name] = news_out
-
-        macro_out = execute_step(
-            self.macro_agent.name,
-            {'market': context.market_snapshot},
-            lambda: self.macro_agent.run(context, db=db),
-        )
-        analysis_outputs[self.macro_agent.name] = macro_out
-
-        sentiment_out = execute_step(
-            self.sentiment_agent.name,
-            {'market': context.market_snapshot},
-            lambda: self.sentiment_agent.run(context, db=db),
-        )
-        analysis_outputs[self.sentiment_agent.name] = sentiment_out
-
-        bullish = execute_step(
-            self.bullish_researcher.name,
-            {'analysis_outputs': analysis_outputs, 'memory_context': context.memory_context},
-            lambda: self.bullish_researcher.run(context, analysis_outputs, db=db),
-        )
-
-        bearish = execute_step(
-            self.bearish_researcher.name,
-            {'analysis_outputs': analysis_outputs, 'memory_context': context.memory_context},
-            lambda: self.bearish_researcher.run(context, analysis_outputs, db=db),
-        )
+        bullish = debate_outputs[self.bullish_researcher.name]
+        bearish = debate_outputs[self.bearish_researcher.name]
 
         trader_decision = execute_step(
             self.trader_agent.name,
@@ -217,7 +288,7 @@ class ForexOrchestrator:
         db.commit()
         db.refresh(run)
 
-        self.prompt_service.seed_defaults(db)
+        self._ensure_prompt_defaults(self.prompt_service, db)
 
         market = self.market_provider.get_market_snapshot(run.pair, run.timeframe)
         news = self.market_provider.get_news_context(run.pair)
