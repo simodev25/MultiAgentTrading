@@ -304,6 +304,14 @@ a:hover {
   grid-column: span 12;
 }
 
+.run-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .dashboard-page .launch-card {
   grid-column: span 8;
 }

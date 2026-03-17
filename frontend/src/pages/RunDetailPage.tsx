@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api, wsRunUrl } from '../api/client';
 import { useAuth } from '../hooks/useAuth';
-import type { RunDetail } from '../types';
+import type { AgentStep, RunDetail } from '../types';
 
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed']);
 const WS_RECONNECT_DELAY_MS = 3000;
@@ -16,6 +16,61 @@ function asPrettyJson(value: unknown): string {
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function collectLlmFields(value: unknown, path = 'output_payload'): Array<{ path: string; value: unknown }> {
+  if (Array.isArray(value)) {
+    return value.flatMap((item, index) => collectLlmFields(item, `${path}[${index}]`));
+  }
+  if (!isRecord(value)) {
+    return [];
+  }
+
+  const fields: Array<{ path: string; value: unknown }> = [];
+  for (const [key, nestedValue] of Object.entries(value)) {
+    const keyPath = `${path}.${key}`;
+    if (key.toLowerCase().includes('llm')) {
+      fields.push({ path: keyPath, value: nestedValue });
+      continue;
+    }
+    fields.push(...collectLlmFields(nestedValue, keyPath));
+  }
+  return fields;
+}
+
+function toFileSafePart(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+}
+
+function buildLlmStepExport(step: AgentStep) {
+  const payload = step.output_payload;
+  const llmFields = collectLlmFields(payload);
+  const llmEnabled = isRecord(payload) && typeof payload.llm_enabled === 'boolean' ? payload.llm_enabled : null;
+  const llmModel = isRecord(payload) && typeof payload.llm_model === 'string' ? payload.llm_model : null;
+
+  if (llmFields.length === 0 && llmEnabled === null && llmModel === null) {
+    return null;
+  }
+
+  return {
+    step_id: step.id,
+    agent_name: step.agent_name,
+    status: step.status,
+    created_at: step.created_at,
+    llm_enabled: llmEnabled,
+    llm_model: llmModel,
+    llm_fields: llmFields,
+    output_payload: payload,
+    error: step.error ?? null,
+  };
+}
+
 export function RunDetailPage() {
   const { runId = '' } = useParams();
   const { token } = useAuth();
@@ -23,6 +78,10 @@ export function RunDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const inFlightRef = useRef(false);
   const runStatusRef = useRef<string | null>(null);
+  const llmStepExports = useMemo(
+    () => (run ? run.steps.map((step) => buildLlmStepExport(step)).filter((step) => step !== null) : []),
+    [run],
+  );
 
   useEffect(() => {
     runStatusRef.current = run?.status ?? null;
@@ -141,10 +200,57 @@ export function RunDetailPage() {
   if (error) return <div className="alert">{error}</div>;
   if (!run) return <div>Chargement...</div>;
 
+  const downloadLlmAnalyses = () => {
+    const payload = {
+      exported_at: new Date().toISOString(),
+      run: {
+        id: run.id,
+        pair: run.pair,
+        timeframe: run.timeframe,
+        mode: run.mode,
+        status: run.status,
+        created_at: run.created_at,
+        updated_at: run.updated_at,
+      },
+      llm_steps: llmStepExports,
+      llm_steps_count: llmStepExports.length,
+    };
+
+    const fileName = [
+      `run-${run.id}`,
+      toFileSafePart(run.pair),
+      toFileSafePart(run.timeframe),
+      'llm-analyses.json',
+    ]
+      .filter(Boolean)
+      .join('-');
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="dashboard-grid">
       <section className="card primary">
-        <h2>Run #{run.id} - {run.pair} {run.timeframe}</h2>
+        <div className="run-detail-header">
+          <h2>Run #{run.id} - {run.pair} {run.timeframe}</h2>
+          <button
+            type="button"
+            className="btn-ghost"
+            onClick={downloadLlmAnalyses}
+            disabled={llmStepExports.length === 0}
+            title={llmStepExports.length === 0 ? 'Aucune analyse LLM detectee sur ce run' : 'Telecharger toutes les analyses LLM'}
+          >
+            Télécharger analyses LLM ({llmStepExports.length})
+          </button>
+        </div>
         <p>
           Status: <span className={`badge ${run.status}`}>{run.status}</span>
         </p>
