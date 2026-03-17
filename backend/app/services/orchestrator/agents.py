@@ -1,5 +1,5 @@
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.services.llm.ollama_client import OllamaCloudClient
 from app.services.llm.model_selector import AgentModelSelector
 from app.services.prompts.registry import PromptTemplateService
+from app.services.risk.rules import RiskEngine
 
 
 @dataclass
@@ -18,6 +19,7 @@ class AgentContext:
     market_snapshot: dict[str, Any]
     news_context: dict[str, Any]
     memory_context: list[dict[str, Any]]
+    llm_model_overrides: dict[str, str] = field(default_factory=dict)
 
 
 def _parse_signal_from_text(text: str) -> str:
@@ -27,6 +29,33 @@ def _parse_signal_from_text(text: str) -> str:
     if any(keyword in lowered for keyword in ['bearish', 'baissier', 'baisse']):
         return 'bearish'
     return 'neutral'
+
+
+def _parse_trade_decision_from_text(text: str) -> str:
+    lowered = text.lower()
+    if any(keyword in lowered for keyword in ['hold', 'attendre', 'no trade', 'ne pas trader', 'skip']):
+        return 'HOLD'
+    if any(keyword in lowered for keyword in ['sell', 'vente', 'vendre']):
+        return 'SELL'
+    if any(keyword in lowered for keyword in ['buy', 'achat', 'acheter']):
+        return 'BUY'
+    return 'HOLD'
+
+
+def _parse_risk_acceptance_from_text(text: str, default_value: bool) -> bool:
+    lowered = text.lower()
+    if any(keyword in lowered for keyword in ['reject', 'refuse', 'rejeter', 'deny', 'bloquer', 'block trade']):
+        return False
+    if any(keyword in lowered for keyword in ['approve', 'accept', 'accepter', 'allow', 'autoriser', 'valider']):
+        return True
+    return default_value
+
+
+def _resolve_llm_model(ctx: AgentContext, selector: AgentModelSelector, db: Session | None, agent_name: str) -> str:
+    override = str((ctx.llm_model_overrides or {}).get(agent_name, '')).strip()
+    if override:
+        return override
+    return selector.resolve(db, agent_name)
 
 
 class TechnicalAnalystAgent:
@@ -65,7 +94,7 @@ class TechnicalAnalystAgent:
             'indicators': m,
             'llm_enabled': self.model_selector.is_enabled(db, self.name),
         }
-        llm_model = self.model_selector.resolve(db, self.name)
+        llm_model = _resolve_llm_model(ctx, self.model_selector, db, self.name)
         output['prompt_meta'] = {
             'prompt_id': None,
             'prompt_version': 0,
@@ -160,7 +189,7 @@ class NewsAnalystAgent:
         )
 
         llm_enabled = self.model_selector.is_enabled(db, self.name)
-        llm_model = self.model_selector.resolve(db, self.name)
+        llm_model = _resolve_llm_model(ctx, self.model_selector, db, self.name)
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
         if db is not None and llm_enabled:
             prompt_info = self.prompt_service.render(
@@ -238,7 +267,7 @@ class MacroAnalystAgent:
 
         llm_enabled = self.model_selector.is_enabled(db, self.name)
         output['llm_enabled'] = llm_enabled
-        llm_model = self.model_selector.resolve(db, self.name)
+        llm_model = _resolve_llm_model(ctx, self.model_selector, db, self.name)
         output['prompt_meta'] = {
             'prompt_id': None,
             'prompt_version': 0,
@@ -322,7 +351,7 @@ class SentimentAgent:
 
         llm_enabled = self.model_selector.is_enabled(db, self.name)
         output['llm_enabled'] = llm_enabled
-        llm_model = self.model_selector.resolve(db, self.name)
+        llm_model = _resolve_llm_model(ctx, self.model_selector, db, self.name)
         output['prompt_meta'] = {
             'prompt_id': None,
             'prompt_version': 0,
@@ -407,7 +436,7 @@ class BullishResearcherAgent:
 
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
         llm_enabled = self.model_selector.is_enabled(db, self.name)
-        llm_model = self.model_selector.resolve(db, self.name)
+        llm_model = _resolve_llm_model(ctx, self.model_selector, db, self.name)
         if db is not None and llm_enabled:
             prompt_info = self.prompt_service.render(
                 db=db,
@@ -464,7 +493,7 @@ class BearishResearcherAgent:
 
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
         llm_enabled = self.model_selector.is_enabled(db, self.name)
-        llm_model = self.model_selector.resolve(db, self.name)
+        llm_model = _resolve_llm_model(ctx, self.model_selector, db, self.name)
         if db is not None and llm_enabled:
             prompt_info = self.prompt_service.render(
                 db=db,
@@ -555,7 +584,7 @@ class TraderAgent:
             },
         }
         llm_enabled = self.model_selector.is_enabled(db, self.name)
-        llm_model = self.model_selector.resolve(db, self.name)
+        llm_model = _resolve_llm_model(ctx, self.model_selector, db, self.name)
         output['prompt_meta'] = {
             'prompt_id': None,
             'prompt_version': 0,
@@ -606,6 +635,240 @@ class TraderAgent:
             model=llm_model,
         )
         output['execution_note'] = llm_res.get('text', '')
+        output['degraded'] = llm_res.get('degraded', False)
+        output['prompt_meta'] = {
+            'prompt_id': prompt_info.get('prompt_id'),
+            'prompt_version': prompt_info.get('version', 0),
+            'llm_enabled': llm_enabled,
+            'llm_model': llm_model,
+        }
+        return output
+
+
+class RiskManagerAgent:
+    name = 'risk-manager'
+
+    def __init__(self) -> None:
+        self.risk_engine = RiskEngine()
+        self.llm = OllamaCloudClient()
+        self.model_selector = AgentModelSelector()
+        self.prompt_service = PromptTemplateService()
+
+    def run(
+        self,
+        ctx: AgentContext,
+        trader_decision: dict[str, Any],
+        db: Session | None = None,
+    ) -> dict[str, Any]:
+        decision = str(trader_decision.get('decision', 'HOLD')).strip().upper() or 'HOLD'
+        entry = float(trader_decision.get('entry') or 1.0)
+        stop_loss = trader_decision.get('stop_loss')
+
+        risk = self.risk_engine.evaluate(
+            mode=ctx.mode,
+            decision=decision,
+            risk_percent=ctx.risk_percent,
+            price=entry,
+            stop_loss=stop_loss,
+        )
+
+        output: dict[str, Any] = {
+            'accepted': risk.accepted,
+            'reasons': risk.reasons,
+            'suggested_volume': risk.suggested_volume,
+        }
+
+        llm_enabled = self.model_selector.is_enabled(db, self.name)
+        llm_model = _resolve_llm_model(ctx, self.model_selector, db, self.name)
+        output['prompt_meta'] = {
+            'prompt_id': None,
+            'prompt_version': 0,
+            'llm_enabled': llm_enabled,
+            'llm_model': llm_model,
+        }
+        if not llm_enabled:
+            return output
+
+        fallback_system = (
+            "Tu es un risk manager Forex. "
+            "Valide ou refuse l'exposition proposée et explique brièvement la décision."
+        )
+        fallback_user = (
+            "Pair: {pair}\nTimeframe: {timeframe}\nMode: {mode}\nDecision: {decision}\n"
+            "Entry: {entry}\nStop loss: {stop_loss}\nTake profit: {take_profit}\nRisk %: {risk_percent}\n"
+            "Sortie déterministe: accepted={accepted}, suggested_volume={suggested_volume}, reasons={reasons}\n"
+            "Réponds avec APPROVE ou REJECT puis une justification concise."
+        )
+        prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
+        if db is not None:
+            prompt_info = self.prompt_service.render(
+                db=db,
+                agent_name=self.name,
+                fallback_system=fallback_system,
+                fallback_user=fallback_user,
+                variables={
+                    'pair': ctx.pair,
+                    'timeframe': ctx.timeframe,
+                    'mode': ctx.mode,
+                    'decision': decision,
+                    'entry': entry,
+                    'stop_loss': stop_loss,
+                    'take_profit': trader_decision.get('take_profit'),
+                    'risk_percent': ctx.risk_percent,
+                    'accepted': output.get('accepted'),
+                    'suggested_volume': output.get('suggested_volume'),
+                    'reasons': json.dumps(output.get('reasons', []), ensure_ascii=True),
+                },
+            )
+            system_prompt = prompt_info['system_prompt']
+            user_prompt = prompt_info['user_prompt']
+        else:
+            system_prompt = fallback_system
+            user_prompt = fallback_user.format(
+                pair=ctx.pair,
+                timeframe=ctx.timeframe,
+                mode=ctx.mode,
+                decision=decision,
+                entry=entry,
+                stop_loss=stop_loss,
+                take_profit=trader_decision.get('take_profit'),
+                risk_percent=ctx.risk_percent,
+                accepted=output.get('accepted'),
+                suggested_volume=output.get('suggested_volume'),
+                reasons=json.dumps(output.get('reasons', []), ensure_ascii=True),
+            )
+
+        llm_res = self.llm.chat(system_prompt, user_prompt, model=llm_model)
+        llm_acceptance = _parse_risk_acceptance_from_text(llm_res.get('text', ''), bool(output.get('accepted')))
+        if bool(output.get('accepted')) and not llm_acceptance:
+            output['accepted'] = False
+            output['reasons'] = [*output.get('reasons', []), 'LLM risk veto: validation refusée.']
+            output['suggested_volume'] = 0.0
+        elif not bool(output.get('accepted')) and llm_acceptance:
+            output['reasons'] = [
+                *output.get('reasons', []),
+                'LLM favorable, mais blocage conservé par les règles déterministes.',
+            ]
+
+        output['llm_review'] = llm_res.get('text', '')
+        output['degraded'] = llm_res.get('degraded', False)
+        output['prompt_meta'] = {
+            'prompt_id': prompt_info.get('prompt_id'),
+            'prompt_version': prompt_info.get('version', 0),
+            'llm_enabled': llm_enabled,
+            'llm_model': llm_model,
+        }
+        return output
+
+
+class ExecutionManagerAgent:
+    name = 'execution-manager'
+
+    def __init__(self) -> None:
+        self.llm = OllamaCloudClient()
+        self.model_selector = AgentModelSelector()
+        self.prompt_service = PromptTemplateService()
+
+    def run(
+        self,
+        ctx: AgentContext,
+        trader_decision: dict[str, Any],
+        risk_output: dict[str, Any],
+        db: Session | None = None,
+    ) -> dict[str, Any]:
+        decision = str(trader_decision.get('decision', 'HOLD')).strip().upper() or 'HOLD'
+        deterministic_allowed = bool(risk_output.get('accepted')) and decision in {'BUY', 'SELL'}
+        suggested_volume = float(risk_output.get('suggested_volume', 0.0) or 0.0)
+
+        if deterministic_allowed:
+            reason = 'Trade eligible based on trader decision + risk checks.'
+        elif decision not in {'BUY', 'SELL'}:
+            reason = f'No execution for decision={decision}.'
+        else:
+            reason = 'Risk checks blocked execution.'
+
+        output: dict[str, Any] = {
+            'decision': decision,
+            'should_execute': deterministic_allowed,
+            'side': decision if decision in {'BUY', 'SELL'} else None,
+            'volume': suggested_volume,
+            'reason': reason,
+        }
+
+        llm_enabled = self.model_selector.is_enabled(db, self.name)
+        llm_model = _resolve_llm_model(ctx, self.model_selector, db, self.name)
+        output['prompt_meta'] = {
+            'prompt_id': None,
+            'prompt_version': 0,
+            'llm_enabled': llm_enabled,
+            'llm_model': llm_model,
+        }
+        if not llm_enabled:
+            return output
+
+        fallback_system = (
+            "Tu es un execution manager Forex. "
+            "Confirme la décision exécutable (BUY/SELL) ou impose HOLD si le contexte impose la prudence."
+        )
+        fallback_user = (
+            "Pair: {pair}\nTimeframe: {timeframe}\nMode: {mode}\nDecision trader: {decision}\n"
+            "Risk accepted: {risk_accepted}\nSuggested volume: {suggested_volume}\n"
+            "Stop loss: {stop_loss}\nTake profit: {take_profit}\n"
+            "Réponds par BUY, SELL ou HOLD puis une justification concise."
+        )
+        prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
+        if db is not None:
+            prompt_info = self.prompt_service.render(
+                db=db,
+                agent_name=self.name,
+                fallback_system=fallback_system,
+                fallback_user=fallback_user,
+                variables={
+                    'pair': ctx.pair,
+                    'timeframe': ctx.timeframe,
+                    'mode': ctx.mode,
+                    'decision': decision,
+                    'risk_accepted': bool(risk_output.get('accepted')),
+                    'suggested_volume': suggested_volume,
+                    'stop_loss': trader_decision.get('stop_loss'),
+                    'take_profit': trader_decision.get('take_profit'),
+                },
+            )
+            system_prompt = prompt_info['system_prompt']
+            user_prompt = prompt_info['user_prompt']
+        else:
+            system_prompt = fallback_system
+            user_prompt = fallback_user.format(
+                pair=ctx.pair,
+                timeframe=ctx.timeframe,
+                mode=ctx.mode,
+                decision=decision,
+                risk_accepted=bool(risk_output.get('accepted')),
+                suggested_volume=suggested_volume,
+                stop_loss=trader_decision.get('stop_loss'),
+                take_profit=trader_decision.get('take_profit'),
+            )
+
+        llm_res = self.llm.chat(system_prompt, user_prompt, model=llm_model)
+        llm_decision = _parse_trade_decision_from_text(llm_res.get('text', ''))
+        llm_reason = 'LLM validated deterministic execution plan.'
+        if output['should_execute']:
+            if llm_decision == 'HOLD':
+                output['should_execute'] = False
+                output['side'] = None
+                output['volume'] = 0.0
+                llm_reason = 'LLM switched to HOLD for safety.'
+            elif llm_decision in {'BUY', 'SELL'} and llm_decision != decision:
+                output['should_execute'] = False
+                output['side'] = None
+                output['volume'] = 0.0
+                llm_reason = f'LLM reported conflict ({llm_decision} vs {decision}), execution blocked.'
+        elif llm_decision in {'BUY', 'SELL'}:
+            llm_reason = f'LLM suggested {llm_decision}, but deterministic gates kept execution blocked.'
+
+        output['reason'] = llm_reason
+        output['llm_decision'] = llm_decision
+        output['llm_review'] = llm_res.get('text', '')
         output['degraded'] = llm_res.get('degraded', False)
         output['prompt_meta'] = {
             'prompt_id': prompt_info.get('prompt_id'),

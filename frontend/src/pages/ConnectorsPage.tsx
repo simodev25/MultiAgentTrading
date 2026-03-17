@@ -24,16 +24,10 @@ const ORCHESTRATION_AGENTS = [
   'execution-manager',
   'schedule-planner-agent',
 ];
-const SWITCHABLE_LLM_AGENTS = new Set([
-  'technical-analyst',
-  'news-analyst',
-  'macro-analyst',
-  'sentiment-agent',
-  'bullish-researcher',
-  'bearish-researcher',
-  'trader-agent',
-  'schedule-planner-agent',
-]);
+const MODEL_EDIT_AGENTS = [...ORCHESTRATION_AGENTS, 'order-guardian'];
+const PROMPT_EDITABLE_AGENTS = [...MODEL_EDIT_AGENTS];
+const SWITCHABLE_LLM_AGENTS = new Set(MODEL_EDIT_AGENTS);
+const MODEL_OVERRIDE_EDITABLE_AGENTS = new Set(MODEL_EDIT_AGENTS);
 const DEFAULT_AGENT_LLM_ENABLED: Record<string, boolean> = {
   'technical-analyst': false,
   'news-analyst': true,
@@ -45,6 +39,7 @@ const DEFAULT_AGENT_LLM_ENABLED: Record<string, boolean> = {
   'risk-manager': false,
   'execution-manager': false,
   'schedule-planner-agent': true,
+  'order-guardian': false,
 };
 const AGENT_PROMPT_FALLBACKS: Record<string, { system: string; user: string }> = {
   'technical-analyst': {
@@ -74,6 +69,32 @@ const AGENT_PROMPT_FALLBACKS: Record<string, { system: string; user: string }> =
   'trader-agent': {
     system: "Tu es un assistant trader Forex. Résume la note d'exécution.",
     user: 'Pair: {pair}\nTimeframe: {timeframe}\nDecision: {decision}\nBullish: {bullish_args}\nBearish: {bearish_args}\nNotes: {risk_notes}',
+  },
+  'risk-manager': {
+    system: 'Tu es un risk manager Forex.',
+    user: (
+      'Pair: {pair}\nTimeframe: {timeframe}\nMode: {mode}\nDecision: {decision}\n'
+      + 'Entry: {entry}\nStop loss: {stop_loss}\nTake profit: {take_profit}\nRisk %: {risk_percent}\n'
+      + 'Sortie déterministe: accepted={accepted}, suggested_volume={suggested_volume}, reasons={reasons}\n'
+      + 'Retour attendu: APPROVE ou REJECT puis justification concise.'
+    ),
+  },
+  'execution-manager': {
+    system: 'Tu es un execution manager Forex.',
+    user: (
+      'Pair: {pair}\nTimeframe: {timeframe}\nMode: {mode}\nDecision trader: {decision}\n'
+      + 'Risk accepted: {risk_accepted}\nSuggested volume: {suggested_volume}\n'
+      + 'Stop loss: {stop_loss}\nTake profit: {take_profit}\n'
+      + 'Retour attendu: BUY, SELL ou HOLD puis justification concise.'
+    ),
+  },
+  'order-guardian': {
+    system: 'Tu es Order Guardian MT5.',
+    user: (
+      'Compte: {account_label}\nTimeframe guardian: {timeframe}\nMode: {mode}\n'
+      + 'Résumé cycle: {summary_json}\nActions: {actions_json}\n'
+      + 'Produis un rapport court en français: risques, actions majeures, points de suivi.'
+    ),
   },
   'schedule-planner-agent': {
     system: 'Tu es un agent dédié à l’automatisation intelligente des plans cron Forex.',
@@ -150,10 +171,10 @@ export function ConnectorsPage() {
 
   const [defaultLlmModel, setDefaultLlmModel] = useState('llama3.1');
   const [agentModels, setAgentModels] = useState<Record<string, string>>(
-    Object.fromEntries(ORCHESTRATION_AGENTS.map((agent) => [agent, ''])),
+    Object.fromEntries(MODEL_EDIT_AGENTS.map((agent) => [agent, ''])),
   );
   const [agentLlmEnabled, setAgentLlmEnabled] = useState<Record<string, boolean>>(
-    Object.fromEntries(ORCHESTRATION_AGENTS.map((agent) => [agent, DEFAULT_AGENT_LLM_ENABLED[agent] ?? false])),
+    Object.fromEntries(MODEL_EDIT_AGENTS.map((agent) => [agent, DEFAULT_AGENT_LLM_ENABLED[agent] ?? false])),
   );
   const [modelChoices, setModelChoices] = useState<string[]>([]);
   const [modelSource, setModelSource] = useState<string>('');
@@ -194,7 +215,7 @@ export function ConnectorsPage() {
 
     const next: Record<string, string> = {};
     const nextEnabled: Record<string, boolean> = {};
-    ORCHESTRATION_AGENTS.forEach((agentName) => {
+    MODEL_EDIT_AGENTS.forEach((agentName) => {
       const value = rawMap[agentName];
       next[agentName] = typeof value === 'string' ? value : '';
       const enabledValue = rawEnabled[agentName];
@@ -333,7 +354,7 @@ export function ConnectorsPage() {
         .filter(([, model]) => model.length > 0),
     );
     const cleanedEnabled = Object.fromEntries(
-      ORCHESTRATION_AGENTS.map((agentName) => [agentName, SWITCHABLE_LLM_AGENTS.has(agentName) ? Boolean(agentLlmEnabled[agentName]) : false]),
+      MODEL_EDIT_AGENTS.map((agentName) => [agentName, SWITCHABLE_LLM_AGENTS.has(agentName) ? Boolean(agentLlmEnabled[agentName]) : false]),
     );
     const existingSettings = (ollama.settings ?? {}) as Record<string, unknown>;
 
@@ -671,7 +692,7 @@ export function ConnectorsPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {ORCHESTRATION_AGENTS.map((agentName) => (
+                    {MODEL_EDIT_AGENTS.map((agentName) => (
                       <tr key={agentName}>
                         <td>{agentName}</td>
                         <td>
@@ -679,7 +700,6 @@ export function ConnectorsPage() {
                             className="ui-switch"
                             type="checkbox"
                             checked={Boolean(agentLlmEnabled[agentName])}
-                            disabled={!SWITCHABLE_LLM_AGENTS.has(agentName)}
                             onChange={(e) => setAgentLlmEnabled((prev) => ({ ...prev, [agentName]: e.target.checked }))}
                           />
                         </td>
@@ -689,7 +709,7 @@ export function ConnectorsPage() {
                             value={agentModels[agentName] ?? ''}
                             onChange={(e) => setAgentModels((prev) => ({ ...prev, [agentName]: e.target.value }))}
                             placeholder={`hérite: ${defaultLlmModel || 'llama3.1'}`}
-                            disabled={!SWITCHABLE_LLM_AGENTS.has(agentName)}
+                            disabled={!MODEL_OVERRIDE_EDITABLE_AGENTS.has(agentName)}
                           />
                         </td>
                         <td>
@@ -714,6 +734,9 @@ export function ConnectorsPage() {
                     ))}
                   </tbody>
                 </table>
+                <p className="model-source">
+                  Les prompts de `risk-manager`, `execution-manager` et `order-guardian` sont versionnés ici.
+                </p>
 
                 <button className="btn-primary" disabled={savingModels}>{savingModels ? 'Enregistrement...' : 'Enregistrer les modèles'}</button>
               </form>
@@ -725,7 +748,7 @@ export function ConnectorsPage() {
                 <label>
                   Agent
                   <select value={promptAgent} onChange={(e) => setPromptAgent(e.target.value)}>
-                    {ORCHESTRATION_AGENTS.map((agentName) => (
+                    {PROMPT_EDITABLE_AGENTS.map((agentName) => (
                       <option key={agentName} value={agentName}>
                         {agentName}
                       </option>

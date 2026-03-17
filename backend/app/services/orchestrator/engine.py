@@ -15,14 +15,15 @@ from app.services.orchestrator.agents import (
     AgentContext,
     BearishResearcherAgent,
     BullishResearcherAgent,
+    ExecutionManagerAgent,
     MacroAnalystAgent,
     NewsAnalystAgent,
+    RiskManagerAgent,
     SentimentAgent,
     TechnicalAnalystAgent,
     TraderAgent,
 )
 from app.services.prompts.registry import PromptTemplateService
-from app.services.risk.rules import RiskEngine
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,6 @@ class ForexOrchestrator:
         self.market_provider = YFinanceMarketProvider()
         self.memory_service = VectorMemoryService()
         self.prompt_service = PromptTemplateService()
-        self.risk_engine = RiskEngine()
         self.execution_service = ExecutionService()
 
         self.technical_agent = TechnicalAnalystAgent()
@@ -55,6 +55,8 @@ class ForexOrchestrator:
         self.bullish_researcher = BullishResearcherAgent(self.prompt_service)
         self.bearish_researcher = BearishResearcherAgent(self.prompt_service)
         self.trader_agent = TraderAgent()
+        self.risk_manager_agent = RiskManagerAgent()
+        self.execution_manager_agent = ExecutionManagerAgent()
 
     def _record_step(self, db: Session, run: AnalysisRun, agent_name: str, input_payload: dict[str, Any], output_payload: dict[str, Any]) -> None:
         step = AgentStep(
@@ -106,7 +108,17 @@ class ForexOrchestrator:
 
         def summarize_output(output: dict[str, Any]) -> dict[str, Any]:
             summary: dict[str, Any] = {}
-            for key in ('signal', 'score', 'decision', 'confidence', 'net_score', 'accepted', 'suggested_volume'):
+            for key in (
+                'signal',
+                'score',
+                'decision',
+                'confidence',
+                'net_score',
+                'accepted',
+                'suggested_volume',
+                'should_execute',
+                'status',
+            ):
                 if key in output:
                     summary[key] = output[key]
             return summary
@@ -179,24 +191,11 @@ class ForexOrchestrator:
             lambda: self.trader_agent.run(context, analysis_outputs, bullish, bearish, db=db),
         )
 
-        risk = self.risk_engine.evaluate(
-            mode=context.mode,
-            decision=trader_decision['decision'],
-            risk_percent=context.risk_percent,
-            price=trader_decision['entry'] or 1.0,
-            stop_loss=trader_decision.get('stop_loss'),
+        risk_output = execute_step(
+            self.risk_manager_agent.name,
+            {'trader_decision': trader_decision},
+            lambda: self.risk_manager_agent.run(context, trader_decision, db=db),
         )
-        risk_output = {'accepted': risk.accepted, 'reasons': risk.reasons, 'suggested_volume': risk.suggested_volume}
-        if record_steps and db is not None and run is not None:
-            self._record_step(db, run, 'risk-manager', trader_decision, risk_output)
-        if self.settings.log_agent_steps and emit_step_logs:
-            logger.info(
-                'agent_step mode=%s pair=%s timeframe=%s agent=risk-manager summary=%s',
-                context.mode,
-                context.pair,
-                context.timeframe,
-                summarize_output(risk_output),
-            )
 
         return {
             'analysis_outputs': analysis_outputs,
@@ -251,25 +250,61 @@ class ForexOrchestrator:
             if metaapi_account_ref is None:
                 metaapi_account_ref = int((run.trace or {}).get('requested_metaapi_account_ref', 0) or 0) or None
 
-            execution_result: dict[str, Any] = {'status': 'skipped'}
-            if bool(risk_output.get('accepted')) and trader_decision['decision'] in {'BUY', 'SELL'}:
+            execution_input = {
+                'trader_decision': trader_decision,
+                'risk': risk_output,
+                'metaapi_account_ref': metaapi_account_ref,
+            }
+            execution_started = time.perf_counter()
+            execution_plan = self.execution_manager_agent.run(
+                context,
+                trader_decision,
+                risk_output,
+                db=db,
+            )
+
+            execution_result: dict[str, Any] = {
+                'status': 'skipped',
+                'reason': execution_plan.get('reason', 'Execution blocked by execution-manager'),
+            }
+            if bool(execution_plan.get('should_execute')) and execution_plan.get('side') in {'BUY', 'SELL'}:
                 execution_result = await self.execution_service.execute(
                     db=db,
                     run_id=run.id,
                     mode=run.mode,
                     symbol=run.pair,
-                    side=trader_decision['decision'],
-                    volume=float(risk_output.get('suggested_volume', 0.0)),
+                    side=str(execution_plan.get('side')),
+                    volume=float(execution_plan.get('volume', 0.0)),
                     stop_loss=trader_decision.get('stop_loss'),
                     take_profit=trader_decision.get('take_profit'),
                     metaapi_account_ref=metaapi_account_ref,
                 )
-            self._record_step(db, run, 'execution-manager', risk_output, execution_result)
+            execution_elapsed = time.perf_counter() - execution_started
+            orchestrator_step_duration_seconds.labels(agent='execution-manager').observe(execution_elapsed)
+            execution_output = {
+                **execution_plan,
+                'execution': execution_result,
+                'status': execution_result.get('status', 'completed' if execution_result.get('executed') else 'skipped'),
+            }
+            self._record_step(db, run, 'execution-manager', execution_input, execution_output)
+            if self.settings.log_agent_steps:
+                logger.info(
+                    'agent_step mode=%s pair=%s timeframe=%s agent=execution-manager summary=%s',
+                    context.mode,
+                    context.pair,
+                    context.timeframe,
+                    {
+                        'decision': execution_output.get('decision'),
+                        'should_execute': execution_output.get('should_execute'),
+                        'status': execution_output.get('status'),
+                    },
+                )
 
             run.decision = {
                 **trader_decision,
                 'risk': risk_output,
                 'execution': execution_result,
+                'execution_manager': execution_output,
             }
             run.trace = {
                 'market': market,

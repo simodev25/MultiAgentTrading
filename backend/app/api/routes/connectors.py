@@ -23,14 +23,14 @@ def list_connectors(
     db: Session = Depends(get_db),
     _=Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN)),
 ) -> list[ConnectorConfigOut]:
-    connectors = db.query(ConnectorConfig).all()
+    connectors = db.query(ConnectorConfig).filter(ConnectorConfig.connector_name.in_(SUPPORTED_CONNECTORS)).all()
     existing = {conn.connector_name for conn in connectors}
     for connector_name in SUPPORTED_CONNECTORS:
         if connector_name not in existing:
             conn = ConnectorConfig(connector_name=connector_name, enabled=True, settings={})
             db.add(conn)
     db.commit()
-    connectors = db.query(ConnectorConfig).all()
+    connectors = db.query(ConnectorConfig).filter(ConnectorConfig.connector_name.in_(SUPPORTED_CONNECTORS)).all()
     return [ConnectorConfigOut.model_validate(conn) for conn in connectors]
 
 

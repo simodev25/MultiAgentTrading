@@ -347,3 +347,103 @@ def test_get_history_orders_uses_sdk_even_when_market_data_flag_disabled(monkeyp
     assert result.get('degraded') is False
     assert result.get('provider') == 'sdk'
     assert len(result.get('history_orders', [])) == 1
+
+
+def test_account_rpc_unavailable_reason_detects_disconnected_broker_status() -> None:
+    client = MetaApiClient()
+    account = SimpleNamespace(state='DEPLOYED', connection_status='DISCONNECTED_FROM_BROKER')
+
+    reason = client._account_rpc_unavailable_reason(account)
+
+    assert reason is not None
+    assert 'not connected to broker' in reason.lower()
+
+
+def test_get_positions_skips_sdk_rpc_when_account_disconnected(monkeypatch) -> None:
+    client = MetaApiClient()
+    monkeypatch.setattr(client, '_resolve_account_id', lambda account_id=None: 'acc-1')
+
+    class FakeAccount:
+        state = 'DEPLOYED'
+        connection_status = 'DISCONNECTED_FROM_BROKER'
+
+        def get_rpc_connection(self):
+            raise AssertionError('RPC connection should not be opened when account is disconnected')
+
+    class FakeAccountApi:
+        async def get_account(self, account_id: str):
+            return FakeAccount()
+
+    fake_sdk = SimpleNamespace(metatrader_account_api=FakeAccountApi())
+    monkeypatch.setattr(client, '_get_sdk', lambda region=None: fake_sdk)
+
+    async def fake_rest_get(*args, **kwargs):
+        return {'degraded': False, 'payload': [{'id': 'p-1'}], 'endpoint': 'mock'}
+
+    monkeypatch.setattr(client, '_rest_get', fake_rest_get)
+
+    result = asyncio.run(client.get_positions())
+
+    assert result.get('degraded') is False
+    assert result.get('provider') == 'rest'
+    assert len(result.get('positions', [])) == 1
+
+
+def test_place_order_returns_clear_reason_when_account_disconnected(monkeypatch) -> None:
+    client = MetaApiClient()
+    monkeypatch.setattr(client, '_resolve_account_id', lambda account_id=None: 'acc-1')
+
+    class FakeAccount:
+        state = 'DEPLOYED'
+        connection_status = 'DISCONNECTED_FROM_BROKER'
+
+        def get_rpc_connection(self):
+            raise AssertionError('RPC connection should not be opened when account is disconnected')
+
+    class FakeAccountApi:
+        async def get_account(self, account_id: str):
+            return FakeAccount()
+
+    fake_sdk = SimpleNamespace(metatrader_account_api=FakeAccountApi())
+    monkeypatch.setattr(client, '_get_sdk', lambda region=None: fake_sdk)
+
+    async def fail_rest_post(*args, **kwargs):
+        raise AssertionError('REST order submission should not be attempted when broker is disconnected')
+
+    monkeypatch.setattr(client, '_rest_post', fail_rest_post)
+
+    result = asyncio.run(client.place_order(symbol='EURUSD', side='BUY', volume=0.1))
+
+    assert result.get('executed') is False
+    assert result.get('degraded') is True
+    assert result.get('provider') == 'sdk'
+    assert 'not connected to broker' in str(result.get('reason', '')).lower()
+
+
+def test_close_position_does_not_open_opposite_order_when_fallback_disabled(monkeypatch) -> None:
+    client = MetaApiClient()
+    monkeypatch.setattr(client, '_resolve_account_id', lambda account_id=None: 'acc-1')
+    monkeypatch.setattr(client, '_get_sdk', lambda region=None: None)
+
+    async def fake_rest_post(*args, **kwargs):
+        return {'degraded': True, 'executed': False, 'reason': 'REST close failed'}
+
+    async def fail_place_order(*args, **kwargs):
+        raise AssertionError('place_order must not be called when opposite fallback is disabled')
+
+    monkeypatch.setattr(client, '_rest_post', fake_rest_post)
+    monkeypatch.setattr(client, 'place_order', fail_place_order)
+
+    result = asyncio.run(
+        client.close_position(
+            position_id='123',
+            volume=0.1,
+            side='BUY',
+            symbol='EURUSD',
+            allow_opposite_fallback=False,
+        )
+    )
+
+    assert result.get('executed') is False
+    assert result.get('degraded') is True
+    assert str(result.get('reason', '')).strip() == 'REST close failed'

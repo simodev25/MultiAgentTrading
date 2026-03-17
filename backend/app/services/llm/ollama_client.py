@@ -1,6 +1,7 @@
 import logging
 import time
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
@@ -39,15 +40,42 @@ class OllamaCloudClient:
         return key
 
     def _normalized_base_url(self) -> str:
-        return (self.settings.ollama_base_url or '').strip().rstrip('/')
+        base_url = (self.settings.ollama_base_url or '').strip().rstrip('/')
+        if not base_url:
+            return base_url
 
-    def is_configured(self) -> bool:
+        # Canonicalize known Ollama cloud hosts to a single endpoint host.
+        parsed = urlparse(base_url)
+        hostname = (parsed.hostname or '').strip().lower()
+        if hostname in {'api.ollama.com', 'www.ollama.com'}:
+            netloc = 'ollama.com'
+            if parsed.port:
+                netloc = f'{netloc}:{parsed.port}'
+            normalized = urlunparse(
+                (
+                    parsed.scheme or 'https',
+                    netloc,
+                    parsed.path.rstrip('/'),
+                    '',
+                    '',
+                    '',
+                )
+            ).rstrip('/')
+            if normalized != base_url:
+                logger.warning('ollama_base_url normalized from %s to %s', base_url, normalized)
+            return normalized
+
+        return base_url
+
+    def is_configured(self, base_url: str | None = None) -> bool:
         key = self._normalized_api_key()
         if not key:
             return False
         if key.lower() in {'replace_me', 'changeme', 'change-me', 'your_api_key'}:
             return False
-        return bool(self._normalized_base_url())
+        if base_url is None:
+            base_url = self._normalized_base_url()
+        return bool(base_url)
 
     def _estimate_cost_usd(self, prompt_tokens: int, completion_tokens: int) -> float:
         input_cost = (prompt_tokens / 1_000_000) * self.settings.ollama_input_cost_per_1m_tokens
@@ -98,12 +126,30 @@ class OllamaCloudClient:
             response.raise_for_status()
             return response.json()
 
+    @staticmethod
+    def _extract_usage(data: dict[str, Any]) -> tuple[str, int, int]:
+        text = data.get('message', {}).get('content', '')
+        prompt_tokens = int(data.get('prompt_eval_count') or data.get('prompt_tokens') or 0)
+        completion_tokens = int(data.get('eval_count') or data.get('completion_tokens') or 0)
+        return text, prompt_tokens, completion_tokens
+
+    def _build_chat_payload(self, model: str, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+        return {
+            'model': model,
+            'messages': [
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': user_prompt},
+            ],
+            'stream': False,
+        }
+
     def chat(self, system_prompt: str, user_prompt: str, model: str | None = None) -> dict[str, Any]:
         provider = 'ollama-cloud'
         selected_model = (model or self.settings.ollama_model or '').strip() or self.settings.ollama_model
         started = time.perf_counter()
+        base_url = self._normalized_base_url()
 
-        if not self.is_configured():
+        if not self.is_configured(base_url=base_url):
             latency = time.perf_counter() - started
             llm_calls_total.labels(provider='fallback', status='degraded').inc()
             llm_latency_seconds.labels(provider='fallback', model=selected_model, status='degraded').observe(latency)
@@ -127,16 +173,8 @@ class OllamaCloudClient:
                 'latency_ms': round(latency * 1000, 3),
             }
 
-        base_url = self._normalized_base_url()
         url = f"{base_url}/api/chat"
-        payload = {
-            'model': selected_model,
-            'messages': [
-                {'role': 'system', 'content': system_prompt},
-                {'role': 'user', 'content': user_prompt},
-            ],
-            'stream': False,
-        }
+        payload = self._build_chat_payload(selected_model, system_prompt, user_prompt)
         headers = {
             'Authorization': f"Bearer {self._normalized_api_key()}",
             'Content-Type': 'application/json',
@@ -144,10 +182,7 @@ class OllamaCloudClient:
 
         try:
             data = self._call_remote(url, payload, headers)
-            text = data.get('message', {}).get('content', '')
-
-            prompt_tokens = int(data.get('prompt_eval_count') or data.get('prompt_tokens') or 0)
-            completion_tokens = int(data.get('eval_count') or data.get('completion_tokens') or 0)
+            text, prompt_tokens, completion_tokens = self._extract_usage(data)
             cost_usd = self._estimate_cost_usd(prompt_tokens, completion_tokens)
             latency = time.perf_counter() - started
 
@@ -186,14 +221,64 @@ class OllamaCloudClient:
                 'latency_ms': round(latency * 1000, 3),
             }
         except Exception as exc:  # pragma: no cover
+            status_code: int | None = None
+            if isinstance(exc, httpx.HTTPStatusError):
+                status_code = exc.response.status_code
+
+            # If a model override is invalid on Ollama Cloud (404), retry once with env default model.
+            fallback_model = (self.settings.ollama_model or '').strip()
+            if status_code == 404 and fallback_model and fallback_model != selected_model:
+                try:
+                    logger.warning(
+                        'ollama model fallback on 404 from %s to %s',
+                        selected_model,
+                        fallback_model,
+                    )
+                    fallback_data = self._call_remote(
+                        url,
+                        self._build_chat_payload(fallback_model, system_prompt, user_prompt),
+                        headers,
+                    )
+                    text, prompt_tokens, completion_tokens = self._extract_usage(fallback_data)
+                    cost_usd = self._estimate_cost_usd(prompt_tokens, completion_tokens)
+                    latency = time.perf_counter() - started
+
+                    llm_calls_total.labels(provider=provider, status='success').inc()
+                    llm_prompt_tokens_total.labels(provider=provider, model=fallback_model).inc(prompt_tokens)
+                    llm_completion_tokens_total.labels(provider=provider, model=fallback_model).inc(completion_tokens)
+                    llm_cost_usd_total.labels(provider=provider, model=fallback_model).inc(cost_usd)
+                    llm_latency_seconds.labels(provider=provider, model=fallback_model, status='success').observe(latency)
+
+                    self._persist_log(
+                        provider=provider,
+                        model=fallback_model,
+                        status='success',
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        cost_usd=cost_usd,
+                        latency_ms=latency * 1000,
+                    )
+                    return {
+                        'provider': provider,
+                        'text': text,
+                        'raw': fallback_data,
+                        'degraded': False,
+                        'prompt_tokens': prompt_tokens,
+                        'completion_tokens': completion_tokens,
+                        'cost_usd': round(cost_usd, 8),
+                        'latency_ms': round(latency * 1000, 3),
+                        'effective_model': fallback_model,
+                        'model_fallback_from': selected_model,
+                    }
+                except Exception as fallback_exc:
+                    exc = fallback_exc
+                    if isinstance(fallback_exc, httpx.HTTPStatusError):
+                        status_code = fallback_exc.response.status_code
+
             latency = time.perf_counter() - started
             llm_calls_total.labels(provider=provider, status='error').inc()
             llm_latency_seconds.labels(provider=provider, model=selected_model, status='error').observe(latency)
             external_provider_failures_total.labels(provider='ollama').inc()
-
-            status_code = None
-            if isinstance(exc, httpx.HTTPStatusError):
-                status_code = exc.response.status_code
 
             self._persist_log(
                 provider=provider,

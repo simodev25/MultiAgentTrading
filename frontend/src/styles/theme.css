@@ -490,10 +490,55 @@ a:hover {
   align-items: end;
 }
 
+.orders-top-controls .orders-guardian-toggle {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+
 .orders-top-meta {
   margin: 0;
   color: #97add1;
   font-size: 0.8rem;
+}
+
+.orders-guardian-report {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid rgba(70, 102, 146, 0.64);
+  border-radius: 12px;
+  background:
+    radial-gradient(circle at 0% 0%, rgba(37, 99, 235, 0.14), transparent 36%),
+    linear-gradient(180deg, rgba(10, 18, 33, 0.9), rgba(8, 15, 27, 0.94));
+}
+
+.orders-guardian-report-grid {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+
+.orders-guardian-report-stat {
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px solid rgba(68, 96, 139, 0.6);
+  background: rgba(10, 18, 32, 0.8);
+}
+
+.orders-guardian-report-stat span {
+  display: block;
+  color: #8fa6cb;
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.orders-guardian-report-stat strong {
+  display: block;
+  margin-top: 6px;
+  color: #eaf2ff;
+  font-size: 1.04rem;
 }
 
 .orders-top-price {

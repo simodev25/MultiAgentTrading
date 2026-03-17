@@ -68,6 +68,41 @@ DEFAULT_PROMPTS: dict[str, dict[str, str]] = {
             "Bearish: {bearish_args}\nNotes de risque: {risk_notes}"
         ),
     },
+    'risk-manager': {
+        'system': (
+            "Tu es un risk manager Forex. "
+            "Tu dois confirmer ou refuser une proposition d'exposition en restant strict."
+        ),
+        'user': (
+            "Pair: {pair}\nTimeframe: {timeframe}\nMode: {mode}\nDecision: {decision}\nEntry: {entry}\n"
+            "Stop loss: {stop_loss}\nTake profit: {take_profit}\nRisk %: {risk_percent}\n"
+            "Sortie déterministe: accepted={accepted}, suggested_volume={suggested_volume}, reasons={reasons}\n"
+            "Retour attendu: APPROVE ou REJECT puis justification concise."
+        ),
+    },
+    'execution-manager': {
+        'system': (
+            "Tu es un execution manager Forex. "
+            "Tu dois confirmer BUY/SELL ou basculer HOLD si la prudence l'impose."
+        ),
+        'user': (
+            "Pair: {pair}\nTimeframe: {timeframe}\nMode: {mode}\nDecision trader: {decision}\n"
+            "Risk accepted: {risk_accepted}\nSuggested volume: {suggested_volume}\n"
+            "Stop loss: {stop_loss}\nTake profit: {take_profit}\n"
+            "Retour attendu: BUY, SELL ou HOLD, puis justification concise."
+        ),
+    },
+    'order-guardian': {
+        'system': (
+            "Tu es Order Guardian MT5. "
+            "Tu produis un rapport de supervision des positions clair et actionnable."
+        ),
+        'user': (
+            "Compte: {account_label}\nTimeframe guardian: {timeframe}\nMode: {mode}\n"
+            "Résumé cycle: {summary_json}\nActions: {actions_json}\n"
+            "Produit un rapport court: risques clés, actions importantes, points à surveiller au prochain scan."
+        ),
+    },
     'schedule-planner-agent': {
         'system': (
             "Tu es un agent dédié à l’automatisation intelligente des plans cron Forex. "

@@ -1,4 +1,5 @@
-import { Suspense, lazy, useEffect, useMemo, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { api } from '../api/client';
 import { runtimeConfig } from '../config/runtime';
 import { useAuth } from '../hooks/useAuth';
 import { useMetaTradingData } from '../hooks/useMetaTradingData';
@@ -10,6 +11,7 @@ import { OpenPositionsTable } from '../components/orders/OpenPositionsTable';
 import { OpenPendingOrdersTable } from '../components/orders/OpenPendingOrdersTable';
 import { DealsTable } from '../components/orders/DealsTable';
 import { PlatformOrdersTable } from '../components/orders/PlatformOrdersTable';
+import type { OrderGuardianEvaluation, OrderGuardianStatus } from '../types';
 
 const RealTradesCharts = lazy(() =>
   import('../components/RealTradesCharts').then((module) => ({ default: module.RealTradesCharts })),
@@ -25,6 +27,11 @@ const FR_DECIMAL_1 = new Intl.NumberFormat('fr-FR', {
   minimumFractionDigits: 1,
   maximumFractionDigits: 1,
 });
+const FR_DATETIME = new Intl.DateTimeFormat('fr-FR', {
+  dateStyle: 'short',
+  timeStyle: 'medium',
+});
+const ORDER_GUARDIAN_AUTO_SCAN_MS = 45000;
 
 function formatDaysWindowLabel(days: number): string {
   if (days === 0) return "Aujourd'hui";
@@ -77,6 +84,13 @@ function normalizeUpper(value: unknown): string {
   return String(value ?? '').trim().toUpperCase();
 }
 
+function formatNullableDateTime(value: string | null | undefined): string {
+  if (!value) return '-';
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return '-';
+  return FR_DATETIME.format(new Date(parsed));
+}
+
 function isFinancialOperationType(type: string): boolean {
   return [
     'BALANCE',
@@ -102,10 +116,21 @@ function isCloseEntryType(entryType: string): boolean {
 }
 
 export function OrdersPage() {
-  const { token } = useAuth();
+  const { token, user } = useAuth();
   const [dealsPage, setDealsPage] = useState(1);
   const [platformOrdersPage, setPlatformOrdersPage] = useState(1);
   const [activePanel, setActivePanel] = useState<'analysis' | 'metaapi' | 'queue'>('analysis');
+  const [guardianStatus, setGuardianStatus] = useState<OrderGuardianStatus | null>(null);
+  const [guardianError, setGuardianError] = useState<string | null>(null);
+  const [guardianLoading, setGuardianLoading] = useState(false);
+  const [guardianActioning, setGuardianActioning] = useState(false);
+  const [guardianLastRun, setGuardianLastRun] = useState<OrderGuardianEvaluation | null>(null);
+  const [guardianReportVisible, setGuardianReportVisible] = useState(false);
+  const guardianRunningRef = useRef(false);
+  const canOperateGuardian = useMemo(
+    () => ['super-admin', 'admin', 'trader-operator'].includes(String(user?.role ?? '')),
+    [user?.role],
+  );
 
   const {
     orders,
@@ -402,9 +427,139 @@ export function OrdersPage() {
     document.getElementById(sectionId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
+  const guardianStoredSummary = useMemo(() => {
+    const raw = guardianStatus?.last_summary;
+    if (!raw || typeof raw !== 'object') return null;
+    const summary = raw as Record<string, unknown>;
+    if (Object.keys(summary).length === 0) return null;
+    return {
+      positionsSeen: toNumber(summary.positions_seen),
+      positionsAnalyzed: toNumber(summary.positions_analyzed),
+      actionsTotal: toNumber(summary.actions_total),
+      actionsExecuted: toNumber(summary.actions_executed),
+      dryRun: Boolean(summary.dry_run),
+      llmReport: typeof summary.llm_report === 'string' ? summary.llm_report : '',
+      llmDegraded: Boolean(summary.llm_degraded),
+    };
+  }, [guardianStatus?.last_summary]);
+
+  const guardianReportStats = useMemo(() => {
+    if (guardianLastRun) {
+      return {
+        positionsSeen: guardianStoredSummary?.positionsSeen ?? guardianLastRun.analyzed_positions,
+        positionsAnalyzed: guardianLastRun.analyzed_positions,
+        actionsTotal: guardianLastRun.actions.length,
+        actionsExecuted: guardianLastRun.actions_executed,
+        dryRun: guardianLastRun.dry_run,
+      };
+    }
+    if (guardianStoredSummary) return guardianStoredSummary;
+    return null;
+  }, [guardianLastRun, guardianStoredSummary]);
+
+  const hasGuardianReport = Boolean(guardianLastRun || guardianStoredSummary);
+  const guardianReportDate = guardianLastRun?.generated_at ?? guardianStatus?.last_run_at ?? null;
+  const guardianReportText = useMemo(() => {
+    const currentRunReport = typeof guardianLastRun?.llm_report === 'string' ? guardianLastRun.llm_report.trim() : '';
+    if (currentRunReport) return currentRunReport;
+    const persistedReport = guardianStoredSummary?.llmReport?.trim() ?? '';
+    return persistedReport;
+  }, [guardianLastRun?.llm_report, guardianStoredSummary?.llmReport]);
+  const guardianReportDegraded = Boolean(
+    guardianLastRun?.llm_degraded ?? guardianStoredSummary?.llmDegraded ?? false,
+  );
+
+  const loadGuardianStatus = useCallback(async () => {
+    if (!token) {
+      setGuardianStatus(null);
+      setGuardianError(null);
+      return;
+    }
+    setGuardianLoading(true);
+    try {
+      const payload = await api.getOrderGuardianStatus(token);
+      setGuardianStatus(payload as OrderGuardianStatus);
+      setGuardianError(null);
+    } catch (err) {
+      setGuardianError(err instanceof Error ? err.message : 'Impossible de charger le mode guardian');
+    } finally {
+      setGuardianLoading(false);
+    }
+  }, [token]);
+
+  const setGuardianEnabled = useCallback(async (enabled: boolean) => {
+    if (!token) return;
+    setGuardianActioning(true);
+    try {
+      const payload = await api.updateOrderGuardianStatus(token, { enabled });
+      setGuardianStatus(payload as OrderGuardianStatus);
+      setGuardianError(null);
+    } catch (err) {
+      setGuardianError(err instanceof Error ? err.message : 'Impossible de mettre à jour le mode guardian');
+    } finally {
+      setGuardianActioning(false);
+    }
+  }, [token]);
+
+  const runGuardianNow = useCallback(async (source: 'manual' | 'auto' = 'manual') => {
+    if (!token) return;
+    if (!guardianStatus?.enabled) return;
+    if (guardianRunningRef.current) return;
+    guardianRunningRef.current = true;
+    if (source === 'manual') setGuardianActioning(true);
+    try {
+      const payload = await api.evaluateOrderGuardian(token, {
+        account_ref: accountRef,
+        dry_run: false,
+      });
+      const report = payload as OrderGuardianEvaluation;
+      setGuardianLastRun(report);
+      setGuardianError(null);
+      if (source === 'manual') setGuardianReportVisible(true);
+
+      if (report.actions_executed > 0) {
+        await loadMetaTrading(accountRef, source === 'manual' ? 'manual' : 'auto');
+      }
+      await loadGuardianStatus();
+    } catch (err) {
+      if (source === 'manual') {
+        setGuardianError(err instanceof Error ? err.message : 'Exécution guardian impossible');
+      }
+    } finally {
+      if (source === 'manual') setGuardianActioning(false);
+      guardianRunningRef.current = false;
+    }
+  }, [accountRef, guardianStatus?.enabled, loadGuardianStatus, loadMetaTrading, token]);
+
   useEffect(() => {
     setDealsPage(1);
   }, [accountRef, days]);
+
+  useEffect(() => {
+    if (!token) {
+      setGuardianStatus(null);
+      setGuardianLastRun(null);
+      setGuardianError(null);
+      setGuardianReportVisible(false);
+      return;
+    }
+    void loadGuardianStatus();
+  }, [loadGuardianStatus, token]);
+
+  useEffect(() => {
+    if (!token) return;
+    if (!guardianStatus?.enabled) return;
+    if (!canOperateGuardian) return;
+
+    const scan = () => {
+      if (document.visibilityState === 'hidden') return;
+      void runGuardianNow('auto');
+    };
+    const intervalId = window.setInterval(scan, ORDER_GUARDIAN_AUTO_SCAN_MS);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [canOperateGuardian, guardianStatus?.enabled, runGuardianNow, token]);
 
   useEffect(() => {
     if (dealsPage > dealsTotalPages) {
@@ -455,10 +610,116 @@ export function OrdersPage() {
             </select>
           </label>
           <button className="btn-primary" disabled={metaLoading}>{metaLoading ? 'Rafraîchir...' : 'Rafraîchir'}</button>
+          <label className="orders-guardian-toggle">
+            Guardian MT5
+            <input
+              className="ui-switch"
+              type="checkbox"
+              checked={Boolean(guardianStatus?.enabled)}
+              onChange={(e) => void setGuardianEnabled(e.target.checked)}
+              disabled={guardianLoading || guardianActioning || !canOperateGuardian}
+            />
+          </label>
+          <button
+            type="button"
+            className="btn-ghost"
+            disabled={!guardianStatus?.enabled || guardianActioning || !canOperateGuardian}
+            onClick={() => void runGuardianNow('manual')}
+          >
+            {guardianActioning ? 'Analyse...' : 'Analyser positions'}
+          </button>
+          <button
+            type="button"
+            className="btn-ghost"
+            disabled={!hasGuardianReport}
+            onClick={() => setGuardianReportVisible((previous) => !previous)}
+          >
+            {guardianReportVisible ? 'Masquer dernier rapport' : 'Afficher dernier rapport'}
+          </button>
           <p className="orders-top-meta">
             Provider: <code>{provider || 'unknown'}</code> | Sync: <code>{syncing ? 'yes' : 'no'}</code>
           </p>
+          <p className="orders-top-meta">
+            Guardian: <code>{guardianStatus?.enabled ? 'on' : 'off'}</code> | Dernier scan:{' '}
+            <code>{formatNullableDateTime(guardianStatus?.last_run_at ?? guardianLastRun?.generated_at)}</code>
+          </p>
+          {!canOperateGuardian && (
+            <p className="orders-top-meta">
+              Droits requis pour agir: <code>trader-operator/admin</code>
+            </p>
+          )}
         </form>
+        {guardianError && <p className="alert">{guardianError}</p>}
+        {guardianLastRun && (
+          <p className="model-source">
+            Dernière exécution guardian: <code>{guardianLastRun.analyzed_positions}</code> position(s) analysée(s),{' '}
+            <code>{guardianLastRun.actions_executed}</code> action(s) exécutée(s).
+          </p>
+        )}
+        {guardianReportVisible && guardianReportStats && (
+          <section className="orders-guardian-report">
+            <p className="model-source">
+              Rapport guardian du <code>{formatNullableDateTime(guardianReportDate)}</code>
+            </p>
+            <div className="orders-guardian-report-grid">
+              <article className="orders-guardian-report-stat">
+                <span>Positions vues</span>
+                <strong>{guardianReportStats.positionsSeen}</strong>
+              </article>
+              <article className="orders-guardian-report-stat">
+                <span>Positions analysées</span>
+                <strong>{guardianReportStats.positionsAnalyzed}</strong>
+              </article>
+              <article className="orders-guardian-report-stat">
+                <span>Actions proposées</span>
+                <strong>{guardianReportStats.actionsTotal}</strong>
+              </article>
+              <article className="orders-guardian-report-stat">
+                <span>Actions exécutées</span>
+                <strong>{guardianReportStats.actionsExecuted}</strong>
+              </article>
+              <article className="orders-guardian-report-stat">
+                <span>Mode</span>
+                <strong>{guardianReportStats.dryRun ? 'dry-run' : 'live'}</strong>
+              </article>
+            </div>
+            {guardianReportText && (
+              <p className="model-source">
+                Rapport LLM{guardianReportDegraded ? ' (dégradé)' : ''}: {guardianReportText}
+              </p>
+            )}
+            {guardianLastRun?.actions?.length ? (
+              <table>
+                <thead>
+                  <tr>
+                    <th>Position</th>
+                    <th>Symbole</th>
+                    <th>Action</th>
+                    <th>Décision</th>
+                    <th>Exécutée</th>
+                    <th>Raison</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {guardianLastRun.actions.map((item) => (
+                    <tr key={`${item.position_id}-${item.symbol}`}>
+                      <td><code>{item.position_id}</code></td>
+                      <td>{item.symbol}</td>
+                      <td><code>{item.action}</code></td>
+                      <td><code>{item.decision}</code></td>
+                      <td>{item.executed ? 'oui' : 'non'}</td>
+                      <td>{item.reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <p className="model-source">
+                Le détail action par action est disponible après une exécution dans la session en cours.
+              </p>
+            )}
+          </section>
+        )}
       </section>
 
       <section className="card orders-signal-card" id="orders-summary">

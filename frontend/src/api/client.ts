@@ -137,6 +137,32 @@ export const api = {
     const suffix = search.toString();
     return request(`/trading/open-orders${suffix ? `?${suffix}` : ''}`, {}, token);
   },
+  getOrderGuardianStatus: (token: string) => request('/trading/order-guardian', {}, token),
+  updateOrderGuardianStatus: (
+    token: string,
+    payload: {
+      enabled?: boolean;
+      timeframe?: string;
+      risk_percent?: number;
+      max_positions_per_cycle?: number;
+      sl_tp_min_delta?: number;
+    },
+  ) =>
+    request('/trading/order-guardian', {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    }, token),
+  evaluateOrderGuardian: (
+    token: string,
+    payload: {
+      account_ref?: number | null;
+      dry_run?: boolean;
+    } = {},
+  ) =>
+    request('/trading/order-guardian/evaluate', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }, token),
   listMetaApiDeals: (
     token: string,
     params: { account_ref?: number | null; days?: number; limit?: number; offset?: number } = {},

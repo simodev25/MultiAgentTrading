@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     memory_vector_size: int = Field(default=64, alias='MEMORY_VECTOR_SIZE')
     enable_pgvector: bool = Field(default=False, alias='ENABLE_PGVECTOR')
 
-    ollama_base_url: str = Field(default='https://api.ollama.com', alias='OLLAMA_BASE_URL')
+    ollama_base_url: str = Field(default='https://ollama.com', alias='OLLAMA_BASE_URL')
     ollama_api_key: str = Field(default='', alias='OLLAMA_API_KEY')
     ollama_model: str = Field(default='llama3.1', alias='OLLAMA_MODEL')
     ollama_timeout_seconds: int = Field(default=30, alias='OLLAMA_TIMEOUT_SECONDS')

@@ -367,6 +367,33 @@ class MetaApiClient:
         except Exception as exc:  # pragma: no cover
             logger.debug('metaapi connection close ignored: %s', exc)
 
+    async def _invoke_connection_candidates(
+        self,
+        connection: Any,
+        candidates: list[tuple[tuple[str, ...], tuple[Any, ...], dict[str, Any]]],
+    ) -> tuple[bool, Any, str | None]:
+        last_exception: Exception | None = None
+        for method_names, args, kwargs in candidates:
+            for method_name in method_names:
+                method = getattr(connection, method_name, None)
+                if not callable(method):
+                    continue
+                try:
+                    result = method(*args, **kwargs)
+                    if inspect.isawaitable(result):
+                        result = await result
+                    return True, result, None
+                except TypeError as exc:
+                    # Signature mismatch: keep trying the next candidate.
+                    last_exception = exc
+                    continue
+                except Exception as exc:  # pragma: no cover
+                    return True, None, str(exc)
+
+        if last_exception is not None:
+            return False, None, str(last_exception)
+        return False, None, 'No compatible SDK method found'
+
     def is_configured(self, account_id: str | None = None) -> bool:
         resolved = self._resolve_account_id(account_id)
         return bool(self._resolve_token() and resolved)
@@ -542,12 +569,36 @@ class MetaApiClient:
         )
         return any(marker in message for marker in markers)
 
+    @staticmethod
+    def _account_connection_status(account: Any) -> str:
+        for attr in ('connection_status', 'connectionStatus'):
+            value = getattr(account, attr, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ''
+
+    def _account_rpc_unavailable_reason(self, account: Any) -> str | None:
+        state = str(getattr(account, 'state', '') or '').strip().upper()
+        if state and state != 'DEPLOYED':
+            return f'MetaApi account is not deployed (state={state}).'
+
+        status = self._account_connection_status(account)
+        normalized_status = status.upper()
+        if normalized_status and (
+            'DISCONNECT' in normalized_status
+            or 'NOT_CONNECTED' in normalized_status
+            or normalized_status in {'UNKNOWN', 'BROKER_CONNECTION_DOWN'}
+        ):
+            return f'MetaApi account is not connected to broker (connection_status={status}).'
+        return None
+
     async def get_account_information(self, account_id: str | None = None, region: str | None = None) -> dict[str, Any]:
         resolved_account_id = self._resolve_account_id(account_id)
         if not resolved_account_id:
             return {'degraded': True, 'reason': 'MetaApi account id not configured'}
 
         sdk = self._get_sdk(region)
+        sdk_skip_reason: str | None = None
         if sdk:
             connection = None
             try:
@@ -555,10 +606,13 @@ class MetaApiClient:
                 if account.state != 'DEPLOYED':
                     await account.deploy()
                     await account.wait_connected()
-                connection = account.get_rpc_connection()
-                await connection.connect()
-                await connection.wait_synchronized()
-                return {'degraded': False, 'account_info': await connection.get_account_information(), 'provider': 'sdk'}
+                sdk_skip_reason = self._account_rpc_unavailable_reason(account)
+                if sdk_skip_reason is None:
+                    connection = account.get_rpc_connection()
+                    await connection.connect()
+                    await connection.wait_synchronized()
+                    return {'degraded': False, 'account_info': await connection.get_account_information(), 'provider': 'sdk'}
+                logger.info('metaapi sdk account info skipped account_id=%s reason=%s', resolved_account_id, sdk_skip_reason)
             except Exception as exc:  # pragma: no cover
                 logger.warning('metaapi sdk account info failed, trying REST fallback: %s', exc)
             finally:
@@ -572,7 +626,11 @@ class MetaApiClient:
             ],
         )
         if result.get('degraded'):
-            return {'degraded': True, 'reason': result.get('reason', 'REST fallback failed'), 'errors': result.get('errors', [])}
+            return {
+                'degraded': True,
+                'reason': sdk_skip_reason or result.get('reason', 'REST fallback failed'),
+                'errors': result.get('errors', []),
+            }
         return {'degraded': False, 'account_info': result.get('payload', {}), 'provider': 'rest', 'endpoint': result.get('endpoint')}
 
     async def get_positions(self, account_id: str | None = None, region: str | None = None) -> dict[str, Any]:
@@ -581,14 +639,18 @@ class MetaApiClient:
             return {'degraded': True, 'positions': [], 'reason': 'MetaApi account id not configured'}
 
         sdk = self._get_sdk(region)
+        sdk_skip_reason: str | None = None
         if sdk:
             connection = None
             try:
                 account = await sdk.metatrader_account_api.get_account(resolved_account_id)
-                connection = account.get_rpc_connection()
-                await connection.connect()
-                await connection.wait_synchronized()
-                return {'degraded': False, 'positions': await connection.get_positions(), 'provider': 'sdk'}
+                sdk_skip_reason = self._account_rpc_unavailable_reason(account)
+                if sdk_skip_reason is None:
+                    connection = account.get_rpc_connection()
+                    await connection.connect()
+                    await connection.wait_synchronized()
+                    return {'degraded': False, 'positions': await connection.get_positions(), 'provider': 'sdk'}
+                logger.info('metaapi sdk positions skipped account_id=%s reason=%s', resolved_account_id, sdk_skip_reason)
             except Exception as exc:  # pragma: no cover
                 logger.warning('metaapi sdk positions failed, trying REST fallback: %s', exc)
             finally:
@@ -602,7 +664,12 @@ class MetaApiClient:
             ],
         )
         if result.get('degraded'):
-            return {'degraded': True, 'positions': [], 'reason': result.get('reason', 'REST fallback failed'), 'errors': result.get('errors', [])}
+            return {
+                'degraded': True,
+                'positions': [],
+                'reason': sdk_skip_reason or result.get('reason', 'REST fallback failed'),
+                'errors': result.get('errors', []),
+            }
 
         payload = result.get('payload', [])
         if isinstance(payload, dict):
@@ -615,14 +682,18 @@ class MetaApiClient:
             return {'degraded': True, 'open_orders': [], 'reason': 'MetaApi account id not configured'}
 
         sdk = self._get_sdk(region)
+        sdk_skip_reason: str | None = None
         if sdk:
             connection = None
             try:
                 account = await sdk.metatrader_account_api.get_account(resolved_account_id)
-                connection = account.get_rpc_connection()
-                await connection.connect()
-                await connection.wait_synchronized()
-                return {'degraded': False, 'open_orders': await connection.get_orders(), 'provider': 'sdk'}
+                sdk_skip_reason = self._account_rpc_unavailable_reason(account)
+                if sdk_skip_reason is None:
+                    connection = account.get_rpc_connection()
+                    await connection.connect()
+                    await connection.wait_synchronized()
+                    return {'degraded': False, 'open_orders': await connection.get_orders(), 'provider': 'sdk'}
+                logger.info('metaapi sdk open orders skipped account_id=%s reason=%s', resolved_account_id, sdk_skip_reason)
             except Exception as exc:  # pragma: no cover
                 logger.warning('metaapi sdk open orders failed, trying REST fallback: %s', exc)
             finally:
@@ -639,7 +710,12 @@ class MetaApiClient:
             ],
         )
         if result.get('degraded'):
-            return {'degraded': True, 'open_orders': [], 'reason': result.get('reason', 'REST fallback failed'), 'errors': result.get('errors', [])}
+            return {
+                'degraded': True,
+                'open_orders': [],
+                'reason': sdk_skip_reason or result.get('reason', 'REST fallback failed'),
+                'errors': result.get('errors', []),
+            }
 
         payload = result.get('payload', [])
         if isinstance(payload, dict):
@@ -681,6 +757,7 @@ class MetaApiClient:
         safe_limit = min(max(int(limit or 1), 1), 1000)
 
         sdk = self._get_sdk(region)
+        sdk_skip_reason: str | None = None
         if sdk:
             connection = None
             try:
@@ -688,37 +765,40 @@ class MetaApiClient:
                 if account.state != 'DEPLOYED':
                     await account.deploy()
                     await account.wait_connected()
-                connection = account.get_rpc_connection()
-                await connection.connect()
-                await connection.wait_synchronized()
-                payload = await connection.get_deals_by_time_range(start, end, safe_offset, safe_limit)
-                deals_payload = payload.get('deals', []) if isinstance(payload, dict) else []
-                if not isinstance(deals_payload, list):
-                    deals_payload = []
-                deals_payload = self._filter_items_by_time_range(
-                    deals_payload,
-                    start,
-                    end,
-                    candidate_keys=(
-                        'time',
-                        'brokerTime',
-                        'doneTime',
-                        'updateTime',
-                        'openTime',
-                        'closeTime',
-                    ),
-                )
-                return {
-                    'degraded': False,
-                    'deals': deals_payload,
-                    'synchronizing': bool(payload.get('synchronizing', False)) if isinstance(payload, dict) else False,
-                    'provider': 'sdk',
-                    'account_id': resolved_account_id,
-                    'start_time': self._iso_utc(start),
-                    'end_time': self._iso_utc(end),
-                    'offset': safe_offset,
-                    'limit': safe_limit,
-                }
+                sdk_skip_reason = self._account_rpc_unavailable_reason(account)
+                if sdk_skip_reason is None:
+                    connection = account.get_rpc_connection()
+                    await connection.connect()
+                    await connection.wait_synchronized()
+                    payload = await connection.get_deals_by_time_range(start, end, safe_offset, safe_limit)
+                    deals_payload = payload.get('deals', []) if isinstance(payload, dict) else []
+                    if not isinstance(deals_payload, list):
+                        deals_payload = []
+                    deals_payload = self._filter_items_by_time_range(
+                        deals_payload,
+                        start,
+                        end,
+                        candidate_keys=(
+                            'time',
+                            'brokerTime',
+                            'doneTime',
+                            'updateTime',
+                            'openTime',
+                            'closeTime',
+                        ),
+                    )
+                    return {
+                        'degraded': False,
+                        'deals': deals_payload,
+                        'synchronizing': bool(payload.get('synchronizing', False)) if isinstance(payload, dict) else False,
+                        'provider': 'sdk',
+                        'account_id': resolved_account_id,
+                        'start_time': self._iso_utc(start),
+                        'end_time': self._iso_utc(end),
+                        'offset': safe_offset,
+                        'limit': safe_limit,
+                    }
+                logger.info('metaapi sdk deals skipped account_id=%s reason=%s', resolved_account_id, sdk_skip_reason)
             except Exception as exc:  # pragma: no cover
                 logger.warning('metaapi sdk deals failed, trying REST fallback: %s', exc)
             finally:
@@ -736,7 +816,7 @@ class MetaApiClient:
             return {
                 'degraded': True,
                 'deals': [],
-                'reason': result.get('reason', 'REST fallback failed'),
+                'reason': sdk_skip_reason or result.get('reason', 'REST fallback failed'),
                 'errors': result.get('errors', []),
                 'account_id': resolved_account_id,
                 'start_time': self._iso_utc(start),
@@ -800,6 +880,7 @@ class MetaApiClient:
         safe_limit = min(max(int(limit or 1), 1), 1000)
 
         sdk = self._get_sdk(region)
+        sdk_skip_reason: str | None = None
         if sdk:
             connection = None
             try:
@@ -807,37 +888,40 @@ class MetaApiClient:
                 if account.state != 'DEPLOYED':
                     await account.deploy()
                     await account.wait_connected()
-                connection = account.get_rpc_connection()
-                await connection.connect()
-                await connection.wait_synchronized()
-                payload = await connection.get_history_orders_by_time_range(start, end, safe_offset, safe_limit)
-                history_orders_payload = payload.get('historyOrders', []) if isinstance(payload, dict) else []
-                if not isinstance(history_orders_payload, list):
-                    history_orders_payload = []
-                history_orders_payload = self._filter_items_by_time_range(
-                    history_orders_payload,
-                    start,
-                    end,
-                    candidate_keys=(
-                        'doneTime',
-                        'time',
-                        'brokerTime',
-                        'updateTime',
-                        'openTime',
-                        'closeTime',
-                    ),
-                )
-                return {
-                    'degraded': False,
-                    'history_orders': history_orders_payload,
-                    'synchronizing': bool(payload.get('synchronizing', False)) if isinstance(payload, dict) else False,
-                    'provider': 'sdk',
-                    'account_id': resolved_account_id,
-                    'start_time': self._iso_utc(start),
-                    'end_time': self._iso_utc(end),
-                    'offset': safe_offset,
-                    'limit': safe_limit,
-                }
+                sdk_skip_reason = self._account_rpc_unavailable_reason(account)
+                if sdk_skip_reason is None:
+                    connection = account.get_rpc_connection()
+                    await connection.connect()
+                    await connection.wait_synchronized()
+                    payload = await connection.get_history_orders_by_time_range(start, end, safe_offset, safe_limit)
+                    history_orders_payload = payload.get('historyOrders', []) if isinstance(payload, dict) else []
+                    if not isinstance(history_orders_payload, list):
+                        history_orders_payload = []
+                    history_orders_payload = self._filter_items_by_time_range(
+                        history_orders_payload,
+                        start,
+                        end,
+                        candidate_keys=(
+                            'doneTime',
+                            'time',
+                            'brokerTime',
+                            'updateTime',
+                            'openTime',
+                            'closeTime',
+                        ),
+                    )
+                    return {
+                        'degraded': False,
+                        'history_orders': history_orders_payload,
+                        'synchronizing': bool(payload.get('synchronizing', False)) if isinstance(payload, dict) else False,
+                        'provider': 'sdk',
+                        'account_id': resolved_account_id,
+                        'start_time': self._iso_utc(start),
+                        'end_time': self._iso_utc(end),
+                        'offset': safe_offset,
+                        'limit': safe_limit,
+                    }
+                logger.info('metaapi sdk history orders skipped account_id=%s reason=%s', resolved_account_id, sdk_skip_reason)
             except Exception as exc:  # pragma: no cover
                 logger.warning('metaapi sdk history orders failed, trying REST fallback: %s', exc)
             finally:
@@ -855,7 +939,7 @@ class MetaApiClient:
             return {
                 'degraded': True,
                 'history_orders': [],
-                'reason': result.get('reason', 'REST fallback failed'),
+                'reason': sdk_skip_reason or result.get('reason', 'REST fallback failed'),
                 'errors': result.get('errors', []),
                 'account_id': resolved_account_id,
                 'start_time': self._iso_utc(start),
@@ -1105,6 +1189,18 @@ class MetaApiClient:
             connection = None
             try:
                 account = await sdk.metatrader_account_api.get_account(resolved_account_id)
+                rpc_unavailable_reason = self._account_rpc_unavailable_reason(account)
+                if rpc_unavailable_reason:
+                    return {
+                        'degraded': True,
+                        'executed': False,
+                        'reason': rpc_unavailable_reason,
+                        'account_id': resolved_account_id,
+                        'provider': 'sdk',
+                        'symbol': requested_symbol,
+                        'requested_symbol': requested_symbol,
+                        'tried_symbols': symbol_candidates,
+                    }
                 connection = account.get_rpc_connection()
                 await connection.connect()
                 await connection.wait_synchronized()
@@ -1217,6 +1313,272 @@ class MetaApiClient:
             'symbol': trade_symbol,
             'requested_symbol': requested_symbol,
             'tried_symbols': symbol_candidates,
+            'result': (last_result or {}).get('result'),
+            'endpoint': (last_result or {}).get('endpoint'),
+            'raw': (last_result or {}).get('raw'),
+        }
+
+    async def modify_position(
+        self,
+        *,
+        position_id: str,
+        stop_loss: float | None,
+        take_profit: float | None,
+        account_id: str | None = None,
+        region: str | None = None,
+    ) -> dict[str, Any]:
+        resolved_account_id = self._resolve_account_id(account_id)
+        if not resolved_account_id:
+            return {'degraded': True, 'executed': False, 'reason': 'MetaApi account id not configured'}
+        if not str(position_id or '').strip():
+            return {'degraded': True, 'executed': False, 'reason': 'Position id is required'}
+        if stop_loss is None and take_profit is None:
+            return {'degraded': False, 'executed': False, 'reason': 'No SL/TP change requested'}
+
+        sdk = self._get_sdk(region)
+        if sdk:
+            connection = None
+            try:
+                account = await sdk.metatrader_account_api.get_account(resolved_account_id)
+                rpc_unavailable_reason = self._account_rpc_unavailable_reason(account)
+                if rpc_unavailable_reason:
+                    return {
+                        'degraded': True,
+                        'executed': False,
+                        'reason': rpc_unavailable_reason,
+                        'provider': 'sdk',
+                        'account_id': resolved_account_id,
+                        'position_id': str(position_id),
+                    }
+                connection = account.get_rpc_connection()
+                await connection.connect()
+                await connection.wait_synchronized()
+
+                candidate_calls: list[tuple[tuple[str, ...], tuple[Any, ...], dict[str, Any]]] = [
+                    (
+                        ('modify_position', 'modifyPosition'),
+                        (str(position_id),),
+                        {'stop_loss': stop_loss, 'take_profit': take_profit},
+                    ),
+                    (
+                        ('modify_position', 'modifyPosition'),
+                        (str(position_id),),
+                        {'stopLoss': stop_loss, 'takeProfit': take_profit},
+                    ),
+                    (
+                        ('modify_position', 'modifyPosition'),
+                        (str(position_id), stop_loss, take_profit),
+                        {},
+                    ),
+                ]
+                called, result, error = await self._invoke_connection_candidates(connection, candidate_calls)
+                if called:
+                    if error:
+                        logger.warning('metaapi sdk modify position failed: %s', error)
+                    else:
+                        if isinstance(result, dict):
+                            ok, reason = self._trade_result_ok(result)
+                            if not ok:
+                                return {
+                                    'degraded': True,
+                                    'executed': False,
+                                    'reason': reason or 'MetaApi position modify rejected',
+                                    'provider': 'sdk',
+                                    'account_id': resolved_account_id,
+                                    'position_id': str(position_id),
+                                    'result': result,
+                                }
+                        return {
+                            'degraded': False,
+                            'executed': True,
+                            'provider': 'sdk',
+                            'account_id': resolved_account_id,
+                            'position_id': str(position_id),
+                            'result': result if isinstance(result, dict) else {'value': result},
+                        }
+            except Exception as exc:  # pragma: no cover
+                logger.warning('metaapi sdk modify position failed, trying REST fallback: %s', exc)
+            finally:
+                await self._close_connection(connection)
+
+        payloads: list[dict[str, Any]] = []
+        base_payload = {
+            'positionId': str(position_id),
+            'position_id': str(position_id),
+        }
+        if stop_loss is not None:
+            base_payload['stopLoss'] = stop_loss
+            base_payload['stop_loss'] = stop_loss
+        if take_profit is not None:
+            base_payload['takeProfit'] = take_profit
+            base_payload['take_profit'] = take_profit
+
+        for action_type in ('POSITION_MODIFY', 'POSITION_MODIFY_ID', 'POSITION_MODIFY_BY_ID'):
+            payloads.append({'actionType': action_type, **base_payload})
+
+        last_result: dict[str, Any] | None = None
+        for payload in payloads:
+            result = await self._rest_post(
+                resolved_account_id,
+                f'/users/current/accounts/{resolved_account_id}/trade',
+                payload,
+            )
+            if result.get('executed'):
+                result['provider'] = 'rest'
+                result['account_id'] = resolved_account_id
+                result['position_id'] = str(position_id)
+                return result
+            last_result = result
+
+        return {
+            'degraded': True,
+            'executed': False,
+            'reason': (last_result or {}).get('reason', 'MetaApi position modify failed'),
+            'provider': 'rest',
+            'account_id': resolved_account_id,
+            'position_id': str(position_id),
+            'result': (last_result or {}).get('result'),
+            'endpoint': (last_result or {}).get('endpoint'),
+            'raw': (last_result or {}).get('raw'),
+        }
+
+    async def close_position(
+        self,
+        *,
+        position_id: str,
+        volume: float | None = None,
+        side: str | None = None,
+        symbol: str | None = None,
+        account_id: str | None = None,
+        region: str | None = None,
+        allow_opposite_fallback: bool = True,
+    ) -> dict[str, Any]:
+        resolved_account_id = self._resolve_account_id(account_id)
+        if not resolved_account_id:
+            return {'degraded': True, 'executed': False, 'reason': 'MetaApi account id not configured'}
+        if not str(position_id or '').strip():
+            return {'degraded': True, 'executed': False, 'reason': 'Position id is required'}
+
+        safe_volume: float | None = None
+        if isinstance(volume, (int, float)):
+            parsed_volume = float(volume)
+            if parsed_volume > 0:
+                safe_volume = parsed_volume
+
+        sdk = self._get_sdk(region)
+        if sdk:
+            connection = None
+            try:
+                account = await sdk.metatrader_account_api.get_account(resolved_account_id)
+                rpc_unavailable_reason = self._account_rpc_unavailable_reason(account)
+                if rpc_unavailable_reason:
+                    return {
+                        'degraded': True,
+                        'executed': False,
+                        'reason': rpc_unavailable_reason,
+                        'provider': 'sdk',
+                        'account_id': resolved_account_id,
+                        'position_id': str(position_id),
+                    }
+                connection = account.get_rpc_connection()
+                await connection.connect()
+                await connection.wait_synchronized()
+
+                candidate_calls: list[tuple[tuple[str, ...], tuple[Any, ...], dict[str, Any]]] = [
+                    (
+                        ('close_position', 'closePosition'),
+                        (str(position_id),),
+                        {'volume': safe_volume} if safe_volume is not None else {},
+                    ),
+                    (
+                        ('close_position', 'closePosition'),
+                        (str(position_id), safe_volume),
+                        {},
+                    ),
+                ]
+                called, result, error = await self._invoke_connection_candidates(connection, candidate_calls)
+                if called:
+                    if error:
+                        logger.warning('metaapi sdk close position failed: %s', error)
+                    else:
+                        if isinstance(result, dict):
+                            ok, reason = self._trade_result_ok(result)
+                            if not ok:
+                                return {
+                                    'degraded': True,
+                                    'executed': False,
+                                    'reason': reason or 'MetaApi position close rejected',
+                                    'provider': 'sdk',
+                                    'account_id': resolved_account_id,
+                                    'position_id': str(position_id),
+                                    'result': result,
+                                }
+                        return {
+                            'degraded': False,
+                            'executed': True,
+                            'provider': 'sdk',
+                            'account_id': resolved_account_id,
+                            'position_id': str(position_id),
+                            'result': result if isinstance(result, dict) else {'value': result},
+                        }
+            except Exception as exc:  # pragma: no cover
+                logger.warning('metaapi sdk close position failed, trying REST fallback: %s', exc)
+            finally:
+                await self._close_connection(connection)
+
+        payloads: list[dict[str, Any]] = []
+        base_payload = {
+            'positionId': str(position_id),
+            'position_id': str(position_id),
+        }
+        if safe_volume is not None:
+            base_payload['volume'] = safe_volume
+
+        for action_type in ('POSITION_CLOSE_ID', 'POSITION_CLOSE_BY_ID', 'POSITION_CLOSE'):
+            payloads.append({'actionType': action_type, **base_payload})
+
+        last_result: dict[str, Any] | None = None
+        for payload in payloads:
+            result = await self._rest_post(
+                resolved_account_id,
+                f'/users/current/accounts/{resolved_account_id}/trade',
+                payload,
+            )
+            if result.get('executed'):
+                result['provider'] = 'rest'
+                result['account_id'] = resolved_account_id
+                result['position_id'] = str(position_id)
+                return result
+            last_result = result
+
+        if allow_opposite_fallback:
+            # Last fallback: submit an opposite market order for the same symbol/volume.
+            resolved_side = str(side or '').strip().upper()
+            resolved_symbol = str(symbol or '').strip()
+            if resolved_side in {'BUY', 'SELL'} and resolved_symbol and safe_volume is not None:
+                fallback_side = 'SELL' if resolved_side == 'BUY' else 'BUY'
+                opposite_trade = await self.place_order(
+                    symbol=resolved_symbol,
+                    side=fallback_side,
+                    volume=safe_volume,
+                    account_id=resolved_account_id,
+                    region=region,
+                )
+                opposite_trade['fallback_action'] = 'opposite-market-order'
+                opposite_trade['position_id'] = str(position_id)
+                return opposite_trade
+
+        return {
+            'degraded': True,
+            'executed': False,
+            'reason': (
+                (last_result or {}).get('reason', 'MetaApi position close failed')
+                if allow_opposite_fallback
+                else (last_result or {}).get('reason', 'MetaApi position close failed (opposite fallback disabled)')
+            ),
+            'provider': 'rest',
+            'account_id': resolved_account_id,
+            'position_id': str(position_id),
             'result': (last_result or {}).get('result'),
             'endpoint': (last_result or {}).get('endpoint'),
             'raw': (last_result or {}).get('raw'),

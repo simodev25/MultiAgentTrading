@@ -53,10 +53,11 @@ async def lifespan(_: FastAPI):
             )
             db.add(admin)
 
-        for name in ['ollama', 'metaapi', 'yfinance', 'qdrant']:
+        for name in ['ollama', 'metaapi', 'yfinance', 'qdrant', 'order-guardian']:
             exists = db.query(ConnectorConfig).filter(ConnectorConfig.connector_name == name).first()
             if not exists:
-                db.add(ConnectorConfig(connector_name=name, enabled=True, settings={}))
+                enabled = name != 'order-guardian'
+                db.add(ConnectorConfig(connector_name=name, enabled=enabled, settings={}))
 
         if settings.metaapi_account_id and not db.query(MetaApiAccount).count():
             db.add(
