@@ -128,3 +128,28 @@ def test_agent_model_selector_supports_provider_override_and_provider_default_mo
 
         assert selector.resolve_provider(db) == 'openai'
         assert selector.resolve(db, 'news-analyst') == 'gpt-4o-mini'
+
+
+def test_agent_model_selector_resolves_agent_skills() -> None:
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(bind=engine)
+
+    with Session(engine) as db:
+        db.add(
+            ConnectorConfig(
+                connector_name='ollama',
+                enabled=True,
+                settings={
+                    'agent_skills': {
+                        'news-analyst': ['Prioriser sources fiables', 'Citer incertitude', 'Citer incertitude'],
+                        'trader-agent': 'Décision exécutable, Respect du risque',
+                    },
+                },
+            )
+        )
+        db.commit()
+
+        selector = AgentModelSelector()
+        assert selector.resolve_skills(db, 'news-analyst') == ['Prioriser sources fiables', 'Citer incertitude']
+        assert selector.resolve_skills(db, 'trader-agent') == ['Décision exécutable', 'Respect du risque']
+        assert selector.resolve_skills(db, 'macro-analyst') == []

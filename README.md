@@ -11,7 +11,7 @@ Plateforme IA multi-agent dédiée au Forex avec:
 - Docker Compose local + Helm minimal
 - Mémoire long-terme vectorielle (Qdrant + repli SQL cosine, pgvector optionnel)
 - Prompts versionnés en base pour enrichir le débat agents
-- Configuration LLM par agent (switch, modèle effectif, catalogue modèles, prompts modifiables)
+- Configuration LLM par agent (switch, modèle effectif, skills, catalogue modèles, prompts modifiables)
 - Trading Control Room (menu `Config`): configuration connecteurs, provider/modèles LLM, comptes MetaApi, prompts et télémétrie LLM
 - Backtesting avancé (Sharpe, Sortino, drawdown, profit factor)
 - Support multi-comptes MetaApi

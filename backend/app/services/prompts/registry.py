@@ -6,6 +6,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.models.prompt_template import PromptTemplate
+from app.services.llm.model_selector import AgentModelSelector
 
 LANGUAGE_DIRECTIVE = (
     "Réponds en français. "
@@ -132,12 +133,26 @@ class SafeDict(dict):
 
 
 class PromptTemplateService:
+    def __init__(self) -> None:
+        self.model_selector = AgentModelSelector()
+
     @staticmethod
     def _enforce_language(system_prompt: str) -> str:
         lower = system_prompt.lower()
         if 'réponds en français' in lower or 'respond in french' in lower:
             return system_prompt
         return f'{system_prompt}\n\n{LANGUAGE_DIRECTIVE}'
+
+    @staticmethod
+    def _append_skills_block(system_prompt: str, skills: list[str]) -> str:
+        if not skills:
+            return system_prompt
+        block = '\n'.join(f'- {skill}' for skill in skills)
+        return (
+            f'{system_prompt}\n\n'
+            'Skills agent à appliquer:\n'
+            f'{block}'
+        )
 
     def seed_defaults(self, db: Session) -> None:
         for agent_name, templates in DEFAULT_PROMPTS.items():
@@ -229,6 +244,8 @@ class PromptTemplateService:
             prompt_version = 0
             prompt_id = None
 
+        skills = self.model_selector.resolve_skills(db, agent_name)
+        system_prompt = self._append_skills_block(system_prompt, skills)
         user_prompt = user_template.format_map(SafeDict(**variables))
         system_prompt = self._enforce_language(system_prompt)
 
@@ -237,4 +254,5 @@ class PromptTemplateService:
             'version': prompt_version,
             'system_prompt': system_prompt,
             'user_prompt': user_prompt,
+            'skills': skills,
         }

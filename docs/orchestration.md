@@ -69,10 +69,27 @@ Via API:
       "bullish-researcher": true,
       "bearish-researcher": true,
       "trader-agent": false
+    },
+    "agent_skills": {
+      "news-analyst": [
+        "Prioriser les événements macro à fort impact Forex",
+        "Signaler explicitement les incertitudes des titres"
+      ],
+      "trader-agent": [
+        "Toujours expliciter le scénario d'invalidation",
+        "Favoriser HOLD en cas de conflit fort entre signaux"
+      ]
     }
   }
 }
 ```
+
+## Skills par agent
+
+- Les skills sont configurés dans `connector_configs.settings.agent_skills`.
+- À l'exécution, ils sont injectés automatiquement dans le `system_prompt` de l'agent concerné.
+- Vous pouvez y coller des instructions issues de `skills.sh` (copiées depuis un `SKILL.md`) pour spécialiser chaque agent sans redéploiement.
+- Exemple pour récupérer des skills depuis le registre: `npx skills add vercel-labs/agent-skills --list`.
 
 ## Prompts versionnés
 

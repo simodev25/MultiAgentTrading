@@ -1,3 +1,5 @@
+import re
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -19,6 +21,46 @@ SUPPORTED_CONNECTORS = ['ollama', 'metaapi', 'yfinance', 'qdrant']
 DETERMINISTIC_ONLY_AGENTS = {'risk-manager', 'execution-manager'}
 
 
+def _normalize_agent_skills(raw_skills: object) -> dict[str, list[str]]:
+    if not isinstance(raw_skills, dict):
+        return {}
+
+    normalized: dict[str, list[str]] = {}
+    for raw_agent_name, raw_value in raw_skills.items():
+        agent_name = str(raw_agent_name or '').strip()
+        if not agent_name:
+            continue
+
+        raw_items: list[str]
+        if isinstance(raw_value, str):
+            raw_items = [item.strip() for item in re.split(r'[\n,]+', raw_value)]
+        elif isinstance(raw_value, (list, tuple, set)):
+            raw_items = [str(item).strip() for item in raw_value]
+        else:
+            continue
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in raw_items:
+            cleaned = item.strip()
+            if not cleaned:
+                continue
+            if len(cleaned) > 500:
+                cleaned = cleaned[:500].rstrip()
+            key = cleaned.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(cleaned)
+            if len(deduped) >= 12:
+                break
+
+        if deduped:
+            normalized[agent_name] = deduped
+
+    return normalized
+
+
 def _sanitize_ollama_settings(raw_settings: dict) -> dict:
     settings = dict(raw_settings or {})
     raw_enabled = settings.get('agent_llm_enabled')
@@ -26,6 +68,7 @@ def _sanitize_ollama_settings(raw_settings: dict) -> dict:
     for agent_name in DETERMINISTIC_ONLY_AGENTS:
         enabled[agent_name] = False
     settings['agent_llm_enabled'] = enabled
+    settings['agent_skills'] = _normalize_agent_skills(settings.get('agent_skills'))
     return settings
 
 

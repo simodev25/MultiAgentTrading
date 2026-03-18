@@ -141,6 +141,22 @@ function parseSymbolInput(value: string): string[] {
   return deduped;
 }
 
+function parseSkillsInput(value: string): string[] {
+  const normalized = value
+    .split(/[\n,]+/)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+  for (const skill of normalized) {
+    const key = skill.toLocaleLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(skill);
+  }
+  return deduped;
+}
+
 interface EditableSymbolGroup {
   id: string;
   name: string;
@@ -192,6 +208,9 @@ export function ConnectorsPage() {
   const [agentModels, setAgentModels] = useState<Record<string, string>>(
     Object.fromEntries(MODEL_EDIT_AGENTS.map((agent) => [agent, ''])),
   );
+  const [agentSkills, setAgentSkills] = useState<Record<string, string[]>>(
+    Object.fromEntries(MODEL_EDIT_AGENTS.map((agent) => [agent, []])),
+  );
   const [agentLlmEnabled, setAgentLlmEnabled] = useState<Record<string, boolean>>(
     Object.fromEntries(MODEL_EDIT_AGENTS.map((agent) => [agent, DEFAULT_AGENT_LLM_ENABLED[agent] ?? false])),
   );
@@ -207,6 +226,7 @@ export function ConnectorsPage() {
   const [promptSystem, setPromptSystem] = useState(AGENT_PROMPT_FALLBACKS['news-analyst'].system);
   const [promptUser, setPromptUser] = useState(AGENT_PROMPT_FALLBACKS['news-analyst'].user);
   const [promptSaving, setPromptSaving] = useState(false);
+  const [skillsSaving, setSkillsSaving] = useState(false);
 
   const [memoryPair, setMemoryPair] = useState(DEFAULT_PAIR);
   const [memoryTimeframe, setMemoryTimeframe] = useState('H1');
@@ -229,15 +249,27 @@ export function ConnectorsPage() {
     const rawMap = settings.agent_models && typeof settings.agent_models === 'object'
       ? (settings.agent_models as Record<string, unknown>)
       : {};
+    const rawSkills = settings.agent_skills && typeof settings.agent_skills === 'object'
+      ? (settings.agent_skills as Record<string, unknown>)
+      : {};
     const rawEnabled = settings.agent_llm_enabled && typeof settings.agent_llm_enabled === 'object'
       ? (settings.agent_llm_enabled as Record<string, unknown>)
       : {};
 
     const next: Record<string, string> = {};
+    const nextSkills: Record<string, string[]> = {};
     const nextEnabled: Record<string, boolean> = {};
     MODEL_EDIT_AGENTS.forEach((agentName) => {
       const value = rawMap[agentName];
       next[agentName] = typeof value === 'string' ? value : '';
+      const skillsValue = rawSkills[agentName];
+      if (Array.isArray(skillsValue)) {
+        nextSkills[agentName] = skillsValue.map((item) => String(item).trim()).filter((item) => item.length > 0);
+      } else if (typeof skillsValue === 'string') {
+        nextSkills[agentName] = parseSkillsInput(skillsValue);
+      } else {
+        nextSkills[agentName] = [];
+      }
       if (!SWITCHABLE_LLM_AGENTS.has(agentName)) {
         nextEnabled[agentName] = false;
         return;
@@ -251,6 +283,7 @@ export function ConnectorsPage() {
     setLlmProvider(provider);
     setDefaultLlmModel(configuredDefault || defaultModelForProvider(provider));
     setAgentModels(next);
+    setAgentSkills(nextSkills);
     setAgentLlmEnabled(nextEnabled);
   };
 
@@ -385,6 +418,11 @@ export function ConnectorsPage() {
     const cleanedEnabled = Object.fromEntries(
       MODEL_EDIT_AGENTS.map((agentName) => [agentName, SWITCHABLE_LLM_AGENTS.has(agentName) ? Boolean(agentLlmEnabled[agentName]) : false]),
     );
+    const cleanedSkills = Object.fromEntries(
+      Object.entries(agentSkills)
+        .map(([agentName, skills]) => [agentName, parseSkillsInput((skills ?? []).join(','))])
+        .filter(([, skills]) => Array.isArray(skills) && skills.length > 0),
+    );
     const existingSettings = (ollama.settings ?? {}) as Record<string, unknown>;
 
     setSavingModels(true);
@@ -398,6 +436,7 @@ export function ConnectorsPage() {
           default_model: defaultLlmModel.trim() || defaultModelForProvider(llmProvider),
           agent_models: cleanedModels,
           agent_llm_enabled: cleanedEnabled,
+          agent_skills: cleanedSkills,
         },
       });
       await loadAll();
@@ -450,6 +489,40 @@ export function ConnectorsPage() {
       setError(err instanceof Error ? err.message : 'Cannot create prompt');
     } finally {
       setPromptSaving(false);
+    }
+  };
+
+  const savePromptAgentSkills = async () => {
+    if (!token) return;
+
+    const ollama = connectors.find((item) => item.connector_name === 'ollama');
+    if (!ollama) {
+      setError('Connecteur ollama introuvable');
+      return;
+    }
+
+    const cleanedSkills = Object.fromEntries(
+      Object.entries(agentSkills)
+        .map(([agentName, skills]) => [agentName, parseSkillsInput((skills ?? []).join(','))])
+        .filter(([, skills]) => Array.isArray(skills) && skills.length > 0),
+    );
+    const existingSettings = (ollama.settings ?? {}) as Record<string, unknown>;
+
+    setSkillsSaving(true);
+    setError(null);
+    try {
+      await api.updateConnector(token, 'ollama', {
+        enabled: ollama.enabled,
+        settings: {
+          ...existingSettings,
+          agent_skills: cleanedSkills,
+        },
+      });
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Cannot save agent skills');
+    } finally {
+      setSkillsSaving(false);
     }
   };
 
@@ -731,6 +804,7 @@ export function ConnectorsPage() {
                       <th>Agent</th>
                       <th>LLM actif</th>
                       <th>Modèle</th>
+                      <th>Skills</th>
                       <th>LLM effectif</th>
                       <th>Prompt</th>
                     </tr>
@@ -762,6 +836,9 @@ export function ConnectorsPage() {
                           />
                         </td>
                         <td>
+                          <code>{(agentSkills[agentName] ?? []).length} règle(s)</code>
+                        </td>
+                        <td>
                           <code>{effectiveModelFor(agentName)}</code>
                         </td>
                         <td>
@@ -776,7 +853,7 @@ export function ConnectorsPage() {
                               });
                             }}
                           >
-                            Éditer prompt
+                            Éditer prompt + skills
                           </button>
                         </td>
                       </tr>
@@ -784,7 +861,7 @@ export function ConnectorsPage() {
                   </tbody>
                 </table>
                 <p className="model-source">
-                  Les prompts de `risk-manager`, `execution-manager` et `order-guardian` sont versionnés ici.
+                  Les skills se modifient dans l’éditeur prompt ci-dessous, puis s’enregistrent via “Enregistrer skills de l’agent”.
                 </p>
 
                 <button className="btn-primary" disabled={savingModels}>{savingModels ? 'Enregistrement...' : 'Enregistrer les modèles'}</button>
@@ -792,7 +869,7 @@ export function ConnectorsPage() {
             </section>
 
             <section className="card config-inner-card" id="agent-prompts-editor">
-              <h3>Prompts versionnés (par agent)</h3>
+              <h3>Prompt + skills (par agent)</h3>
               <form className="form-grid" onSubmit={createPrompt}>
                 <label>
                   Agent
@@ -812,7 +889,29 @@ export function ConnectorsPage() {
                   User template
                   <textarea value={promptUser} onChange={(e) => setPromptUser(e.target.value)} rows={4} />
                 </label>
-                <button className="btn-primary" disabled={promptSaving}>{promptSaving ? 'Enregistrement...' : 'Créer + activer version'}</button>
+                <label>
+                  Skills (une règle par ligne)
+                  <textarea
+                    value={(agentSkills[promptAgent] ?? []).join('\n')}
+                    onChange={(e) => {
+                      const parsedSkills = parseSkillsInput(e.target.value);
+                      setAgentSkills((prev) => ({ ...prev, [promptAgent]: parsedSkills }));
+                    }}
+                    rows={10}
+                    placeholder={'ex:\nPrioriser les événements macro à fort impact Forex\nSignaler explicitement les incertitudes'}
+                  />
+                </label>
+                <div className="form-grid inline">
+                  <button className="btn-primary" disabled={promptSaving}>{promptSaving ? 'Enregistrement...' : 'Créer + activer version prompt'}</button>
+                  <button
+                    className="btn-ghost"
+                    type="button"
+                    onClick={() => void savePromptAgentSkills()}
+                    disabled={skillsSaving}
+                  >
+                    {skillsSaving ? 'Enregistrement...' : 'Enregistrer skills de l’agent'}
+                  </button>
+                </div>
               </form>
               <p className="model-source">
                 Agent sélectionné: <code>{promptAgent}</code> | version active: <code>v{activePromptByAgent.get(promptAgent)?.version ?? 0}</code>

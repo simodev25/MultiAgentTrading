@@ -23,6 +23,8 @@ DEFAULT_AGENT_LLM_ENABLED: dict[str, bool] = {
 
 SUPPORTED_LLM_PROVIDERS = {'ollama', 'openai', 'mistral'}
 DETERMINISTIC_ONLY_AGENTS = {'risk-manager', 'execution-manager'}
+MAX_AGENT_SKILLS_PER_AGENT = 12
+MAX_AGENT_SKILL_LENGTH = 500
 
 
 def normalize_llm_provider(value: str | None, fallback: str = 'ollama') -> str:
@@ -124,3 +126,36 @@ class AgentModelSelector:
 
         default_model = str(settings.get('default_model', '')).strip()
         return default_model or fallback
+
+    def resolve_skills(self, db: Session | None, agent_name: str) -> list[str]:
+        settings = self._load_llm_settings(db)
+        raw_map = settings.get('agent_skills', {})
+        if not isinstance(raw_map, dict):
+            return []
+
+        raw_value = raw_map.get(agent_name)
+        raw_items: list[str]
+        if isinstance(raw_value, str):
+            raw_items = [part.strip() for part in raw_value.replace('\n', ',').split(',')]
+        elif isinstance(raw_value, (list, tuple, set)):
+            raw_items = [str(item).strip() for item in raw_value]
+        else:
+            return []
+
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in raw_items:
+            cleaned = item.strip()
+            if not cleaned:
+                continue
+            if len(cleaned) > MAX_AGENT_SKILL_LENGTH:
+                cleaned = cleaned[:MAX_AGENT_SKILL_LENGTH].rstrip()
+            key = cleaned.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(cleaned)
+            if len(deduped) >= MAX_AGENT_SKILLS_PER_AGENT:
+                break
+
+        return deduped
