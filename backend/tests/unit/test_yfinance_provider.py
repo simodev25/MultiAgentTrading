@@ -96,6 +96,32 @@ def test_get_news_context_tries_fallback_candidates(monkeypatch) -> None:
     assert 'EURUSD=X' in calls
 
 
+def test_get_news_context_uses_macro_fallback_when_pair_has_no_headlines(monkeypatch) -> None:
+    provider = YFinanceMarketProvider()
+    provider.settings.yfinance_cache_enabled = False
+    provider._redis = None
+    calls: list[str] = []
+
+    class _FakeTicker:
+        def __init__(self, symbol: str) -> None:
+            self.symbol = symbol
+
+        @property
+        def news(self):
+            calls.append(self.symbol)
+            if self.symbol == '^GSPC':
+                return [{'title': 'Risk sentiment shifts', 'publisher': 'unit', 'link': 'https://example.com/risk', 'providerPublishTime': 2}]
+            return []
+
+    monkeypatch.setattr('app.services.market.yfinance_provider.yf.Ticker', _FakeTicker)
+
+    payload = provider.get_news_context('EURUSD.PRO', limit=5)
+    assert payload['degraded'] is False
+    assert len(payload['news']) == 1
+    assert payload['news'][0]['source_symbol'] == '^GSPC'
+    assert '^GSPC' in calls
+
+
 def test_get_market_snapshot_uses_cache(monkeypatch) -> None:
     provider = YFinanceMarketProvider()
     provider.settings.yfinance_cache_enabled = True

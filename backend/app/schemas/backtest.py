@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 
 class BacktestCreateRequest(BaseModel):
-    pair: str = Field(min_length=6, max_length=10)
+    pair: str = Field(min_length=1, max_length=20)
     timeframe: str = Field(min_length=2, max_length=5)
     start_date: date
     end_date: date

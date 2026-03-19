@@ -50,6 +50,17 @@ class YFinanceMarketProvider:
         'JP225': '^N225',
         'NIKKEI225': '^N225',
     }
+    fx_news_fallback_by_currency = {
+        'USD': ['DX-Y.NYB', '^DXY', 'UUP'],
+        'EUR': ['FXE'],
+        'GBP': ['FXB'],
+        'JPY': ['FXY'],
+        'CHF': ['FXF'],
+        'CAD': ['FXC'],
+        'AUD': ['FXA'],
+        'NZD': ['BNZL'],
+    }
+    macro_news_fallback_symbols = ['^GSPC', '^VIX', 'GC=F', 'CL=F']
 
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -274,6 +285,35 @@ class YFinanceMarketProvider:
             )
         return frame
 
+    @staticmethod
+    def _split_fx_pair(pair: str) -> tuple[str | None, str | None]:
+        normalized = YFinanceMarketProvider._normalize_pair(pair)
+        if len(normalized) == 6 and normalized.isalpha():
+            return normalized[:3], normalized[3:]
+        return None, None
+
+    @classmethod
+    def _news_symbol_candidates(cls, pair: str) -> list[str]:
+        candidates: list[str] = []
+
+        def add(symbol: str | None) -> None:
+            value = str(symbol or '').strip()
+            if value and value not in candidates:
+                candidates.append(value)
+
+        for symbol in cls._ticker_candidates(pair):
+            add(symbol)
+
+        base_ccy, quote_ccy = cls._split_fx_pair(pair)
+        for ccy in (base_ccy, quote_ccy):
+            for symbol in cls.fx_news_fallback_by_currency.get(str(ccy or ''), []):
+                add(symbol)
+
+        for symbol in cls.macro_news_fallback_symbols:
+            add(symbol)
+
+        return candidates
+
     def _fetch_history_with_fallback(
         self,
         pair: str,
@@ -481,37 +521,67 @@ class YFinanceMarketProvider:
         try:
             try:
                 last_symbol: str | None = None
-                for symbol in self._ticker_candidates(pair):
+                selected: list[dict[str, Any]] = []
+                seen_keys: set[tuple[str, str]] = set()
+                symbols_scanned: list[str] = []
+
+                for symbol in self._news_symbol_candidates(pair):
                     try:
                         last_symbol = symbol
+                        symbols_scanned.append(symbol)
                         ticker = yf.Ticker(symbol)
                         news_items = ticker.news or []
                     except Exception:  # pragma: no cover
                         logger.debug('yfinance news candidate failed pair=%s symbol=%s', pair, symbol, exc_info=True)
                         continue
 
-                    selected = []
+                    symbol_selected: list[dict[str, Any]] = []
                     for item in news_items:
                         title = str(item.get('title', '') or '').strip()
                         if not title:
                             continue
-                        selected.append(
+                        link = str(item.get('link', '') or '').strip()
+                        dedupe_key = (title.lower(), link)
+                        if dedupe_key in seen_keys:
+                            continue
+                        seen_keys.add(dedupe_key)
+
+                        symbol_selected.append(
                             {
                                 'title': title,
                                 'publisher': str(item.get('publisher', '') or '').strip(),
-                                'link': str(item.get('link', '') or '').strip(),
+                                'link': link,
                                 'published': item.get('providerPublishTime'),
+                                'source_symbol': symbol,
                             }
                         )
-                        if len(selected) >= safe_limit:
+                        if len(symbol_selected) >= safe_limit:
                             break
 
-                    if selected:
-                        resolved = {'degraded': False, 'pair': pair, 'symbol': symbol, 'news': selected}
-                        self._cache_set_json(news_cache_key, resolved, self.settings.yfinance_news_cache_ttl_seconds)
-                        return resolved
+                    if symbol_selected:
+                        selected = symbol_selected
+                        break
 
-                resolved = {'degraded': False, 'pair': pair, 'symbol': last_symbol, 'news': []}
+                if selected:
+                    primary_symbol = str(selected[0].get('source_symbol') or last_symbol or '')
+                    resolved = {
+                        'degraded': False,
+                        'pair': pair,
+                        'symbol': primary_symbol,
+                        'symbols_scanned': symbols_scanned,
+                        'news': selected,
+                    }
+                    self._cache_set_json(news_cache_key, resolved, self.settings.yfinance_news_cache_ttl_seconds)
+                    return resolved
+
+                resolved = {
+                    'degraded': False,
+                    'pair': pair,
+                    'symbol': last_symbol,
+                    'symbols_scanned': symbols_scanned,
+                    'news': [],
+                    'reason': 'No Yahoo Finance news across pair, currency and macro fallback symbols',
+                }
                 self._cache_set_json(news_cache_key, resolved, self.settings.yfinance_news_cache_ttl_seconds)
                 return resolved
             except Exception as exc:  # pragma: no cover

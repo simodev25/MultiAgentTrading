@@ -41,7 +41,7 @@ def list_orders(
 @router.get('/market-candles')
 async def market_candles(
     account_ref: int | None = Query(default=None),
-    pair: str = Query(min_length=3, max_length=20),
+    pair: str = Query(min_length=1, max_length=20),
     timeframe: str = Query(default='H1', min_length=2, max_length=5),
     limit: int = Query(default=240, ge=20, le=2000),
     db: Session = Depends(get_db),

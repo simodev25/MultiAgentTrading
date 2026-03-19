@@ -9,7 +9,7 @@ ExecutionMode = Literal['simulation', 'paper', 'live']
 
 class ScheduledRunCreate(BaseModel):
     name: str = Field(min_length=2, max_length=120)
-    pair: str = Field(min_length=3, max_length=20)
+    pair: str = Field(min_length=1, max_length=20)
     timeframe: str = Field(min_length=2, max_length=5)
     mode: ExecutionMode = 'simulation'
     risk_percent: float = Field(default=1.0, ge=0.1, le=5.0)
@@ -20,7 +20,7 @@ class ScheduledRunCreate(BaseModel):
 
 class ScheduledRunUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=120)
-    pair: str | None = Field(default=None, min_length=3, max_length=20)
+    pair: str | None = Field(default=None, min_length=1, max_length=20)
     timeframe: str | None = Field(default=None, min_length=2, max_length=5)
     mode: ExecutionMode | None = None
     risk_percent: float | None = Field(default=None, ge=0.1, le=5.0)

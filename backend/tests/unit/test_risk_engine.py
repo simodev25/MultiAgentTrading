@@ -40,3 +40,18 @@ def test_risk_engine_uses_jpy_pip_size_for_position_sizing() -> None:
 
     assert result.accepted is True
     assert result.suggested_volume > 0.01
+
+
+def test_risk_engine_uses_adaptive_tick_for_non_fx_symbols() -> None:
+    engine = RiskEngine()
+    result = engine.evaluate(
+        mode='simulation',
+        decision='BUY',
+        risk_percent=1.0,
+        price=215.0,
+        stop_loss=210.0,
+        pair='AAPL',
+    )
+
+    assert result.accepted is True
+    assert result.suggested_volume >= 0.01

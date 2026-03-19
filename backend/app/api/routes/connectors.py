@@ -249,9 +249,13 @@ async def test_connector(
         return await client.get_account_information()
     if connector_name == 'yfinance':
         provider = YFinanceMarketProvider()
+        settings = get_settings()
+        symbols_config = get_market_symbols_config(db, settings)
+        sample_symbol = next(iter(symbols_config.get('tradeable_pairs', [])), 'SPY')
         return {
-            'market': provider.get_market_snapshot('EURUSD', 'H1'),
-            'news': provider.get_news_context('EURUSD'),
+            'sample_symbol': sample_symbol,
+            'market': provider.get_market_snapshot(sample_symbol, 'H1'),
+            'news': provider.get_news_context(sample_symbol),
         }
     if connector_name == 'qdrant':
         service = VectorMemoryService()

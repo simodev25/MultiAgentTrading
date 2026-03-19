@@ -39,10 +39,14 @@ async def create_run(
     pair = canonical_symbol(payload.pair)
     timeframe = payload.timeframe.upper()
     symbols_config = get_market_symbols_config(db, settings)
-    supported_pairs = {canonical_symbol(item) for item in symbols_config['tradeable_pairs']}
+    preferred_pairs = {canonical_symbol(item) for item in symbols_config['tradeable_pairs']}
 
-    if pair not in supported_pairs:
-        raise HTTPException(status_code=400, detail=f'Unsupported pair {pair} for V1 scope')
+    if preferred_pairs and pair not in preferred_pairs:
+        logger.info(
+            'run_symbol_outside_preferred_universe pair=%s preferred_universe_size=%s',
+            pair,
+            len(preferred_pairs),
+        )
     if timeframe not in settings.default_timeframes:
         raise HTTPException(status_code=400, detail=f'Unsupported timeframe {timeframe} for V1 scope')
     if payload.mode == 'live' and user.role not in {Role.SUPER_ADMIN, Role.ADMIN, Role.TRADER_OPERATOR}:

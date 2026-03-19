@@ -17,7 +17,7 @@ class Settings(BaseSettings):
         extra='ignore',
     )
 
-    app_name: str = Field(default='Forex Multi-Agent Platform', alias='APP_NAME')
+    app_name: str = Field(default='Multi-Agent Trading Platform', alias='APP_NAME')
     env: str = Field(default='dev', alias='ENV')
     api_prefix: str = Field(default='/api/v1', alias='API_PREFIX')
 

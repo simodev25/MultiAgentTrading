@@ -12,7 +12,7 @@ from app.services.prompts.registry import PromptTemplateService
 SCHEDULE_PLANNER_AGENT_NAME = 'schedule-planner-agent'
 
 FALLBACK_SYSTEM_PROMPT = (
-    'Tu es un agent dédié à l’automatisation intelligente des plans cron Forex. '
+    'Tu es un agent dédié à l’automatisation intelligente des plans cron de trading multi-actifs. '
     'Tu dois produire un résultat strictement structuré et exploitable par une API.'
 )
 FALLBACK_USER_PROMPT = (

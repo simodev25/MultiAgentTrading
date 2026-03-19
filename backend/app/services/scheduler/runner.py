@@ -30,9 +30,13 @@ def validate_schedule_target(
     normalized_mode = str(mode or '').strip().lower()
 
     symbols_config = get_market_symbols_config(db, settings)
-    supported_pairs = {canonical_symbol(item) for item in symbols_config['tradeable_pairs']}
-    if normalized_pair not in supported_pairs:
-        raise ValueError(f'Unsupported pair {normalized_pair} for V1 scope')
+    preferred_pairs = {canonical_symbol(item) for item in symbols_config['tradeable_pairs']}
+    if preferred_pairs and normalized_pair not in preferred_pairs:
+        logger.info(
+            'schedule_symbol_outside_preferred_universe pair=%s preferred_universe_size=%s',
+            normalized_pair,
+            len(preferred_pairs),
+        )
     if normalized_timeframe not in settings.default_timeframes:
         raise ValueError(f'Unsupported timeframe {normalized_timeframe} for V1 scope')
     if normalized_mode not in SUPPORTED_MODES:

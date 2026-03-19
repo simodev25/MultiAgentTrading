@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 
 
@@ -10,10 +11,27 @@ class RiskAssessment:
 
 class RiskEngine:
     @staticmethod
-    def _pip_size(pair: str | None) -> float:
+    def _is_fx_like_symbol(symbol: str | None) -> bool:
+        normalized = str(symbol or '').upper().split('.', 1)[0]
+        return re.fullmatch(r'[A-Z]{6}', normalized) is not None
+
+    @classmethod
+    def _pip_size(cls, pair: str | None, price: float | None = None) -> float:
         normalized = str(pair or '').upper().split('.', 1)[0]
-        if normalized.endswith('JPY'):
+        if cls._is_fx_like_symbol(normalized):
+            if normalized.endswith('JPY'):
+                return 0.01
+            return 0.0001
+
+        price_value = abs(float(price or 0.0))
+        if price_value >= 1000:
+            return 1.0
+        if price_value >= 100:
+            return 0.1
+        if price_value >= 1:
             return 0.01
+        if price_value >= 0.1:
+            return 0.001
         return 0.0001
 
     def evaluate(
@@ -43,11 +61,11 @@ class RiskEngine:
             reasons.append('Stop loss distance must be > 0.')
 
         if stop_distance / price < 0.0005:
-            reasons.append('Stop loss is too tight for FX volatility.')
+            reasons.append('Stop loss is too tight for current market volatility.')
 
         risk_amount = equity * (risk_percent / 100)
         pip_value_per_lot = 10.0
-        pip_size = self._pip_size(pair)
+        pip_size = self._pip_size(pair, price)
         sl_pips = max(stop_distance / pip_size, 0.1)
         suggested_volume = max(min(risk_amount / (sl_pips * pip_value_per_lot), 2.0), 0.01)
 

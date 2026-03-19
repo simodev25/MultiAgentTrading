@@ -73,6 +73,16 @@ def test_login_and_create_run(monkeypatch) -> None:
         )
         assert overridden_run_resp.status_code == 200
 
+        non_configured_symbol_resp = client.post(
+            '/api/v1/runs?async_execution=false',
+            json={'pair': 'AAPL', 'timeframe': 'H1', 'mode': 'simulation', 'risk_percent': 1.0},
+            headers={'Authorization': f'Bearer {token}'},
+        )
+        assert non_configured_symbol_resp.status_code == 200
+        non_configured_payload = non_configured_symbol_resp.json()
+        assert non_configured_payload['pair'] == 'AAPL'
+        assert non_configured_payload['status'] == 'completed'
+
         list_resp = client.get('/api/v1/runs', headers={'Authorization': f'Bearer {token}'})
         assert list_resp.status_code == 200
-        assert len(list_resp.json()) >= 3
+        assert len(list_resp.json()) >= 4

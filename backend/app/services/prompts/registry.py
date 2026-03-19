@@ -21,7 +21,7 @@ LANGUAGE_DIRECTIVE_JSON = 'Réponds en français. Fournis uniquement du JSON val
 DEFAULT_PROMPTS: dict[str, dict[str, str]] = {
     'technical-analyst': {
         'system': (
-            "Tu es un analyste technique Forex. "
+            "Tu es un analyste technique marchés multi-actifs. "
             "Retourne un biais bullish, bearish ou neutral avec justification courte."
         ),
         'user': (
@@ -31,7 +31,7 @@ DEFAULT_PROMPTS: dict[str, dict[str, str]] = {
     },
     'news-analyst': {
         'system': (
-            "Tu es un analyste news Forex. "
+            "Tu es un analyste news marchés multi-actifs. "
             "Infère strictement un sentiment directionnel bullish, bearish ou neutral."
         ),
         'user': (
@@ -40,35 +40,35 @@ DEFAULT_PROMPTS: dict[str, dict[str, str]] = {
         ),
     },
     'bullish-researcher': {
-        'system': "Tu es un chercheur Forex haussier. Construis le meilleur cas haussier avec des preuves.",
+        'system': "Tu es un chercheur de marché haussier multi-actifs. Construis le meilleur cas haussier avec des preuves.",
         'user': (
             "Pair: {pair}\nTimeframe: {timeframe}\nSignals: {signals_json}\nMémoire long-terme:\n{memory_context}\n"
             "Produit des arguments haussiers concis et les risques d'invalidation."
         ),
     },
     'bearish-researcher': {
-        'system': "Tu es un chercheur Forex baissier. Construis le meilleur cas baissier avec des preuves.",
+        'system': "Tu es un chercheur de marché baissier multi-actifs. Construis le meilleur cas baissier avec des preuves.",
         'user': (
             "Pair: {pair}\nTimeframe: {timeframe}\nSignals: {signals_json}\nMémoire long-terme:\n{memory_context}\n"
             "Produit des arguments baissiers concis et les risques d'invalidation."
         ),
     },
     'macro-analyst': {
-        'system': "Tu es un analyste macro Forex. Donne un biais macro bullish, bearish ou neutral.",
+        'system': "Tu es un analyste macro multi-actifs. Donne un biais macro bullish, bearish ou neutral.",
         'user': (
             "Pair: {pair}\nTimeframe: {timeframe}\nTrend: {trend}\nATR ratio: {atr_ratio}\n"
             "Volatilité: {volatility}\nRéponds avec biais + justification courte."
         ),
     },
     'sentiment-agent': {
-        'system': "Tu es un analyste sentiment Forex. Donne un biais bullish, bearish ou neutral.",
+        'system': "Tu es un analyste sentiment multi-actifs. Donne un biais bullish, bearish ou neutral.",
         'user': (
             "Pair: {pair}\nTimeframe: {timeframe}\nChange pct: {change_pct}\nTrend: {trend}\n"
             "Réponds avec biais + justification concise."
         ),
     },
     'trader-agent': {
-        'system': "Tu es un assistant trader Forex. Résume la justification finale en note d'exécution compacte.",
+        'system': "Tu es un assistant trader multi-actifs. Résume la justification finale en note d'exécution compacte.",
         'user': (
             "Pair: {pair}\nTimeframe: {timeframe}\nDecision: {decision}\nBullish: {bullish_args}\n"
             "Bearish: {bearish_args}\nNotes de risque: {risk_notes}"
@@ -76,7 +76,7 @@ DEFAULT_PROMPTS: dict[str, dict[str, str]] = {
     },
     'risk-manager': {
         'system': (
-            "Tu es un risk manager Forex. "
+            "Tu es un risk manager multi-actifs. "
             "Tu dois confirmer ou refuser une proposition d'exposition en restant strict."
         ),
         'user': (
@@ -88,7 +88,7 @@ DEFAULT_PROMPTS: dict[str, dict[str, str]] = {
     },
     'execution-manager': {
         'system': (
-            "Tu es un execution manager Forex. "
+            "Tu es un execution manager multi-actifs. "
             "Tu dois confirmer BUY/SELL ou basculer HOLD si la prudence l'impose."
         ),
         'user': (
@@ -111,7 +111,7 @@ DEFAULT_PROMPTS: dict[str, dict[str, str]] = {
     },
     'schedule-planner-agent': {
         'system': (
-            "Tu es un agent dédié à l’automatisation intelligente des plans cron Forex. "
+            "Tu es un agent dédié à l’automatisation intelligente des plans cron de trading multi-actifs. "
             "Tu dois produire un résultat strictement structuré et exploitable par une API."
         ),
         'user': (

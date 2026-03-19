@@ -563,7 +563,7 @@ class TechnicalAnalystAgent:
                 output['reason'] = 'Skill guardrails applied (deterministic mode)'
             return output
 
-        fallback_system = 'Tu es un analyste technique Forex. Réponds en français.'
+        fallback_system = 'Tu es un analyste technique multi-actifs. Réponds en français.'
         fallback_user = (
             'Pair: {pair}\nTimeframe: {timeframe}\nTrend: {trend}\nRSI: {rsi}\nMACD diff: {macd_diff}\n'
             'Prix: {last_price}\nDonne uniquement: bullish, bearish ou neutral puis une courte justification.'
@@ -674,7 +674,7 @@ class NewsAnalystAgent:
 
         headlines = '\n'.join(f"- {item['title']}" for item in valid_news[:5])
         fallback_system = (
-            'Tu es un analyste news Forex. Retourne un sentiment court pour la paire de base: '
+            'Tu es un analyste news multi-actifs. Retourne un sentiment court pour le symbole analysé: '
             'bullish, bearish ou neutral. Réponds en français pour les explications.'
         )
         fallback_user = (
@@ -793,7 +793,7 @@ class MacroAnalystAgent:
                 output['reason'] = 'Skill guardrails applied (deterministic mode)'
             return output
 
-        fallback_system = 'Tu es un analyste macro Forex. Réponds en français.'
+        fallback_system = 'Tu es un analyste macro multi-actifs. Réponds en français.'
         fallback_user = (
             'Pair: {pair}\nTimeframe: {timeframe}\nTrend: {trend}\nATR ratio: {atr_ratio}\n'
             'Volatilité: {volatility}\nDonne un biais macro: bullish, bearish ou neutral puis une phrase concise.'
@@ -901,7 +901,7 @@ class SentimentAgent:
                 output['reason'] = 'Skill guardrails applied (deterministic mode)'
             return output
 
-        fallback_system = 'Tu es un analyste sentiment Forex. Réponds en français.'
+        fallback_system = 'Tu es un analyste sentiment multi-actifs. Réponds en français.'
         fallback_user = (
             'Pair: {pair}\nTimeframe: {timeframe}\nChange pct: {change_pct}\nTrend: {trend}\n'
             'Classe le sentiment: bullish, bearish ou neutral puis une justification concise.'
@@ -979,7 +979,7 @@ class BullishResearcherAgent:
 
         confidence = round(min(sum(max(v.get('score', 0), 0) for v in debate_inputs.values()), 1.0), 3)
         fallback_system = (
-            'Tu es un chercheur Forex haussier. Construis la meilleure thèse haussière à partir des preuves. '
+            'Tu es un chercheur de marché haussier multi-actifs. Construis la meilleure thèse haussière à partir des preuves. '
             'Réponds en français.'
         )
         fallback_user = (
@@ -1063,7 +1063,7 @@ class BearishResearcherAgent:
 
         confidence = round(min(abs(sum(min(v.get('score', 0), 0) for v in debate_inputs.values())), 1.0), 3)
         fallback_system = (
-            'Tu es un chercheur Forex baissier. Construis la meilleure thèse baissière à partir des preuves. '
+            'Tu es un chercheur de marché baissier multi-actifs. Construis la meilleure thèse baissière à partir des preuves. '
             'Réponds en français.'
         )
         fallback_user = (
@@ -1678,7 +1678,7 @@ class TraderAgent:
         if not llm_enabled:
             return output
 
-        fallback_system = "Tu es un assistant trader Forex. Résume la justification finale en note d'exécution compacte."
+        fallback_system = "Tu es un assistant trader multi-actifs. Résume la justification finale en note d'exécution compacte."
         fallback_user = (
             "Pair: {pair}\nTimeframe: {timeframe}\nDecision: {decision}\nEntry: {entry}\nStop loss: {stop_loss}\n"
             "Take profit: {take_profit}\nConfidence: {confidence}\nBullish: {bullish_args}\n"
@@ -1872,7 +1872,7 @@ class RiskManagerAgent:
             return output
 
         fallback_system = (
-            'Tu es un risk manager Forex. '
+            'Tu es un risk manager multi-actifs. '
             'Tu valides ou rejettes la proposition de risque avec discipline.'
         )
         fallback_user = (
@@ -2013,7 +2013,7 @@ class ExecutionManagerAgent:
             return output
 
         fallback_system = (
-            'Tu es un execution manager Forex. '
+            'Tu es un execution manager multi-actifs. '
             'Tu confirmes BUY/SELL ou imposes HOLD si la prudence l’exige.'
         )
         fallback_user = (

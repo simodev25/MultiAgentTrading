@@ -9,7 +9,7 @@ ExecutionMode = Literal['simulation', 'paper', 'live']
 
 
 class CreateRunRequest(BaseModel):
-    pair: str = Field(min_length=6, max_length=10)
+    pair: str = Field(min_length=1, max_length=20)
     timeframe: str = Field(min_length=2, max_length=5)
     mode: ExecutionMode = 'simulation'
     risk_percent: float = Field(default=1.0, ge=0.1, le=5.0)
