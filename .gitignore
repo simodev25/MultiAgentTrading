@@ -4,6 +4,7 @@ __pycache__/
 *.pyd
 *.sqlite3
 *.db
+*debug-traces*
 .env
 .env.*
 !.env.example
