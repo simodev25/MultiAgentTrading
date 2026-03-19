@@ -48,10 +48,11 @@ Ce fichier résume chaque agent de l’orchestrateur (ordre `FOREX` workflow) et
 ## trader-agent
 - Objectif: décision finale BUY/SELL/HOLD + SL/TP.
 - Entrées: outputs des analystes, bullish/bearish packages, market_snapshot (atr, last_price), memory_context.
-- Déterministe: net_score = somme scores; debate_score = (bull_conf - bear_conf)*0.3; decision BUY si combined>0.2, SELL si < -0.2, sinon HOLD. Conflit fort si |bull-bear|<=0.1 et |net_score|<0.35.
+- Déterministe: net_score = somme scores; debate_score = (bull_conf - bear_conf)*0.3; puis policy de gating selon `decision_mode` (`conservative`, `balanced`, `permissive`) avec seuils explicites (`min_combined_score`, `min_confidence`, `min_aligned_sources`) et garde-fous (`technical_neutral_gate`, `low_edge`, contradictions trend/MACD).
+- Mode par défaut: `conservative` (strict). Le mode actif est résolu via `connector_configs.settings.decision_mode` (fallback `.env DECISION_MODE`).
 - SL/TP: si prix dispo, SL = ATR*1.5 (sinon 0.3%) / TP = ATR*2.5 (sinon 0.6%), adaptés au side.
 - LLM (off par défaut): prompt seed `trader-agent`, produit execution_note.
-- Sorties: decision, confidence, net_score, debate_score, combined_score, stop_loss, take_profit, rationale détaillée, execution_note, prompt_meta.
+- Sorties: decision, confidence, net_score, debate_score, combined_score, decision_mode, execution_allowed, stop_loss, take_profit, rationale détaillée, execution_note, prompt_meta.
 
 ## risk-manager
 - Objectif: valider ou rejeter la proposition (exposition) en priorité via règles de risque.
@@ -63,7 +64,7 @@ Ce fichier résume chaque agent de l’orchestrateur (ordre `FOREX` workflow) et
 ## execution-manager
 - Objectif: décider l’exécution finale (simulation/paper/live).
 - Entrées: trader_decision (decision/volumes/levels), risk_output (accepted + volume).
-- Déterministe par défaut: `should_execute` vrai si risk accepted et decision BUY/SELL.
+- Déterministe par défaut: `should_execute` vrai si risk accepted + decision BUY/SELL + `execution_allowed=true`.
 - LLM (off par défaut, activable): peut ajuster BUY/SELL/HOLD; en mode `live`, l'exécution exige confirmation LLM de la décision déterministe.
 - Sorties: decision, should_execute, side, volume, reason, llm_summary (si activé), prompt_meta.
 

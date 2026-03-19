@@ -69,6 +69,7 @@ Via API:
       "bearish-researcher": true,
       "trader-agent": false
     },
+    "decision_mode": "conservative",
     "agent_skills": {
       "news-analyst": [
         "Prioriser les événements macro à fort impact Forex",
@@ -82,6 +83,12 @@ Via API:
   }
 }
 ```
+
+`decision_mode` contrôle le gating final du `trader-agent`:
+
+- `conservative` (défaut): strict, exige plus de convergence.
+- `balanced`: intermédiaire, plus souple sur les setups techniques clairs.
+- `permissive`: opportuniste encadré, tout en conservant les blocages forts (neutral technique quasi systématique, contradiction majeure bloquante).
 
 ## Skills par agent
 

@@ -109,14 +109,39 @@ const AGENT_PROMPT_FALLBACKS: Record<string, { system: string; user: string }> =
 };
 
 type LlmProvider = 'ollama' | 'openai' | 'mistral';
+type DecisionMode = 'conservative' | 'balanced' | 'permissive';
 
 const LLM_PROVIDERS: LlmProvider[] = ['ollama', 'openai', 'mistral'];
+const DECISION_MODE_OPTIONS: Array<{ value: DecisionMode; label: string; description: string }> = [
+  {
+    value: 'conservative',
+    label: 'Conservative',
+    description: 'Mode strict: exige une convergence forte et bloque les setups marginaux.',
+  },
+  {
+    value: 'balanced',
+    label: 'Balanced',
+    description: 'Mode intermédiaire: autorise plus de setups techniques sans relâcher les garde-fous majeurs.',
+  },
+  {
+    value: 'permissive',
+    label: 'Permissive',
+    description: 'Mode opportuniste encadré: seuils plus souples, neutral technique quasi toujours bloqué.',
+  },
+];
 
 function normalizeLlmProvider(value: unknown): LlmProvider {
   const text = typeof value === 'string' ? value.trim().toLowerCase() : '';
   if (text === 'openai') return 'openai';
   if (text === 'mistral') return 'mistral';
   return 'ollama';
+}
+
+function normalizeDecisionMode(value: unknown): DecisionMode {
+  const text = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (text === 'balanced') return 'balanced';
+  if (text === 'permissive') return 'permissive';
+  return 'conservative';
 }
 
 function defaultModelForProvider(provider: LlmProvider): string {
@@ -220,6 +245,7 @@ export function ConnectorsPage() {
 
   const [defaultLlmModel, setDefaultLlmModel] = useState('llama3.1');
   const [llmProvider, setLlmProvider] = useState<LlmProvider>('ollama');
+  const [decisionMode, setDecisionMode] = useState<DecisionMode>('conservative');
   const [agentModels, setAgentModels] = useState<Record<string, string>>(
     Object.fromEntries(MODEL_EDIT_AGENTS.map((agent) => [agent, ''])),
   );
@@ -232,6 +258,7 @@ export function ConnectorsPage() {
   const [modelChoices, setModelChoices] = useState<string[]>([]);
   const [modelSource, setModelSource] = useState<string>('');
   const [savingModels, setSavingModels] = useState(false);
+  const [decisionModeSaving, setDecisionModeSaving] = useState(false);
 
   const [accountLabel, setAccountLabel] = useState('Paper Account');
   const [accountId, setAccountId] = useState('');
@@ -260,6 +287,7 @@ export function ConnectorsPage() {
     const ollama = connectorRows.find((item) => item.connector_name === 'ollama');
     const settings = (ollama?.settings ?? {}) as Record<string, unknown>;
     const provider = normalizeLlmProvider(settings.provider);
+    const resolvedDecisionMode = normalizeDecisionMode(settings.decision_mode);
     const configuredDefault = typeof settings.default_model === 'string' ? settings.default_model.trim() : '';
     const rawMap = settings.agent_models && typeof settings.agent_models === 'object'
       ? (settings.agent_models as Record<string, unknown>)
@@ -298,6 +326,7 @@ export function ConnectorsPage() {
     });
 
     setLlmProvider(provider);
+    setDecisionMode(resolvedDecisionMode);
     setDefaultLlmModel(configuredDefault || defaultModelForProvider(provider));
     setAgentModels(next);
     setAgentSkills(nextSkills);
@@ -467,6 +496,35 @@ export function ConnectorsPage() {
       setError(err instanceof Error ? err.message : 'Cannot save LLM models');
     } finally {
       setSavingModels(false);
+    }
+  };
+
+  const saveDecisionMode = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!token) return;
+
+    const ollama = connectors.find((item) => item.connector_name === 'ollama');
+    if (!ollama) {
+      setError('Connecteur ollama introuvable');
+      return;
+    }
+
+    const existingSettings = (ollama.settings ?? {}) as Record<string, unknown>;
+    setDecisionModeSaving(true);
+    setError(null);
+    try {
+      await api.updateConnector(token, 'ollama', {
+        enabled: ollama.enabled,
+        settings: {
+          ...existingSettings,
+          decision_mode: decisionMode,
+        },
+      });
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Cannot save decision mode');
+    } finally {
+      setDecisionModeSaving(false);
     }
   };
 
@@ -983,6 +1041,32 @@ export function ConnectorsPage() {
 
         {activeConfigTab === 'trading' && (
           <div className="config-panel-grid">
+            <section className="card config-inner-card">
+              <h3>Mode de décision</h3>
+              <form className="form-grid" onSubmit={saveDecisionMode}>
+                <label>
+                  Decision Mode
+                  <select value={decisionMode} onChange={(e) => setDecisionMode(normalizeDecisionMode(e.target.value))}>
+                    {DECISION_MODE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div>
+                  {DECISION_MODE_OPTIONS.map((option) => (
+                    <p key={option.value} className="model-source">
+                      <strong>{option.label}:</strong> {option.description}
+                    </p>
+                  ))}
+                </div>
+                <button className="btn-primary" disabled={decisionModeSaving}>
+                  {decisionModeSaving ? 'Enregistrement...' : 'Enregistrer le mode de décision'}
+                </button>
+              </form>
+            </section>
+
             <section className="card config-inner-card">
               <h3>Comptes MetaApi</h3>
               <form className="form-grid inline" onSubmit={createAccount}>

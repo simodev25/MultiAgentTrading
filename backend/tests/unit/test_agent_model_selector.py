@@ -155,3 +155,31 @@ def test_agent_model_selector_resolves_agent_skills() -> None:
         assert selector.resolve_skills(db, 'trader-agent') == ['Décision exécutable', 'Respect du risque']
         assert selector.resolve_skills(db, 'risk-manager') == ['Valider le risque, sans découper la phrase']
         assert selector.resolve_skills(db, 'macro-analyst') == []
+
+
+def test_agent_model_selector_resolves_decision_mode_with_fallback() -> None:
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(bind=engine)
+
+    selector = AgentModelSelector()
+    selector.settings.decision_mode = 'conservative'
+    assert selector.resolve_decision_mode(None) == 'conservative'
+
+    with Session(engine) as db:
+        db.add(
+            ConnectorConfig(
+                connector_name='ollama',
+                enabled=True,
+                settings={'decision_mode': 'permissive'},
+            )
+        )
+        db.commit()
+
+        assert selector.resolve_decision_mode(db) == 'permissive'
+
+        row = db.query(ConnectorConfig).filter(ConnectorConfig.connector_name == 'ollama').first()
+        assert row is not None
+        row.settings = {'decision_mode': 'unknown-mode'}
+        db.commit()
+        AgentModelSelector.clear_cache()
+        assert selector.resolve_decision_mode(db) == 'conservative'

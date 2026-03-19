@@ -27,6 +27,8 @@ SUPPORTED_LLM_PROVIDERS = {'ollama', 'openai', 'mistral'}
 DETERMINISTIC_ONLY_AGENTS: set[str] = set()
 MAX_AGENT_SKILLS_PER_AGENT = 12
 MAX_AGENT_SKILL_LENGTH = 500
+SUPPORTED_DECISION_MODES = {'conservative', 'balanced', 'permissive'}
+DEFAULT_DECISION_MODE = 'conservative'
 
 
 def normalize_llm_provider(value: str | None, fallback: str = 'ollama') -> str:
@@ -34,6 +36,13 @@ def normalize_llm_provider(value: str | None, fallback: str = 'ollama') -> str:
     if normalized in SUPPORTED_LLM_PROVIDERS:
         return normalized
     return fallback if fallback in SUPPORTED_LLM_PROVIDERS else 'ollama'
+
+
+def normalize_decision_mode(value: object, fallback: str = DEFAULT_DECISION_MODE) -> str:
+    normalized = str(value or '').strip().lower()
+    if normalized in SUPPORTED_DECISION_MODES:
+        return normalized
+    return fallback if fallback in SUPPORTED_DECISION_MODES else DEFAULT_DECISION_MODE
 
 
 class AgentModelSelector:
@@ -177,3 +186,8 @@ class AgentModelSelector:
                 break
 
         return deduped
+
+    def resolve_decision_mode(self, db: Session | None) -> str:
+        fallback = normalize_decision_mode(getattr(self.settings, 'decision_mode', DEFAULT_DECISION_MODE))
+        settings = self._load_llm_settings(db)
+        return normalize_decision_mode(settings.get('decision_mode'), fallback=fallback)

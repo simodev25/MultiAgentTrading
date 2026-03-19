@@ -1,4 +1,7 @@
-from app.api.routes.connectors import _sanitize_ollama_settings
+import pytest
+from fastapi import HTTPException
+
+from app.api.routes.connectors import _sanitize_ollama_settings, _validate_decision_mode_value
 
 
 def test_sanitize_ollama_settings_preserves_enabled_flags() -> None:
@@ -36,3 +39,22 @@ def test_sanitize_ollama_settings_normalizes_agent_skills() -> None:
     assert result['agent_skills']['risk-manager'] == ["Valider le risque, sans casser la phrase."]
     assert '' not in result['agent_skills']
     assert 'macro-analyst' not in result['agent_skills']
+
+
+def test_sanitize_ollama_settings_normalizes_decision_mode() -> None:
+    source = {
+        'provider': 'ollama',
+        'decision_mode': 'BALANCED',
+    }
+
+    result = _sanitize_ollama_settings(source)
+    assert result['decision_mode'] == 'balanced'
+
+    fallback = _sanitize_ollama_settings({'provider': 'ollama', 'decision_mode': 'invalid-value'})
+    assert fallback['decision_mode'] == 'conservative'
+
+
+def test_validate_decision_mode_value_rejects_invalid_values() -> None:
+    _validate_decision_mode_value({'decision_mode': 'balanced'})
+    with pytest.raises(HTTPException):
+        _validate_decision_mode_value({'decision_mode': 'too-risky'})

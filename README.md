@@ -12,6 +12,7 @@ Plateforme IA multi-agent dédiée au Forex avec:
 - Mémoire long-terme vectorielle (Qdrant + repli SQL cosine, pgvector optionnel)
 - Prompts versionnés en base pour enrichir le débat agents
 - Configuration LLM par agent (switch, modèle effectif, skills, catalogue modèles, prompts modifiables)
+- Gating décisionnel multi-profils (`conservative`, `balanced`, `permissive`) piloté depuis les Paramètres
 - Trading Control Room (menu `Config`): configuration connecteurs, provider/modèles LLM, comptes MetaApi, prompts et télémétrie LLM
 - Backtesting avancé (Sharpe, Sortino, drawdown, profit factor)
 - Support multi-comptes MetaApi
@@ -59,6 +60,7 @@ Variables principales:
 - `AGENT_SKILLS_BOOTSTRAP_FILE=/app/config/agent-skills.json`
 - `AGENT_SKILLS_BOOTSTRAP_MODE=merge` (`merge` ou `replace`)
 - `AGENT_SKILLS_BOOTSTRAP_APPLY_ONCE=true` (idempotence par fingerprint)
+- `DECISION_MODE=conservative` (`conservative`, `balanced`, `permissive`)
 
 Override rapide (exemple local):
 

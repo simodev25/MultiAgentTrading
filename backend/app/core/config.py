@@ -6,6 +6,8 @@ from typing import Annotated, List
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+SUPPORTED_DECISION_MODES = {'conservative', 'balanced', 'permissive'}
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -72,6 +74,7 @@ class Settings(BaseSettings):
     mistral_timeout_seconds: int = Field(default=30, alias='MISTRAL_TIMEOUT_SECONDS')
     mistral_input_cost_per_1m_tokens: float = Field(default=0.0, alias='MISTRAL_INPUT_COST_PER_1M_TOKENS')
     mistral_output_cost_per_1m_tokens: float = Field(default=0.0, alias='MISTRAL_OUTPUT_COST_PER_1M_TOKENS')
+    decision_mode: str = Field(default='conservative', alias='DECISION_MODE')
     agent_skills_bootstrap_file: str = Field(default='', alias='AGENT_SKILLS_BOOTSTRAP_FILE')
     agent_skills_bootstrap_mode: str = Field(default='merge', alias='AGENT_SKILLS_BOOTSTRAP_MODE')
     agent_skills_bootstrap_apply_once: bool = Field(default=True, alias='AGENT_SKILLS_BOOTSTRAP_APPLY_ONCE')
@@ -200,6 +203,14 @@ class Settings(BaseSettings):
                     pass
             return [item.strip().upper() for item in value.split(',') if item.strip()]
         return [item.upper() for item in value]
+
+    @field_validator('decision_mode', mode='before')
+    @classmethod
+    def normalize_decision_mode(cls, value: str) -> str:
+        normalized = str(value or '').strip().lower()
+        if normalized in SUPPORTED_DECISION_MODES:
+            return normalized
+        return 'conservative'
 
 
 @lru_cache

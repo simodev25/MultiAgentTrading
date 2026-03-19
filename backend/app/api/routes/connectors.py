@@ -8,7 +8,11 @@ from app.core.security import Role, require_roles
 from app.db.models.connector_config import ConnectorConfig
 from app.db.session import get_db
 from app.schemas.connector import ConnectorConfigOut, ConnectorConfigUpdate, MarketSymbolsOut, MarketSymbolsUpdate
-from app.services.llm.model_selector import AgentModelSelector
+from app.services.llm.model_selector import (
+    AgentModelSelector,
+    SUPPORTED_DECISION_MODES,
+    normalize_decision_mode,
+)
 from app.services.llm.provider_client import LlmClient
 from app.services.market.symbols import get_market_symbols_config, save_market_symbols_config
 from app.services.market.yfinance_provider import YFinanceMarketProvider
@@ -85,7 +89,24 @@ def _sanitize_ollama_settings(raw_settings: dict) -> dict:
     enabled = dict(raw_enabled) if isinstance(raw_enabled, dict) else {}
     settings['agent_llm_enabled'] = enabled
     settings['agent_skills'] = _normalize_agent_skills(settings.get('agent_skills'))
+    settings['decision_mode'] = normalize_decision_mode(
+        settings.get('decision_mode'),
+        fallback=normalize_decision_mode(get_settings().decision_mode),
+    )
     return settings
+
+
+def _validate_decision_mode_value(raw_settings: dict) -> None:
+    if not isinstance(raw_settings, dict):
+        return
+    if 'decision_mode' not in raw_settings:
+        return
+    value = str(raw_settings.get('decision_mode', '') or '').strip().lower()
+    if value not in SUPPORTED_DECISION_MODES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid decision_mode '{raw_settings.get('decision_mode')}'. Allowed: {', '.join(sorted(SUPPORTED_DECISION_MODES))}.",
+        )
 
 
 @router.get('', response_model=list[ConnectorConfigOut])
@@ -100,16 +121,25 @@ def list_connectors(
         if connector_name not in existing:
             connector_settings: dict = {}
             if connector_name == 'ollama':
-                connector_settings = {'provider': settings.llm_provider}
+                connector_settings = {
+                    'provider': settings.llm_provider,
+                    'decision_mode': normalize_decision_mode(settings.decision_mode),
+                }
             conn = ConnectorConfig(connector_name=connector_name, enabled=True, settings=connector_settings)
             db.add(conn)
     for conn in connectors:
         if conn.connector_name != 'ollama':
             continue
         current_settings = conn.settings if isinstance(conn.settings, dict) else {}
-        if 'provider' in current_settings:
-            continue
-        conn.settings = {**current_settings, 'provider': settings.llm_provider}
+        normalized_settings = _sanitize_ollama_settings(
+            {
+                **current_settings,
+                'provider': current_settings.get('provider', settings.llm_provider),
+                'decision_mode': current_settings.get('decision_mode', settings.decision_mode),
+            }
+        )
+        if normalized_settings != current_settings:
+            conn.settings = normalized_settings
     db.commit()
     connectors = db.query(ConnectorConfig).filter(ConnectorConfig.connector_name.in_(SUPPORTED_CONNECTORS)).all()
     return [ConnectorConfigOut.model_validate(conn) for conn in connectors]
@@ -169,6 +199,7 @@ def update_connector(
 
     conn.enabled = payload.enabled
     if connector_name == 'ollama':
+        _validate_decision_mode_value(payload.settings)
         conn.settings = _sanitize_ollama_settings(payload.settings)
     else:
         conn.settings = payload.settings

@@ -88,6 +88,7 @@ def test_trader_agent_uses_skill_hold_guardrail_when_llm_disabled() -> None:
                 enabled=True,
                 settings={
                     'agent_llm_enabled': {'trader-agent': False},
+                    'decision_mode': 'conservative',
                     'agent_skills': {
                         'trader-agent': [
                             "Synthétise l'ensemble en BUY, SELL ou HOLD; HOLD est la réponse par défaut quand l'avantage n'est pas net.",

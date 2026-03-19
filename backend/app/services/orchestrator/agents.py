@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.services.llm.provider_client import LlmClient
-from app.services.llm.model_selector import AgentModelSelector
+from app.services.llm.model_selector import AgentModelSelector, normalize_decision_mode
 from app.services.prompts.registry import PromptTemplateService
 from app.services.risk.rules import RiskEngine
 
@@ -276,6 +276,105 @@ def _apply_deterministic_skill_guardrail(
     signal = _score_to_signal(adjusted_score, threshold)
     changed = adjusted_score != round(float(score), 3) or signal != _score_to_signal(score, base_threshold)
     return adjusted_score, signal, changed
+
+
+@dataclass(frozen=True)
+class DecisionGatingPolicy:
+    mode: str
+    min_combined_score: float
+    min_confidence: float
+    min_aligned_sources: int
+    technical_neutral_exception_min_sources: int
+    technical_neutral_exception_min_strength: float
+    technical_neutral_exception_min_combined: float
+    allow_low_edge_technical_override: bool
+    allow_technical_single_source_override: bool
+    technical_single_source_min_score: float
+    contradiction_weak_penalty: float
+    contradiction_weak_confidence_multiplier: float
+    contradiction_weak_volume_multiplier: float
+    contradiction_moderate_penalty: float
+    contradiction_moderate_confidence_multiplier: float
+    contradiction_moderate_volume_multiplier: float
+    contradiction_major_penalty: float
+    contradiction_major_confidence_multiplier: float
+    contradiction_major_volume_multiplier: float
+    block_major_contradiction: bool
+
+
+DECISION_POLICIES: dict[str, DecisionGatingPolicy] = {
+    'conservative': DecisionGatingPolicy(
+        mode='conservative',
+        min_combined_score=0.30,
+        min_confidence=0.35,
+        min_aligned_sources=2,
+        technical_neutral_exception_min_sources=2,
+        technical_neutral_exception_min_strength=0.22,
+        technical_neutral_exception_min_combined=0.30,
+        allow_low_edge_technical_override=False,
+        allow_technical_single_source_override=False,
+        technical_single_source_min_score=0.0,
+        contradiction_weak_penalty=0.0,
+        contradiction_weak_confidence_multiplier=1.0,
+        contradiction_weak_volume_multiplier=1.0,
+        contradiction_moderate_penalty=0.06,
+        contradiction_moderate_confidence_multiplier=0.85,
+        contradiction_moderate_volume_multiplier=0.75,
+        contradiction_major_penalty=0.12,
+        contradiction_major_confidence_multiplier=0.70,
+        contradiction_major_volume_multiplier=0.55,
+        block_major_contradiction=False,
+    ),
+    'balanced': DecisionGatingPolicy(
+        mode='balanced',
+        min_combined_score=0.25,
+        min_confidence=0.30,
+        min_aligned_sources=1,
+        technical_neutral_exception_min_sources=2,
+        technical_neutral_exception_min_strength=0.20,
+        technical_neutral_exception_min_combined=0.25,
+        allow_low_edge_technical_override=True,
+        allow_technical_single_source_override=False,
+        technical_single_source_min_score=0.0,
+        contradiction_weak_penalty=0.0,
+        contradiction_weak_confidence_multiplier=1.0,
+        contradiction_weak_volume_multiplier=1.0,
+        contradiction_moderate_penalty=0.05,
+        contradiction_moderate_confidence_multiplier=0.88,
+        contradiction_moderate_volume_multiplier=0.70,
+        contradiction_major_penalty=0.10,
+        contradiction_major_confidence_multiplier=0.75,
+        contradiction_major_volume_multiplier=0.50,
+        block_major_contradiction=True,
+    ),
+    'permissive': DecisionGatingPolicy(
+        mode='permissive',
+        min_combined_score=0.22,
+        min_confidence=0.26,
+        min_aligned_sources=1,
+        technical_neutral_exception_min_sources=3,
+        technical_neutral_exception_min_strength=0.28,
+        technical_neutral_exception_min_combined=0.35,
+        allow_low_edge_technical_override=True,
+        allow_technical_single_source_override=True,
+        technical_single_source_min_score=0.22,
+        contradiction_weak_penalty=0.02,
+        contradiction_weak_confidence_multiplier=0.96,
+        contradiction_weak_volume_multiplier=0.90,
+        contradiction_moderate_penalty=0.05,
+        contradiction_moderate_confidence_multiplier=0.90,
+        contradiction_moderate_volume_multiplier=0.60,
+        contradiction_major_penalty=0.10,
+        contradiction_major_confidence_multiplier=0.75,
+        contradiction_major_volume_multiplier=0.45,
+        block_major_contradiction=True,
+    ),
+}
+
+
+def _resolve_decision_policy(mode: object) -> DecisionGatingPolicy:
+    resolved = normalize_decision_mode(mode, fallback='conservative')
+    return DECISION_POLICIES.get(resolved, DECISION_POLICIES['conservative'])
 
 
 def _deterministic_headline_sentiment(headlines: str) -> tuple[str, float]:
@@ -927,13 +1026,20 @@ class TraderAgent:
         bearish_confidence = min(max(float(bearish.get('confidence', 0.0) or 0.0), 0.0), 1.0)
         debate_balance = round(bullish_confidence - bearish_confidence, 3)
         debate_score = round(debate_balance * 0.3, 3)
-        combined_score = round(net_score + debate_score, 3)
-        strong_conflict = abs(debate_balance) <= 0.1 and abs(net_score) < 0.35
+        raw_combined_score = round(net_score + debate_score, 3)
+
         llm_enabled = self.model_selector.is_enabled(db, self.name)
         runtime_skills = _resolve_runtime_skills(self.model_selector, db, self.name)
-        decision_buy_threshold = 0.2
-        decision_sell_threshold = -0.2
-        if runtime_skills and not llm_enabled:
+        decision_mode = self.model_selector.resolve_decision_mode(db)
+        policy = _resolve_decision_policy(decision_mode)
+
+        min_combined_score = policy.min_combined_score
+        min_confidence = policy.min_confidence
+        min_aligned_sources = policy.min_aligned_sources
+
+        decision_buy_threshold = min_combined_score
+        decision_sell_threshold = -min_combined_score
+        if runtime_skills and not llm_enabled and decision_mode == 'conservative':
             skill_text = _skill_text(runtime_skills)
             if _contains_any(
                 skill_text,
@@ -945,17 +1051,215 @@ class TraderAgent:
                     'qualite du setup',
                 ),
             ):
-                decision_buy_threshold = 0.3
-                decision_sell_threshold = -0.3
+                decision_buy_threshold = max(decision_buy_threshold, 0.30)
+                decision_sell_threshold = min(decision_sell_threshold, -0.30)
+
+        technical_output = agent_outputs.get('technical-analyst')
+        if not isinstance(technical_output, dict):
+            technical_output = agent_outputs.get('technical')
+        if not isinstance(technical_output, dict):
+            technical_output = next(
+                (value for key, value in agent_outputs.items() if 'technical' in str(key).lower() and isinstance(value, dict)),
+                {},
+            )
+
+        technical_score = float(technical_output.get('score', 0.0) or 0.0)
+        technical_signal = str(technical_output.get('signal', '') or '').strip().lower()
+        if technical_signal not in {'bullish', 'bearish', 'neutral'}:
+            technical_signal = _score_to_signal(technical_score, 0.15)
+
+        source_thresholds = {
+            'technical-analyst': 0.12,
+            'technical': 0.12,
+            'news-analyst': 0.08,
+            'macro-analyst': 0.08,
+            'sentiment-agent': 0.08,
+        }
+        directional_sources: dict[str, list[str]] = {'bullish': [], 'bearish': []}
+        independent_sources: dict[str, list[str]] = {'bullish': [], 'bearish': []}
+        independent_strength: dict[str, float] = {'bullish': 0.0, 'bearish': 0.0}
+        independent_agent_names = {'news-analyst', 'macro-analyst', 'sentiment-agent'}
+
+        for name, output in agent_outputs.items():
+            if not isinstance(output, dict):
+                continue
+            score = float(output.get('score', 0.0) or 0.0)
+            signal = str(output.get('signal', '') or '').strip().lower()
+            if signal not in {'bullish', 'bearish', 'neutral'}:
+                default_threshold = 0.15 if 'technical' in str(name).lower() else 0.05
+                signal = _score_to_signal(score, default_threshold)
+            if signal not in {'bullish', 'bearish'}:
+                continue
+            credibility_threshold = source_thresholds.get(name, 0.08)
+            if abs(score) < credibility_threshold:
+                continue
+            directional_sources[signal].append(name)
+            if name in independent_agent_names:
+                independent_sources[signal].append(name)
+                independent_strength[signal] += abs(score)
+
+        trend = str(ctx.market_snapshot.get('trend', 'neutral') or 'neutral').strip().lower()
+        macd_diff = float(ctx.market_snapshot.get('macd_diff', 0.0) or 0.0)
+        atr = abs(float(ctx.market_snapshot.get('atr', 0.0) or 0.0))
+        trend_momentum_opposition = (trend == 'bullish' and macd_diff < 0.0) or (trend == 'bearish' and macd_diff > 0.0)
+        macd_atr_ratio = abs(macd_diff) / atr if atr > 0.0 else abs(macd_diff)
+
+        contradiction_level = 'none'
+        contradiction_penalty = 0.0
+        confidence_multiplier = 1.0
+        volume_multiplier = 1.0
+        if trend_momentum_opposition:
+            if macd_atr_ratio >= 0.12:
+                contradiction_level = 'major'
+                contradiction_penalty = policy.contradiction_major_penalty
+                confidence_multiplier = policy.contradiction_major_confidence_multiplier
+                volume_multiplier = policy.contradiction_major_volume_multiplier
+            elif macd_atr_ratio >= 0.05:
+                contradiction_level = 'moderate'
+                contradiction_penalty = policy.contradiction_moderate_penalty
+                confidence_multiplier = policy.contradiction_moderate_confidence_multiplier
+                volume_multiplier = policy.contradiction_moderate_volume_multiplier
+            elif policy.contradiction_weak_penalty > 0.0:
+                contradiction_level = 'weak'
+                contradiction_penalty = policy.contradiction_weak_penalty
+                confidence_multiplier = policy.contradiction_weak_confidence_multiplier
+                volume_multiplier = policy.contradiction_weak_volume_multiplier
+
+        combined_score = float(raw_combined_score)
+        if contradiction_penalty > 0.0:
+            if combined_score > 0.0:
+                combined_score = max(combined_score - contradiction_penalty, -1.0)
+            elif combined_score < 0.0:
+                combined_score = min(combined_score + contradiction_penalty, 1.0)
+        combined_score = round(combined_score, 3)
+
+        candidate_decision = 'BUY' if combined_score > 0.0 else 'SELL' if combined_score < 0.0 else 'HOLD'
+        candidate_signal = 'bullish' if candidate_decision == 'BUY' else 'bearish' if candidate_decision == 'SELL' else 'neutral'
+        aligned_sources = directional_sources.get(candidate_signal, []) if candidate_signal in {'bullish', 'bearish'} else []
+        aligned_source_count = len(aligned_sources)
+
+        strong_conflict = (
+            bullish_confidence >= 0.35
+            and bearish_confidence >= 0.35
+            and abs(debate_balance) <= 0.2
+        )
+
+        technical_neutral = technical_signal == 'neutral'
+        independent_aligned_count = len(independent_sources.get(candidate_signal, [])) if candidate_signal in {'bullish', 'bearish'} else 0
+        independent_aligned_strength = independent_strength.get(candidate_signal, 0.0) if candidate_signal in {'bullish', 'bearish'} else 0.0
+        technical_neutral_exception = bool(
+            technical_neutral
+            and candidate_signal in {'bullish', 'bearish'}
+            and independent_aligned_count >= policy.technical_neutral_exception_min_sources
+            and independent_aligned_strength >= policy.technical_neutral_exception_min_strength
+            and abs(combined_score) >= policy.technical_neutral_exception_min_combined
+        )
+        technical_neutral_block = technical_neutral and not technical_neutral_exception
+
+        confidence_base = min(abs(combined_score) + max(abs(debate_balance) - 0.05, 0.0) * 0.2, 1.0)
+        confidence = min(max(confidence_base * confidence_multiplier, 0.0), 1.0)
+        confidence = round(float(confidence), 3)
+
+        technical_single_source_override = bool(
+            policy.allow_technical_single_source_override
+            and candidate_signal in {'bullish', 'bearish'}
+            and technical_signal == candidate_signal
+            and abs(technical_score) >= policy.technical_single_source_min_score
+            and abs(combined_score) >= min_combined_score
+            and confidence >= min_confidence
+        )
+        evidence_source_ok = aligned_source_count >= min_aligned_sources or technical_single_source_override
+        major_contradiction_block = policy.block_major_contradiction and contradiction_level == 'major'
+        permissive_technical_override = bool(
+            policy.mode == 'permissive'
+            and candidate_decision in {'BUY', 'SELL'}
+            and technical_signal == candidate_signal
+            and technical_signal in {'bullish', 'bearish'}
+            and abs(combined_score) >= min_combined_score
+            and confidence >= min_confidence
+            and not major_contradiction_block
+            and (independent_aligned_count == 0 or aligned_source_count < min_aligned_sources)
+        )
+
+        minimum_evidence_ok = (
+            candidate_decision in {'BUY', 'SELL'}
+            and abs(combined_score) >= min_combined_score
+            and confidence >= min_confidence
+            and (evidence_source_ok or permissive_technical_override)
+            and not major_contradiction_block
+        )
+        direction_threshold_ok = (
+            candidate_decision == 'BUY' and combined_score >= decision_buy_threshold
+        ) or (
+            candidate_decision == 'SELL' and combined_score <= decision_sell_threshold
+        )
+        if policy.mode == 'permissive':
+            low_edge_base = (not strong_conflict) and (
+                candidate_decision == 'HOLD'
+                or technical_neutral_block
+                or abs(combined_score) < min_combined_score
+                or confidence < min_confidence
+                or major_contradiction_block
+            )
+        else:
+            low_edge_base = (not strong_conflict) and (
+                candidate_decision == 'HOLD'
+                or not minimum_evidence_ok
+                or not direction_threshold_ok
+                or technical_neutral_block
+            )
+        low_edge_override = bool(
+            policy.allow_low_edge_technical_override
+            and candidate_decision in {'BUY', 'SELL'}
+            and technical_signal in {'bullish', 'bearish'}
+            and not technical_neutral_block
+            and abs(combined_score) >= min_combined_score
+            and confidence >= min_confidence
+            and not major_contradiction_block
+        )
+        if permissive_technical_override:
+            low_edge_override = True
+        low_edge = low_edge_base and not low_edge_override
+        if major_contradiction_block:
+            low_edge = True
 
         decision = 'HOLD'
-        if not strong_conflict:
-            if combined_score > decision_buy_threshold:
-                decision = 'BUY'
-            elif combined_score < decision_sell_threshold:
-                decision = 'SELL'
+        if (
+            not strong_conflict
+            and not low_edge
+            and not technical_neutral_block
+            and minimum_evidence_ok
+            and direction_threshold_ok
+            and not major_contradiction_block
+        ):
+            decision = candidate_decision
+        execution_allowed = decision in {'BUY', 'SELL'} and not major_contradiction_block and minimum_evidence_ok
 
-        confidence = min(abs(combined_score) + max(abs(debate_balance) - 0.05, 0.0) * 0.2, 1.0)
+        gate_reasons: list[str] = []
+        if technical_neutral_block:
+            gate_reasons.append('technical_neutral_gate')
+        if technical_neutral_exception:
+            gate_reasons.append('technical_neutral_exception')
+        if technical_single_source_override:
+            gate_reasons.append('technical_single_source_override')
+        if permissive_technical_override:
+            gate_reasons.append('permissive_technical_override')
+        if strong_conflict:
+            gate_reasons.append('strong_conflict')
+        if low_edge_override:
+            gate_reasons.append('low_edge_override')
+        if low_edge:
+            gate_reasons.append('low_edge')
+        if abs(combined_score) < min_combined_score:
+            gate_reasons.append('combined_score_below_minimum')
+        if confidence < min_confidence:
+            gate_reasons.append('confidence_below_minimum')
+        if aligned_source_count < min_aligned_sources and not technical_single_source_override and not permissive_technical_override:
+            gate_reasons.append('insufficient_aligned_sources')
+        if major_contradiction_block:
+            gate_reasons.append('major_contradiction_execution_block')
+        if contradiction_level in {'weak', 'moderate', 'major'}:
+            gate_reasons.append(f'trend_momentum_contradiction_{contradiction_level}')
 
         last_price = ctx.market_snapshot.get('last_price')
         atr = ctx.market_snapshot.get('atr', 0)
@@ -978,12 +1282,20 @@ class TraderAgent:
 
         output = {
             'decision': decision,
-            'confidence': round(float(confidence), 3),
+            'confidence': confidence,
             'net_score': net_score,
             'debate_score': debate_score,
             'combined_score': combined_score,
             'debate_balance': debate_balance,
+            'decision_mode': decision_mode,
+            'execution_allowed': execution_allowed,
+            'permissive_technical_override': permissive_technical_override,
             'signal_conflict': strong_conflict,
+            'strong_conflict': strong_conflict,
+            'low_edge': low_edge,
+            'contradiction_level': contradiction_level,
+            'contradiction_penalty': round(contradiction_penalty, 3),
+            'volume_multiplier': round(volume_multiplier, 3),
             'entry': last_price,
             'stop_loss': stop_loss,
             'take_profit': take_profit,
@@ -994,10 +1306,60 @@ class TraderAgent:
                 'bearish_confidence': bearish_confidence,
                 'base_net_score': net_score,
                 'debate_score': debate_score,
+                'raw_combined_score': raw_combined_score,
                 'combined_score': combined_score,
+                'decision_mode': decision_mode,
+                'policy': {
+                    'mode': policy.mode,
+                    'min_combined_score': policy.min_combined_score,
+                    'min_confidence': policy.min_confidence,
+                    'min_aligned_sources': policy.min_aligned_sources,
+                    'technical_neutral_exception_min_sources': policy.technical_neutral_exception_min_sources,
+                    'technical_neutral_exception_min_strength': policy.technical_neutral_exception_min_strength,
+                    'technical_neutral_exception_min_combined': policy.technical_neutral_exception_min_combined,
+                    'allow_low_edge_technical_override': policy.allow_low_edge_technical_override,
+                    'allow_technical_single_source_override': policy.allow_technical_single_source_override,
+                    'technical_single_source_min_score': policy.technical_single_source_min_score,
+                    'contradiction_weak_penalty': policy.contradiction_weak_penalty,
+                    'contradiction_weak_confidence_multiplier': policy.contradiction_weak_confidence_multiplier,
+                    'contradiction_weak_volume_multiplier': policy.contradiction_weak_volume_multiplier,
+                    'block_major_contradiction': policy.block_major_contradiction,
+                },
                 'signal_conflict': strong_conflict,
+                'strong_conflict': strong_conflict,
+                'low_edge': low_edge,
+                'technical_signal': technical_signal,
+                'technical_neutral_exception': technical_neutral_exception,
+                'technical_single_source_override': technical_single_source_override,
+                'permissive_technical_override': permissive_technical_override,
+                'permissive_override_reason': (
+                    'technical_signal_non_neutral_with_thresholds_met_and_no_major_contradiction'
+                    if permissive_technical_override
+                    else None
+                ),
+                'aligned_directional_sources': aligned_sources,
+                'aligned_directional_source_count': aligned_source_count,
+                'independent_directional_sources': independent_sources.get(candidate_signal, []),
+                'independent_directional_source_count': independent_aligned_count,
+                'independent_directional_strength': round(independent_aligned_strength, 3),
+                'evidence_source_requirement_bypassed': permissive_technical_override and not evidence_source_ok,
+                'min_combined_score': min_combined_score,
+                'min_confidence': min_confidence,
+                'min_aligned_sources': min_aligned_sources,
                 'decision_buy_threshold': decision_buy_threshold,
                 'decision_sell_threshold': decision_sell_threshold,
+                'minimum_evidence_ok': minimum_evidence_ok,
+                'evidence_source_ok': evidence_source_ok,
+                'direction_threshold_ok': direction_threshold_ok,
+                'trend_momentum_opposition': trend_momentum_opposition,
+                'trend_momentum_ratio': round(macd_atr_ratio, 3),
+                'contradiction_level': contradiction_level,
+                'contradiction_penalty': round(contradiction_penalty, 3),
+                'confidence_multiplier': confidence_multiplier,
+                'volume_multiplier': round(volume_multiplier, 3),
+                'major_contradiction_block': major_contradiction_block,
+                'execution_allowed': execution_allowed,
+                'decision_gates': gate_reasons,
                 'bullish_llm_debate': bullish.get('llm_debate', ''),
                 'bearish_llm_debate': bearish.get('llm_debate', ''),
                 'memory_refs': [m.get('summary', '') for m in ctx.memory_context[:3]],
@@ -1036,15 +1398,19 @@ class TraderAgent:
                     'entry': last_price,
                     'stop_loss': stop_loss,
                     'take_profit': take_profit,
-                    'confidence': round(float(confidence), 3),
+                    'confidence': confidence,
                     'bullish_args': json.dumps(bullish.get('arguments', []), ensure_ascii=True),
                     'bearish_args': json.dumps(bearish.get('arguments', []), ensure_ascii=True),
                     'risk_notes': json.dumps(
                         [
+                            f'decision_mode={decision_mode}',
                             f'net_score={net_score}',
                             f'debate_score={debate_score}',
                             f'combined_score={combined_score}',
                             f'strong_conflict={strong_conflict}',
+                            f'low_edge={low_edge}',
+                            f'contradiction_level={contradiction_level}',
+                            f'execution_allowed={execution_allowed}',
                         ],
                         ensure_ascii=True,
                     ),
@@ -1063,15 +1429,19 @@ class TraderAgent:
                 entry=last_price,
                 stop_loss=stop_loss,
                 take_profit=take_profit,
-                confidence=round(float(confidence), 3),
+                confidence=confidence,
                 bullish_args=json.dumps(bullish.get('arguments', []), ensure_ascii=True),
                 bearish_args=json.dumps(bearish.get('arguments', []), ensure_ascii=True),
                 risk_notes=json.dumps(
                     [
+                        f'decision_mode={decision_mode}',
                         f'net_score={net_score}',
                         f'debate_score={debate_score}',
                         f'combined_score={combined_score}',
                         f'strong_conflict={strong_conflict}',
+                        f'low_edge={low_edge}',
+                        f'contradiction_level={contradiction_level}',
+                        f'execution_allowed={execution_allowed}',
                     ],
                     ensure_ascii=True,
                 ),
@@ -1091,7 +1461,7 @@ class TraderAgent:
             entry=last_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
-            confidence=round(float(confidence), 3),
+            confidence=confidence,
         )
         llm_note = llm_res.get('text', '')
         if _execution_note_is_consistent(
@@ -1136,9 +1506,16 @@ class RiskManagerAgent:
         trader_decision: dict[str, Any],
         db: Session | None = None,
     ) -> dict[str, Any]:
-        decision = str(trader_decision.get('decision', 'HOLD')).strip().upper() or 'HOLD'
+        requested_decision = str(trader_decision.get('decision', 'HOLD')).strip().upper() or 'HOLD'
+        execution_allowed = bool(trader_decision.get('execution_allowed', requested_decision in {'BUY', 'SELL'}))
+        decision = requested_decision if execution_allowed else 'HOLD'
         entry = float(trader_decision.get('entry') or 1.0)
         stop_loss = trader_decision.get('stop_loss')
+        try:
+            volume_multiplier = float(trader_decision.get('volume_multiplier', 1.0) or 1.0)
+        except (TypeError, ValueError):
+            volume_multiplier = 1.0
+        volume_multiplier = min(max(volume_multiplier, 0.1), 1.0)
 
         risk = self.risk_engine.evaluate(
             mode=ctx.mode,
@@ -1148,14 +1525,28 @@ class RiskManagerAgent:
             stop_loss=stop_loss,
             pair=ctx.pair,
         )
+        adjusted_suggested_volume = float(risk.suggested_volume)
+        if decision in {'BUY', 'SELL'} and adjusted_suggested_volume > 0.0:
+            adjusted_suggested_volume = round(
+                max(min(adjusted_suggested_volume * volume_multiplier, 2.0), 0.01),
+                2,
+            )
+        deterministic_reasons = list(risk.reasons)
+        if requested_decision in {'BUY', 'SELL'} and not execution_allowed:
+            deterministic_reasons.append('Trader guardrail blocked execution authorization.')
+        if decision in {'BUY', 'SELL'} and volume_multiplier < 1.0:
+            deterministic_reasons.append(
+                f'Volume adjusted by trader guardrail multiplier {volume_multiplier:.2f}.'
+            )
+
         llm_enabled = self.model_selector.is_enabled(db, self.name)
         runtime_skills = _resolve_runtime_skills(self.model_selector, db, self.name)
         llm_model = _resolve_llm_model(ctx, self.model_selector, db, self.name) if llm_enabled else None
 
         output: dict[str, Any] = {
             'accepted': risk.accepted,
-            'reasons': risk.reasons,
-            'suggested_volume': risk.suggested_volume,
+            'reasons': deterministic_reasons,
+            'suggested_volume': adjusted_suggested_volume,
             'prompt_meta': {
                 'prompt_id': None,
                 'prompt_version': 0,
@@ -1196,8 +1587,8 @@ class RiskManagerAgent:
                     'take_profit': trader_decision.get('take_profit'),
                     'risk_percent': ctx.risk_percent,
                     'accepted': risk.accepted,
-                    'suggested_volume': risk.suggested_volume,
-                    'reasons': json.dumps(risk.reasons, ensure_ascii=True),
+                    'suggested_volume': adjusted_suggested_volume,
+                    'reasons': json.dumps(deterministic_reasons, ensure_ascii=True),
                 },
             )
             system_prompt = prompt_info['system_prompt']
@@ -1214,8 +1605,8 @@ class RiskManagerAgent:
                 take_profit=trader_decision.get('take_profit'),
                 risk_percent=ctx.risk_percent,
                 accepted=risk.accepted,
-                suggested_volume=risk.suggested_volume,
-                reasons=json.dumps(risk.reasons, ensure_ascii=True),
+                suggested_volume=adjusted_suggested_volume,
+                reasons=json.dumps(deterministic_reasons, ensure_ascii=True),
             )
 
         llm_res = self.llm.chat(system_prompt, user_prompt, model=llm_model, db=db)
@@ -1224,7 +1615,7 @@ class RiskManagerAgent:
         if live_mode and llm_accept and not risk.accepted:
             llm_accept = False
 
-        reasons = list(risk.reasons)
+        reasons = list(deterministic_reasons)
         reasons.append(f"LLM review: {'APPROVE' if llm_accept else 'REJECT'}")
         if live_mode and not risk.accepted and _parse_risk_acceptance_from_text(llm_res.get('text', ''), risk.accepted):
             reasons.append('Live mode guardrail: deterministic risk rejection cannot be overridden by LLM.')
@@ -1233,7 +1624,7 @@ class RiskManagerAgent:
             {
                 'accepted': llm_accept,
                 'reasons': reasons,
-                'suggested_volume': risk.suggested_volume if llm_accept else 0.0,
+                'suggested_volume': adjusted_suggested_volume if llm_accept else 0.0,
                 'llm_summary': llm_res.get('text', ''),
                 'degraded': llm_res.get('degraded', False),
                 'prompt_meta': {
@@ -1270,7 +1661,8 @@ class ExecutionManagerAgent:
         db: Session | None = None,
     ) -> dict[str, Any]:
         decision = str(trader_decision.get('decision', 'HOLD')).strip().upper() or 'HOLD'
-        deterministic_allowed = bool(risk_output.get('accepted')) and decision in {'BUY', 'SELL'}
+        execution_allowed = bool(trader_decision.get('execution_allowed', decision in {'BUY', 'SELL'}))
+        deterministic_allowed = bool(risk_output.get('accepted')) and decision in {'BUY', 'SELL'} and execution_allowed
         suggested_volume = float(risk_output.get('suggested_volume', 0.0) or 0.0)
         llm_enabled = self.model_selector.is_enabled(db, self.name)
         runtime_skills = _resolve_runtime_skills(self.model_selector, db, self.name)
@@ -1278,6 +1670,8 @@ class ExecutionManagerAgent:
 
         if deterministic_allowed:
             reason = 'Trade eligible based on trader decision + risk checks.'
+        elif decision in {'BUY', 'SELL'} and not execution_allowed:
+            reason = 'Execution blocked by trader decision guardrails.'
         elif decision not in {'BUY', 'SELL'}:
             reason = f'No execution for decision={decision}.'
         else:
@@ -1349,7 +1743,17 @@ class ExecutionManagerAgent:
         live_mode = str(ctx.mode or '').strip().lower() == 'live'
         risk_accepted = bool(risk_output.get('accepted'))
 
-        if not risk_accepted:
+        if decision not in {'BUY', 'SELL'}:
+            final_decision = 'HOLD'
+            should_execute = False
+            side = None
+            final_reason = 'Trader decision is HOLD; execution remains locked.'
+        elif not execution_allowed:
+            final_decision = 'HOLD'
+            should_execute = False
+            side = None
+            final_reason = 'Execution blocked by trader decision guardrails.'
+        elif not risk_accepted:
             final_decision = 'HOLD'
             should_execute = False
             side = None
