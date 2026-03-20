@@ -18,6 +18,7 @@ from app.observability.metrics import (
     metaapi_cache_misses_total,
     metaapi_sdk_circuit_open_total,
 )
+from app.services.connectors.runtime_settings import RuntimeConnectorSettings
 
 logger = logging.getLogger(__name__)
 
@@ -86,10 +87,20 @@ class MetaApiClient:
                 self._redis = None
 
     def _resolve_token(self) -> str:
-        return (self.settings.metaapi_token or '').strip()
+        runtime_token = RuntimeConnectorSettings.get_string(
+            'metaapi',
+            ('METAAPI_TOKEN', 'metaapi_token'),
+        )
+        return (runtime_token or self.settings.metaapi_token or '').strip()
 
     def _resolve_account_id(self, account_id: str | None) -> str:
-        return (account_id or self.settings.metaapi_account_id or '').strip()
+        if account_id:
+            return str(account_id).strip()
+        runtime_account_id = RuntimeConnectorSettings.get_string(
+            'metaapi',
+            ('METAAPI_ACCOUNT_ID', 'metaapi_account_id'),
+        )
+        return (runtime_account_id or self.settings.metaapi_account_id or '').strip()
 
     def _resolve_base_url(self) -> str:
         return self.settings.metaapi_base_url.rstrip('/')

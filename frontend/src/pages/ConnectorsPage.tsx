@@ -231,6 +231,60 @@ const CONFIG_TABS: Array<{ id: ConfigTabId; label: string }> = [
   { id: 'security', label: 'Sécurité' },
 ];
 
+type SecretFieldKey =
+  | 'NEWSAPI_API_KEY'
+  | 'TRADINGECONOMICS_API_KEY'
+  | 'FINNHUB_API_KEY'
+  | 'ALPHAVANTAGE_API_KEY'
+  | 'OLLAMA_API_KEY'
+  | 'MISTRAL_API_KEY'
+  | 'OPENAI_API_KEY'
+  | 'METAAPI_TOKEN'
+  | 'METAAPI_ACCOUNT_ID';
+
+type NewsProviderKey =
+  | 'yahoo_finance'
+  | 'newsapi'
+  | 'tradingeconomics'
+  | 'finnhub'
+  | 'alphavantage';
+
+const EMPTY_SECRET_FIELDS: Record<SecretFieldKey, string> = {
+  NEWSAPI_API_KEY: '',
+  TRADINGECONOMICS_API_KEY: '',
+  FINNHUB_API_KEY: '',
+  ALPHAVANTAGE_API_KEY: '',
+  OLLAMA_API_KEY: '',
+  MISTRAL_API_KEY: '',
+  OPENAI_API_KEY: '',
+  METAAPI_TOKEN: '',
+  METAAPI_ACCOUNT_ID: '',
+};
+
+const DEFAULT_NEWS_PROVIDER_ENABLED: Record<NewsProviderKey, boolean> = {
+  yahoo_finance: true,
+  newsapi: true,
+  tradingeconomics: true,
+  finnhub: false,
+  alphavantage: false,
+};
+
+const NEWS_PROVIDER_LABELS: Record<NewsProviderKey, string> = {
+  yahoo_finance: 'Yahoo Finance',
+  newsapi: 'NewsAPI',
+  tradingeconomics: 'TradingEconomics',
+  finnhub: 'Finnhub',
+  alphavantage: 'AlphaVantage',
+};
+
+const NEWS_PROVIDER_ORDER: NewsProviderKey[] = [
+  'yahoo_finance',
+  'newsapi',
+  'tradingeconomics',
+  'finnhub',
+  'alphavantage',
+];
+
 let editableGroupCounter = 0;
 
 function toEditableGroups(groups: MarketSymbolGroup[]): EditableSymbolGroup[] {
@@ -242,6 +296,24 @@ function toEditableGroups(groups: MarketSymbolGroup[]): EditableSymbolGroup[] {
       symbolsInput: group.symbols.join(', '),
     };
   });
+}
+
+function readConnectorSecret(settings: Record<string, unknown>, key: SecretFieldKey): string {
+  const direct = settings[key];
+  if (typeof direct === 'string') return direct;
+  const lower = settings[key.toLowerCase()];
+  if (typeof lower === 'string') return lower;
+  return '';
+}
+
+function maskSecretPreview(value: string): string {
+  const text = String(value || '').trim();
+  if (!text) return 'non défini';
+  if (text.length <= 3) return '*'.repeat(text.length);
+  const startLen = Math.min(3, Math.max(Math.floor(text.length / 4), 1));
+  const endLen = Math.min(2, Math.max(Math.floor(text.length / 6), 1));
+  const hiddenLen = Math.max(text.length - startLen - endLen, 2);
+  return `${text.slice(0, startLen)}${'*'.repeat(hiddenLen)}${text.slice(text.length - endLen)}`;
 }
 
 export function ConnectorsPage() {
@@ -297,6 +369,10 @@ export function ConnectorsPage() {
   });
   const [symbolGroupsInput, setSymbolGroupsInput] = useState<EditableSymbolGroup[]>(toEditableGroups(FALLBACK_SYMBOL_GROUPS));
   const [symbolsSaving, setSymbolsSaving] = useState(false);
+  const [secretFields, setSecretFields] = useState<Record<SecretFieldKey, string>>(EMPTY_SECRET_FIELDS);
+  const [savingSecrets, setSavingSecrets] = useState(false);
+  const [newsProvidersEnabled, setNewsProvidersEnabled] = useState<Record<NewsProviderKey, boolean>>(DEFAULT_NEWS_PROVIDER_ENABLED);
+  const [savingNewsProviders, setSavingNewsProviders] = useState(false);
 
   const hydrateAgentModels = (connectorRows: ConnectorConfig[]) => {
     const ollama = connectorRows.find((item) => item.connector_name === 'ollama');
@@ -348,6 +424,52 @@ export function ConnectorsPage() {
     setAgentModels(next);
     setAgentSkills(nextSkills);
     setAgentLlmEnabled(nextEnabled);
+  };
+
+  const hydrateSecretFields = (connectorRows: ConnectorConfig[]) => {
+    const ollama = connectorRows.find((item) => item.connector_name === 'ollama');
+    const yfinance = connectorRows.find((item) => item.connector_name === 'yfinance');
+    const metaapi = connectorRows.find((item) => item.connector_name === 'metaapi');
+
+    const ollamaSettings = (ollama?.settings ?? {}) as Record<string, unknown>;
+    const yfinanceSettings = (yfinance?.settings ?? {}) as Record<string, unknown>;
+    const metaapiSettings = (metaapi?.settings ?? {}) as Record<string, unknown>;
+
+    setSecretFields({
+      OLLAMA_API_KEY: readConnectorSecret(ollamaSettings, 'OLLAMA_API_KEY'),
+      OPENAI_API_KEY: readConnectorSecret(ollamaSettings, 'OPENAI_API_KEY'),
+      MISTRAL_API_KEY: readConnectorSecret(ollamaSettings, 'MISTRAL_API_KEY'),
+      NEWSAPI_API_KEY: readConnectorSecret(yfinanceSettings, 'NEWSAPI_API_KEY'),
+      TRADINGECONOMICS_API_KEY: readConnectorSecret(yfinanceSettings, 'TRADINGECONOMICS_API_KEY'),
+      FINNHUB_API_KEY: readConnectorSecret(yfinanceSettings, 'FINNHUB_API_KEY'),
+      ALPHAVANTAGE_API_KEY: readConnectorSecret(yfinanceSettings, 'ALPHAVANTAGE_API_KEY'),
+      METAAPI_TOKEN: readConnectorSecret(metaapiSettings, 'METAAPI_TOKEN'),
+      METAAPI_ACCOUNT_ID: readConnectorSecret(metaapiSettings, 'METAAPI_ACCOUNT_ID'),
+    });
+  };
+
+  const hydrateNewsProviders = (connectorRows: ConnectorConfig[]) => {
+    const yfinance = connectorRows.find((item) => item.connector_name === 'yfinance');
+    const settings = (yfinance?.settings ?? {}) as Record<string, unknown>;
+    const rawMap = settings.news_providers && typeof settings.news_providers === 'object'
+      ? (settings.news_providers as Record<string, unknown>)
+      : {};
+
+    const next = { ...DEFAULT_NEWS_PROVIDER_ENABLED };
+    NEWS_PROVIDER_ORDER.forEach((providerName) => {
+      const current = rawMap[providerName];
+      if (typeof current === 'boolean') {
+        next[providerName] = current;
+        return;
+      }
+      if (current && typeof current === 'object') {
+        const candidate = (current as Record<string, unknown>).enabled;
+        if (typeof candidate === 'boolean') {
+          next[providerName] = candidate;
+        }
+      }
+    });
+    setNewsProvidersEnabled(next);
   };
 
   const loadAll = async () => {
@@ -403,6 +525,8 @@ export function ConnectorsPage() {
       });
       setSymbolGroupsInput(toEditableGroups(symbolGroups));
       hydrateAgentModels(connectorRows);
+      hydrateSecretFields(connectorRows);
+      hydrateNewsProviders(connectorRows);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Cannot load admin data');
     }
@@ -465,6 +589,16 @@ export function ConnectorsPage() {
       setTestResult(result);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Connector test failed');
+    }
+  };
+
+  const testNewsProvider = async (providerName: NewsProviderKey) => {
+    if (!token) return;
+    try {
+      const result = (await api.testNewsProvider(token, providerName)) as Record<string, unknown>;
+      setTestResult(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Provider test failed: ${providerName}`);
     }
   };
 
@@ -705,6 +839,85 @@ export function ConnectorsPage() {
     }
   };
 
+  const saveSecrets = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!token) return;
+
+    const connectorByName = new Map(connectors.map((row) => [row.connector_name, row] as const));
+    const buildSettings = (connectorName: string, keys: SecretFieldKey[]) => {
+      const connector = connectorByName.get(connectorName);
+      const current = (connector?.settings ?? {}) as Record<string, unknown>;
+      const next: Record<string, unknown> = { ...current };
+      keys.forEach((key) => {
+        next[key] = secretFields[key].trim();
+      });
+      return {
+        enabled: connector?.enabled ?? true,
+        settings: next,
+      };
+    };
+
+    setSavingSecrets(true);
+    setError(null);
+    try {
+      await Promise.all([
+        api.updateConnector(token, 'ollama', buildSettings('ollama', ['OLLAMA_API_KEY', 'OPENAI_API_KEY', 'MISTRAL_API_KEY'])),
+        api.updateConnector(
+          token,
+          'yfinance',
+          buildSettings('yfinance', ['NEWSAPI_API_KEY', 'TRADINGECONOMICS_API_KEY', 'FINNHUB_API_KEY', 'ALPHAVANTAGE_API_KEY']),
+        ),
+        api.updateConnector(token, 'metaapi', buildSettings('metaapi', ['METAAPI_TOKEN', 'METAAPI_ACCOUNT_ID'])),
+      ]);
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Cannot save API secrets');
+    } finally {
+      setSavingSecrets(false);
+    }
+  };
+
+  const saveNewsProviders = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!token) return;
+
+    const yfinance = connectors.find((item) => item.connector_name === 'yfinance');
+    if (!yfinance) {
+      setError('Connecteur yfinance introuvable');
+      return;
+    }
+
+    const existingSettings = (yfinance.settings ?? {}) as Record<string, unknown>;
+    const existingProviders = existingSettings.news_providers && typeof existingSettings.news_providers === 'object'
+      ? (existingSettings.news_providers as Record<string, unknown>)
+      : {};
+    const nextProviders: Record<string, unknown> = { ...existingProviders };
+
+    NEWS_PROVIDER_ORDER.forEach((providerName) => {
+      const rawCurrent = existingProviders[providerName];
+      const current = rawCurrent && typeof rawCurrent === 'object' ? { ...(rawCurrent as Record<string, unknown>) } : {};
+      current.enabled = Boolean(newsProvidersEnabled[providerName]);
+      nextProviders[providerName] = current;
+    });
+
+    setSavingNewsProviders(true);
+    setError(null);
+    try {
+      await api.updateConnector(token, 'yfinance', {
+        enabled: yfinance.enabled,
+        settings: {
+          ...existingSettings,
+          news_providers: nextProviders,
+        },
+      });
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Cannot save providers config');
+    } finally {
+      setSavingNewsProviders(false);
+    }
+  };
+
   const searchMemory = async (e: FormEvent) => {
     e.preventDefault();
     if (!token) return;
@@ -819,6 +1032,41 @@ export function ConnectorsPage() {
             <section className="card config-inner-card">
               <h3>Résultat test connecteur</h3>
               <pre>{JSON.stringify(testResult, null, 2)}</pre>
+            </section>
+
+            <section className="card config-inner-card">
+              <h3>Providers News</h3>
+              <p className="model-source">
+                Active ou désactive chaque provider news depuis l’onglet Connecteurs.
+              </p>
+              <form className="form-grid" onSubmit={saveNewsProviders}>
+                {NEWS_PROVIDER_ORDER.map((providerName) => (
+                  <div key={providerName} className="form-grid inline">
+                    <label>
+                      {NEWS_PROVIDER_LABELS[providerName]}
+                      <input
+                        className="ui-switch"
+                        type="checkbox"
+                        checked={Boolean(newsProvidersEnabled[providerName])}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          setNewsProvidersEnabled((prev) => ({ ...prev, [providerName]: checked }));
+                        }}
+                      />
+                    </label>
+                    <button
+                      className="btn-ghost btn-small"
+                      type="button"
+                      onClick={() => void testNewsProvider(providerName)}
+                    >
+                      Tester
+                    </button>
+                  </div>
+                ))}
+                <button className="btn-primary" disabled={savingNewsProviders}>
+                  {savingNewsProviders ? 'Enregistrement...' : 'Enregistrer providers'}
+                </button>
+              </form>
             </section>
           </div>
         )}
@@ -1190,6 +1438,111 @@ export function ConnectorsPage() {
 
         {activeConfigTab === 'security' && (
           <div className="config-panel-grid">
+            <section className="card config-inner-card">
+              <h3>Clés API Runtime</h3>
+              <p className="model-source">
+                Ces valeurs sont stockées dans les settings connecteurs et utilisées au runtime (LLM, news providers, MetaApi).
+              </p>
+              <form className="form-grid" onSubmit={saveSecrets}>
+                <h4>LLM</h4>
+                <label>
+                  OLLAMA_API_KEY
+                  <input
+                    type="password"
+                    value={secretFields.OLLAMA_API_KEY}
+                    onChange={(e) => setSecretFields((prev) => ({ ...prev, OLLAMA_API_KEY: e.target.value }))}
+                    autoComplete="off"
+                  />
+                  <p className="model-source">Actuel: <code>{maskSecretPreview(secretFields.OLLAMA_API_KEY)}</code></p>
+                </label>
+                <label>
+                  OPENAI_API_KEY
+                  <input
+                    type="password"
+                    value={secretFields.OPENAI_API_KEY}
+                    onChange={(e) => setSecretFields((prev) => ({ ...prev, OPENAI_API_KEY: e.target.value }))}
+                    autoComplete="off"
+                  />
+                  <p className="model-source">Actuel: <code>{maskSecretPreview(secretFields.OPENAI_API_KEY)}</code></p>
+                </label>
+                <label>
+                  MISTRAL_API_KEY
+                  <input
+                    type="password"
+                    value={secretFields.MISTRAL_API_KEY}
+                    onChange={(e) => setSecretFields((prev) => ({ ...prev, MISTRAL_API_KEY: e.target.value }))}
+                    autoComplete="off"
+                  />
+                  <p className="model-source">Actuel: <code>{maskSecretPreview(secretFields.MISTRAL_API_KEY)}</code></p>
+                </label>
+                <h4>News providers</h4>
+                <label>
+                  NEWSAPI_API_KEY
+                  <input
+                    type="password"
+                    value={secretFields.NEWSAPI_API_KEY}
+                    onChange={(e) => setSecretFields((prev) => ({ ...prev, NEWSAPI_API_KEY: e.target.value }))}
+                    autoComplete="off"
+                  />
+                  <p className="model-source">Actuel: <code>{maskSecretPreview(secretFields.NEWSAPI_API_KEY)}</code></p>
+                </label>
+                <label>
+                  TRADINGECONOMICS_API_KEY
+                  <input
+                    type="password"
+                    value={secretFields.TRADINGECONOMICS_API_KEY}
+                    onChange={(e) => setSecretFields((prev) => ({ ...prev, TRADINGECONOMICS_API_KEY: e.target.value }))}
+                    autoComplete="off"
+                  />
+                  <p className="model-source">Actuel: <code>{maskSecretPreview(secretFields.TRADINGECONOMICS_API_KEY)}</code></p>
+                </label>
+                <label>
+                  FINNHUB_API_KEY
+                  <input
+                    type="password"
+                    value={secretFields.FINNHUB_API_KEY}
+                    onChange={(e) => setSecretFields((prev) => ({ ...prev, FINNHUB_API_KEY: e.target.value }))}
+                    autoComplete="off"
+                  />
+                  <p className="model-source">Actuel: <code>{maskSecretPreview(secretFields.FINNHUB_API_KEY)}</code></p>
+                </label>
+                <label>
+                  ALPHAVANTAGE_API_KEY
+                  <input
+                    type="password"
+                    value={secretFields.ALPHAVANTAGE_API_KEY}
+                    onChange={(e) => setSecretFields((prev) => ({ ...prev, ALPHAVANTAGE_API_KEY: e.target.value }))}
+                    autoComplete="off"
+                  />
+                  <p className="model-source">Actuel: <code>{maskSecretPreview(secretFields.ALPHAVANTAGE_API_KEY)}</code></p>
+                </label>
+                <h4>MetaApi</h4>
+                <label>
+                  METAAPI_TOKEN
+                  <input
+                    type="password"
+                    value={secretFields.METAAPI_TOKEN}
+                    onChange={(e) => setSecretFields((prev) => ({ ...prev, METAAPI_TOKEN: e.target.value }))}
+                    autoComplete="off"
+                  />
+                  <p className="model-source">Actuel: <code>{maskSecretPreview(secretFields.METAAPI_TOKEN)}</code></p>
+                </label>
+                <label>
+                  METAAPI_ACCOUNT_ID
+                  <input
+                    type="password"
+                    value={secretFields.METAAPI_ACCOUNT_ID}
+                    onChange={(e) => setSecretFields((prev) => ({ ...prev, METAAPI_ACCOUNT_ID: e.target.value }))}
+                    autoComplete="off"
+                  />
+                  <p className="model-source">Actuel: <code>{maskSecretPreview(secretFields.METAAPI_ACCOUNT_ID)}</code></p>
+                </label>
+                <button className="btn-primary" disabled={savingSecrets}>
+                  {savingSecrets ? 'Enregistrement...' : 'Enregistrer les clés API'}
+                </button>
+              </form>
+            </section>
+
             <section className="card config-inner-card">
               <h3>Mémoire long-terme</h3>
               <form className="form-grid inline" onSubmit={searchMemory}>

@@ -1,12 +1,13 @@
-# Données Forex et news
+# Données marché et news
 
 ## Source marché/news
 
-- Provider: `backend/app/services/market/yfinance_provider.py`
-- Source: Yahoo Finance via `yfinance`
+- Provider principal: `backend/app/services/market/yfinance_provider.py`
+- Marché (prix/ohlc): Yahoo Finance via `yfinance`
+- News/macro (multi-provider): Yahoo Finance, NewsAPI, TradingEconomics, Finnhub, AlphaVantage
 - Mapping symbole:
-  - entrée plateforme `EURUSD`
-  - symbole Yahoo `EURUSD=X`
+  - entrée plateforme `EURUSD.PRO`
+  - symbole source principal `EURUSD=X`
 
 ## Timeframes et fenêtre de récupération
 
@@ -29,14 +30,33 @@
 - `trend` (`bullish` / `bearish` / `neutral`)
 - `degraded`
 
-## News normalisées
+## News/macro normalisées
 
-`get_news_context(pair)` retourne une liste `news`:
+`get_news_context(pair)` retourne:
 
-- `title`
-- `publisher`
-- `link`
-- `published`
+- `news`: liste d’articles normalisés
+  - `provider`, `type=article`, `title`, `summary`, `url`, `published_at`
+  - `pair_relevance`, `freshness_score`, `credibility_score`, `sentiment_hint`
+- `macro_events`: liste d’événements macro normalisés
+  - `provider`, `type=macro_event`, `event_name`, `currency`, `importance`, `published_at`
+  - `pair_relevance`, `freshness_score`, `credibility_score`, `directional_hint`
+- `provider_status`: statut détaillé par provider (`ok|empty|error|unavailable|disabled`)
+- `provider_status_compact`: statut compact par provider
+- `fetch_status`: `ok|empty|partial|error`
+- `degraded`: bool global
+
+## Configuration providers news
+
+Variables clés:
+
+- `NEWS_PROVIDERS` (JSON map):
+  - `enabled`, `priority`, `timeout_ms`, `api_key_env`, `lookback_hours`, etc.
+- `NEWS_ANALYSIS` (JSON map):
+  - `max_items_total`, `max_items_per_provider`, `deduplicate`, `minimum_relevance_score`, etc.
+- `NEWSAPI_API_KEY`
+- `TRADINGECONOMICS_API_KEY`
+- `FINNHUB_API_KEY`
+- `ALPHAVANTAGE_API_KEY`
 
 ## Historique pour backtest
 
@@ -52,9 +72,9 @@
   - Qdrant prioritaire (collection configurable), avec filtre strict `pair` + `timeframe`,
   - repli SQL cosine si Qdrant indisponible.
 
-## Mode dégradé
+## Modes dégradés
 
-- Si Yahoo Finance indisponible:
-  - payload `degraded=true`,
-  - orchestration continue avec signaux partiels,
-  - run reste traçable.
+- Provider activé sans credentials: `unavailable` (ignoré proprement).
+- Provider en erreur réseau/API: `error` pour ce provider.
+- Tous providers activés en échec et aucun item: `fetch_status=error`, `degraded=true`.
+- Run orchestrateur continue avec fallback déterministe quand possible.

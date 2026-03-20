@@ -135,13 +135,107 @@ def _normalize_llm_text_and_degraded(llm_res: dict[str, Any], *, require_text: b
     return text, degraded
 
 
+def _extract_llm_stop_reason(llm_res: dict[str, Any]) -> str | None:
+    raw = llm_res.get('raw')
+    if not isinstance(raw, dict):
+        return None
+
+    done_reason = raw.get('done_reason')
+    if isinstance(done_reason, str) and done_reason.strip():
+        return done_reason.strip().lower()
+
+    choices = raw.get('choices')
+    if isinstance(choices, list) and choices:
+        first_choice = choices[0]
+        if isinstance(first_choice, dict):
+            finish_reason = first_choice.get('finish_reason')
+            if isinstance(finish_reason, str) and finish_reason.strip():
+                return finish_reason.strip().lower()
+    return None
+
+
+def _extract_llm_hidden_reasoning_text(llm_res: dict[str, Any]) -> str:
+    raw = llm_res.get('raw')
+    if not isinstance(raw, dict):
+        return ''
+
+    message = raw.get('message')
+    if isinstance(message, dict):
+        for key in ('thinking', 'reasoning', 'reasoning_content'):
+            value = message.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+            if isinstance(value, list):
+                chunks = [str(item) for item in value if str(item).strip()]
+                if chunks:
+                    return ''.join(chunks)
+
+    choices = raw.get('choices')
+    if isinstance(choices, list) and choices:
+        first_choice = choices[0]
+        if isinstance(first_choice, dict):
+            choice_message = first_choice.get('message')
+            if isinstance(choice_message, dict):
+                for key in ('reasoning_content', 'reasoning'):
+                    value = choice_message.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value
+                    if isinstance(value, list):
+                        chunks = [str(item) for item in value if str(item).strip()]
+                        if chunks:
+                            return ''.join(chunks)
+    return ''
+
+
+def _should_retry_empty_llm_response(llm_res: dict[str, Any], llm_text: str, llm_degraded: bool) -> bool:
+    if not llm_degraded:
+        return False
+    if llm_text.strip():
+        return False
+    if bool(llm_res.get('degraded', False)):
+        return False
+
+    stop_reason = _extract_llm_stop_reason(llm_res)
+    if stop_reason not in {'length', 'max_tokens'}:
+        return False
+
+    return bool(_extract_llm_hidden_reasoning_text(llm_res).strip())
+
+
+def _build_empty_llm_summary(llm_res: dict[str, Any], *, retried: bool) -> str:
+    provider = str(llm_res.get('provider') or '').strip() or 'unknown'
+    stop_reason = _extract_llm_stop_reason(llm_res) or 'unknown'
+    completion_tokens = llm_res.get('completion_tokens')
+    reasoning_chars = len(_extract_llm_hidden_reasoning_text(llm_res).strip())
+    retry_note = ' after retry' if retried else ''
+    return (
+        f'LLM returned an empty response{retry_note} '
+        f'(provider={provider}, stop_reason={stop_reason}, completion_tokens={completion_tokens}, reasoning_chars={reasoning_chars})'
+    )
+
+
 def _compact_outputs_for_debate(agent_outputs: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     compact: dict[str, dict[str, Any]] = {}
     for name, output in (agent_outputs or {}).items():
         if not isinstance(output, dict):
             continue
         item: dict[str, Any] = {}
-        for key in ('signal', 'score', 'reason', 'summary', 'llm_summary', 'news_count', 'degraded'):
+        for key in (
+            'signal',
+            'score',
+            'reason',
+            'summary',
+            'llm_summary',
+            'llm_fallback_used',
+            'llm_retry_used',
+            'news_count',
+            'macro_event_count',
+            'coverage',
+            'information_state',
+            'decision_mode',
+            'fetch_status',
+            'degraded',
+        ):
             if key in output:
                 item[key] = output.get(key)
         indicators = output.get('indicators')
@@ -468,39 +562,192 @@ def _resolve_decision_policy(mode: object) -> DecisionGatingPolicy:
     return DECISION_POLICIES.get(resolved, DECISION_POLICIES['conservative'])
 
 
-def _deterministic_headline_sentiment(headlines: str) -> tuple[str, float]:
-    text = headlines.lower()
-    positive_keywords = (
-        'rally',
-        'rebound',
-        'strength',
-        'hawkish',
-        'surge',
-        'gain',
-        'hausse',
-        'rebond',
-        'progression',
+def _normalize_symbol_for_news(pair: str | None) -> str:
+    raw = str(pair or '').strip().upper()
+    if not raw:
+        return ''
+    without_suffix = re.sub(r'\.[A-Z0-9_]+$', '', raw)
+    compact = without_suffix.replace('/', '').replace('-', '')
+    fx_match = re.search(r'[A-Z]{6}', compact)
+    if fx_match:
+        return fx_match.group(0)
+    return without_suffix
+
+
+def _asset_aliases(asset: str) -> tuple[str, ...]:
+    key = str(asset or '').strip().upper()
+    mapping: dict[str, tuple[str, ...]] = {
+        'USD': ('usd', 'dollar', 'greenback', 'fed', 'treasury'),
+        'EUR': ('eur', 'euro', 'ecb'),
+        'GBP': ('gbp', 'sterling', 'pound', 'boe'),
+        'JPY': ('jpy', 'yen', 'boj'),
+        'CHF': ('chf', 'swiss franc', 'snb'),
+        'CAD': ('cad', 'canadian dollar', 'loonie', 'boc'),
+        'AUD': ('aud', 'aussie', 'rba'),
+        'NZD': ('nzd', 'kiwi', 'rbnz'),
+        'BTC': ('btc', 'bitcoin'),
+        'ETH': ('eth', 'ethereum'),
+        'XAU': ('xau', 'gold'),
+        'XAG': ('xag', 'silver'),
+    }
+    if key in mapping:
+        return mapping[key]
+    if not key:
+        return tuple()
+    return (key.lower(),)
+
+
+def _headline_keyword_score(headline: str) -> float:
+    text = str(headline or '').lower()
+    if not text:
+        return 0.0
+
+    positive_keywords: dict[str, float] = {
+        'rally': 1.0,
+        'rebound': 0.8,
+        'gain': 1.0,
+        'gains': 1.0,
+        'rise': 1.0,
+        'rises': 1.0,
+        'rising': 1.0,
+        'surge': 1.1,
+        'surges': 1.1,
+        'strength': 0.8,
+        'strong': 0.7,
+        'hawkish': 0.8,
+        'upgrade': 0.8,
+        'upgrades': 0.8,
+        'risk appetite': 0.6,
+    }
+    negative_keywords: dict[str, float] = {
+        'selloff': 1.1,
+        'sell-off': 1.1,
+        'drop': 1.0,
+        'drops': 1.0,
+        'fall': 1.0,
+        'falls': 1.0,
+        'plunge': 1.1,
+        'plunges': 1.1,
+        'loss': 0.8,
+        'losses': 0.8,
+        'weak': 0.8,
+        'weaker': 0.8,
+        'dovish': 0.8,
+        'downgrade': 0.9,
+        'downgrades': 0.9,
+        'underweight': 0.8,
+        'recession': 1.0,
+        'risk-off': 0.7,
+    }
+
+    positive = sum(weight for keyword, weight in positive_keywords.items() if keyword in text)
+    negative = sum(weight for keyword, weight in negative_keywords.items() if keyword in text)
+    return positive - negative
+
+
+def _mentions_any_alias(text: str, aliases: tuple[str, ...]) -> bool:
+    lowered = str(text or '').lower()
+    for alias in aliases:
+        item = str(alias or '').strip().lower()
+        if item and item in lowered:
+            return True
+    return False
+
+
+def _compact_prompt_text(value: Any, *, max_chars: int) -> str:
+    text = str(value or '')
+    if not text:
+        return ''
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    compact = '\n'.join(lines)
+    if len(compact) <= max_chars:
+        return compact
+    return f"{compact[: max_chars - 1].rstrip()}…"
+
+
+def _compact_news_headlines_for_prompt(news_items: list[dict[str, Any]], *, limit: int = 4) -> str:
+    rendered: list[str] = []
+    for item in news_items[: max(int(limit), 1)]:
+        title = _compact_prompt_text(item.get('title', ''), max_chars=170)
+        if not title:
+            continue
+        summary = _compact_prompt_text(item.get('summary', ''), max_chars=120)
+        if summary:
+            rendered.append(f"- {title} | {summary}")
+        else:
+            rendered.append(f"- {title}")
+    return '\n'.join(rendered)
+
+
+def _compact_memory_for_prompt(memory_items: list[dict[str, Any]], *, limit: int = 3) -> str:
+    rows: list[str] = []
+    for item in memory_items[: max(int(limit), 1)]:
+        summary = _compact_prompt_text(item.get('summary', ''), max_chars=140)
+        if summary:
+            rows.append(f'- {summary}')
+    return '\n'.join(rows) or '- none'
+
+
+def _optimize_news_prompts_for_latency(system_prompt: str, user_prompt: str) -> tuple[str, str]:
+    system = _compact_prompt_text(system_prompt, max_chars=1200)
+    user = _compact_prompt_text(user_prompt, max_chars=1200)
+    guidance = (
+        'Format de sortie strict: première ligne commence par bullish, bearish ou neutral, '
+        'puis justification très courte (20 mots max).'
     )
-    negative_keywords = (
-        'selloff',
-        'drop',
-        'fall',
-        'weak',
-        'dovish',
-        'recession',
-        'risk-off',
-        'baisse',
-        'chute',
-        'faiblesse',
-    )
-    pos = sum(1 for keyword in positive_keywords if keyword in text)
-    neg = sum(1 for keyword in negative_keywords if keyword in text)
-    balance = pos - neg
-    if balance > 0:
-        return 'bullish', min(0.15, 0.05 * balance)
-    if balance < 0:
-        return 'bearish', max(-0.15, -0.05 * abs(balance))
-    return 'neutral', 0.0
+    if guidance not in system:
+        system = f'{system}\n\n{guidance}'
+    return system, user
+
+
+def _deterministic_headline_sentiment(headlines: str, *, pair: str | None = None) -> tuple[str, float]:
+    lines = [
+        str(line).strip().lstrip('-').strip()
+        for line in str(headlines or '').splitlines()
+        if str(line).strip()
+    ]
+    if not lines:
+        return 'neutral', 0.0
+
+    symbol = _normalize_symbol_for_news(pair)
+    fx_like = bool(re.fullmatch(r'[A-Z]{6}', symbol))
+    base = symbol[:3] if fx_like else ''
+    quote = symbol[3:] if fx_like else ''
+    base_aliases = _asset_aliases(base)
+    quote_aliases = _asset_aliases(quote)
+    symbol_aliases = _asset_aliases(symbol)
+
+    weighted_total = 0.0
+    weight_sum = 0.0
+
+    for headline in lines:
+        polarity = _headline_keyword_score(headline)
+        if polarity == 0.0:
+            continue
+
+        weight = 0.35
+        if fx_like:
+            base_hit = _mentions_any_alias(headline, base_aliases)
+            quote_hit = _mentions_any_alias(headline, quote_aliases)
+            if base_hit and not quote_hit:
+                weight = 1.0
+            elif quote_hit and not base_hit:
+                weight = -1.0
+            elif base_hit and quote_hit:
+                weight = 0.15
+        elif _mentions_any_alias(headline, symbol_aliases):
+            weight = 0.8
+
+        weighted_total += polarity * weight
+        weight_sum += abs(weight)
+
+    if weight_sum == 0.0:
+        return 'neutral', 0.0
+
+    normalized = weighted_total / weight_sum
+    score = round(_clamp(normalized * 0.18, -0.2, 0.2), 3)
+    signal = _score_to_signal(score, threshold=0.03)
+    return signal, score
 
 
 class TechnicalAnalystAgent:
@@ -645,90 +892,523 @@ class NewsAnalystAgent:
         self.prompt_service = prompt_service
 
     def run(self, ctx: AgentContext, db: Session | None = None) -> dict[str, Any]:
-        news = ctx.news_context.get('news', [])
+        raw_news = ctx.news_context.get('news', [])
+        raw_macro_events = ctx.news_context.get('macro_events', [])
         valid_news = [
-            item for item in news
+            item for item in raw_news
             if isinstance(item, dict) and str(item.get('title', '') or '').strip()
         ]
+        valid_macro_events = [
+            item for item in raw_macro_events
+            if isinstance(item, dict) and str(item.get('event_name', '') or '').strip()
+        ]
+
+        provider_reason = str(ctx.news_context.get('reason', '') or '').strip() or None
+        provider_symbol = str(ctx.news_context.get('symbol', '') or '').strip() or None
+        provider_symbols_scanned = ctx.news_context.get('symbols_scanned', [])
+        if not isinstance(provider_symbols_scanned, list):
+            provider_symbols_scanned = []
+
+        fetch_status = str(ctx.news_context.get('fetch_status', 'ok') or 'ok').strip().lower()
+        if fetch_status not in {'ok', 'empty', 'partial', 'error'}:
+            fetch_status = 'ok'
+
+        provider_status = ctx.news_context.get('provider_status_compact')
+        if not isinstance(provider_status, dict):
+            provider_status_raw = ctx.news_context.get('provider_status')
+            if isinstance(provider_status_raw, dict):
+                provider_status = {
+                    str(name): str((payload.get('status') if isinstance(payload, dict) else payload) or 'unknown')
+                    for name, payload in provider_status_raw.items()
+                }
+            else:
+                provider_status = {}
+
         llm_enabled = self.model_selector.is_enabled(db, self.name)
         runtime_skills = _resolve_runtime_skills(self.model_selector, db, self.name)
         llm_model = _resolve_llm_model(ctx, self.model_selector, db, self.name)
-        if not valid_news:
-            output = {
-                'signal': 'neutral',
-                'score': 0.0,
-                'reason': 'No Yahoo Finance news',
-                'summary': 'No Yahoo Finance news',
-                'news_count': 0,
-                'degraded': False,
-                'prompt_meta': {
-                    'prompt_id': None,
-                    'prompt_version': 0,
-                    'llm_model': llm_model,
-                    'llm_enabled': llm_enabled,
-                    'skills_count': len(runtime_skills),
-                },
+        settings = get_settings()
+        analysis_cfg = settings.news_analysis if isinstance(settings.news_analysis, dict) else {}
+        min_relevance = _clamp(_safe_float(analysis_cfg.get('minimum_relevance_score'), 0.35), 0.0, 1.0)
+
+        symbol_for_pair = _normalize_symbol_for_news(provider_symbol or ctx.pair)
+        fx_like_symbol = bool(re.fullmatch(r'[A-Z]{6}', symbol_for_pair))
+        base_asset = symbol_for_pair[:3] if fx_like_symbol else ''
+        quote_asset = symbol_for_pair[3:] if fx_like_symbol else ''
+        base_aliases = _asset_aliases(base_asset)
+        quote_aliases = _asset_aliases(quote_asset)
+        symbol_aliases = _asset_aliases(symbol_for_pair)
+        macro_keywords = (
+            'inflation',
+            'cpi',
+            'ppi',
+            'rates',
+            'rate',
+            'central bank',
+            'employment',
+            'payroll',
+            'growth',
+            'gdp',
+            'energy',
+            'oil',
+            'geopolitics',
+            'war',
+        )
+
+        def alias_hits(text: str, aliases: tuple[str, ...]) -> int:
+            lowered = str(text or '').lower()
+            return sum(1 for alias in aliases if str(alias or '').strip() and str(alias).lower() in lowered)
+
+        def infer_relevance_fields(item: dict[str, Any], *, macro: bool = False) -> dict[str, float]:
+            title = str(item.get('title') or item.get('event_name') or '')
+            summary = str(item.get('summary') or '')
+            text = f'{title} {summary}'.lower()
+
+            base_rel = _safe_float(item.get('base_currency_relevance'), -1.0)
+            quote_rel = _safe_float(item.get('quote_currency_relevance'), -1.0)
+            pair_rel = _safe_float(item.get('pair_relevance'), -1.0)
+            macro_rel = _safe_float(item.get('macro_relevance'), -1.0)
+            freshness = _safe_float(item.get('freshness_score'), -1.0)
+            credibility = _safe_float(item.get('credibility_score'), -1.0)
+
+            base_hit_count = alias_hits(text, base_aliases)
+            quote_hit_count = alias_hits(text, quote_aliases)
+            symbol_hit = alias_hits(text, symbol_aliases) > 0
+            macro_hit = any(keyword in text for keyword in macro_keywords)
+
+            if base_rel < 0.0:
+                base_rel = _clamp(0.35 + base_hit_count * 0.20, 0.0, 1.0) if base_hit_count else 0.0
+            if quote_rel < 0.0:
+                quote_rel = _clamp(0.35 + quote_hit_count * 0.20, 0.0, 1.0) if quote_hit_count else 0.0
+            if pair_rel < 0.0:
+                if symbol_hit:
+                    pair_rel = 1.0
+                elif base_hit_count and quote_hit_count:
+                    pair_rel = 0.75
+                elif base_hit_count or quote_hit_count:
+                    pair_rel = 0.55
+                elif macro_hit:
+                    pair_rel = 0.38
+                else:
+                    pair_rel = 0.20
+            if macro_rel < 0.0:
+                macro_rel = 0.72 if macro_hit else 0.25
+            if freshness < 0.0:
+                freshness = 0.55
+            if credibility < 0.0:
+                provider_name = str(item.get('provider') or '').lower()
+                source_name = str(item.get('publisher') or item.get('source_name') or '').lower()
+                if 'reuters' in source_name or 'wall street journal' in source_name or 'bloomberg' in source_name:
+                    credibility = 0.86
+                elif provider_name == 'tradingeconomics':
+                    credibility = 0.9
+                elif provider_name:
+                    credibility = 0.7
+                else:
+                    credibility = 0.65
+
+            return {
+                'base_currency_relevance': round(_clamp(base_rel, 0.0, 1.0), 3),
+                'quote_currency_relevance': round(_clamp(quote_rel, 0.0, 1.0), 3),
+                'pair_relevance': round(_clamp(pair_rel, 0.0, 1.0), 3),
+                'macro_relevance': round(_clamp(macro_rel, 0.0, 1.0), 3),
+                'freshness_score': round(_clamp(freshness, 0.0, 1.0), 3),
+                'credibility_score': round(_clamp(credibility, 0.0, 1.0), 3),
             }
-            _enrich_prompt_meta_debug(output['prompt_meta'], runtime_skills=runtime_skills)
-            return output
 
-        headlines = '\n'.join(f"- {item['title']}" for item in valid_news[:5])
-        fallback_system = (
-            'Tu es un analyste news multi-actifs. Retourne un sentiment court pour le symbole analysé: '
-            'bullish, bearish ou neutral. Réponds en français pour les explications.'
-        )
-        fallback_user = (
-            'Pair: {pair}\nTimeframe: {timeframe}\nMémoires pertinentes:\n{memory_context}\n'
-            'Titres:\n{headlines}\nDonne un sentiment concis et les facteurs de risque.'
-        )
-
-        prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
-        if db is not None and llm_enabled:
-            prompt_info = self.prompt_service.render(
-                db=db,
-                agent_name=self.name,
-                fallback_system=fallback_system,
-                fallback_user=fallback_user,
-                variables={
-                    'pair': ctx.pair,
-                    'timeframe': ctx.timeframe,
-                    'headlines': headlines,
-                    'memory_context': '\n'.join(f"- {m.get('summary', '')}" for m in ctx.memory_context) or '- none',
-                },
+        def evidence_weight(item: dict[str, Any], *, macro: bool = False) -> float:
+            inferred = infer_relevance_fields(item, macro=macro)
+            pair_rel = inferred['pair_relevance']
+            base_rel = inferred['base_currency_relevance']
+            quote_rel = inferred['quote_currency_relevance']
+            macro_rel = inferred['macro_relevance']
+            freshness = inferred['freshness_score']
+            credibility = inferred['credibility_score']
+            relevance = max(pair_rel, base_rel, quote_rel, macro_rel)
+            base_weight = (
+                relevance * 0.45
+                + freshness * 0.25
+                + credibility * 0.20
+                + macro_rel * 0.10
             )
-            system = prompt_info['system_prompt']
-            user = prompt_info['user_prompt']
-        else:
-            system = fallback_system
-            user = fallback_user.format(
-                pair=ctx.pair,
-                timeframe=ctx.timeframe,
-                headlines=headlines,
-                memory_context='\n'.join(f"- {m.get('summary', '')}" for m in ctx.memory_context) or '- none',
-            )
+            if macro:
+                importance = _safe_float(item.get('importance'), 0.0) / 3.0
+                base_weight = base_weight * 0.75 + importance * 0.25
+            return _clamp(base_weight, 0.0, 1.0)
 
-        if llm_enabled:
-            llm_res = self.llm.chat(system, user, model=llm_model, db=db)
-            llm_text, llm_degraded = _normalize_llm_text_and_degraded(llm_res, require_text=True)
-            signal = _parse_signal_from_text(llm_text)
-            score = {'bullish': 0.2, 'bearish': -0.2, 'neutral': 0.0}[signal]
-            degraded = llm_degraded
-            summary = llm_text
+        def _raw_polarity(item: dict[str, Any], *, macro: bool = False) -> float:
+            hint = str((item.get('directional_hint') if macro else item.get('sentiment_hint')) or 'unknown').strip().lower()
+            if hint == 'bullish':
+                return 1.0
+            if hint == 'bearish':
+                return -1.0
+            if hint == 'neutral':
+                return 0.0
+            text = str(item.get('title') or item.get('event_name') or '')
+            summary = str(item.get('summary') or '')
+            keyword_score = _headline_keyword_score(f'{text} {summary}')
+            if keyword_score > 0.0:
+                return 1.0
+            if keyword_score < 0.0:
+                return -1.0
+            return 0.0
+
+        def evidence_sign(item: dict[str, Any], *, macro: bool = False) -> float:
+            polarity = _raw_polarity(item, macro=macro)
+            if polarity == 0.0:
+                return 0.0
+
+            inferred = infer_relevance_fields(item, macro=macro)
+            base_rel = inferred['base_currency_relevance']
+            quote_rel = inferred['quote_currency_relevance']
+
+            title = str(item.get('title') or item.get('event_name') or '')
+            summary = str(item.get('summary') or '')
+            text = f'{title} {summary}'.lower()
+            base_hits = alias_hits(text, base_aliases)
+            quote_hits = alias_hits(text, quote_aliases)
+
+            if macro:
+                event_currency = str(item.get('currency') or '').strip().upper()
+                if fx_like_symbol and event_currency == base_asset:
+                    return polarity
+                if fx_like_symbol and event_currency == quote_asset:
+                    return -polarity
+                return polarity * 0.2
+
+            if fx_like_symbol:
+                if base_rel > 0.0 and quote_rel > 0.0:
+                    side_delta = base_rel - quote_rel
+                    if abs(side_delta) >= 0.08:
+                        return polarity * (1.0 if side_delta > 0 else -1.0)
+                if base_hits > 0 and quote_hits == 0:
+                    return polarity
+                if quote_hits > 0 and base_hits == 0:
+                    return -polarity
+                if base_hits > 0 and quote_hits > 0:
+                    return polarity * 0.15
+
+            text = str(item.get('title') or item.get('event_name') or '')
+            if alias_hits(text, symbol_aliases) > 0:
+                return polarity * 0.85
+
+            heuristic_signal, _ = _deterministic_headline_sentiment(f'- {text}', pair=provider_symbol or ctx.pair)
+            if heuristic_signal == 'bullish':
+                return 1.0
+            if heuristic_signal == 'bearish':
+                return -1.0
+            return polarity * 0.2
+
+        relevant_news: list[dict[str, Any]] = []
+        relevant_macro: list[dict[str, Any]] = []
+        directional_sum = 0.0
+        weight_sum = 0.0
+        bullish_weight = 0.0
+        bearish_weight = 0.0
+
+        for item in valid_news:
+            enriched = dict(item)
+            inferred = infer_relevance_fields(enriched, macro=False)
+            enriched.update(inferred)
+            enriched.setdefault('type', 'article')
+            weight = evidence_weight(enriched, macro=False)
+            if weight < min_relevance:
+                continue
+            sign = evidence_sign(enriched, macro=False)
+            contribution = sign * weight
+            directional_sum += contribution
+            weight_sum += abs(weight)
+            if contribution > 0:
+                bullish_weight += contribution
+            elif contribution < 0:
+                bearish_weight += abs(contribution)
+            relevant_news.append(enriched)
+
+        for item in valid_macro_events:
+            enriched = dict(item)
+            inferred = infer_relevance_fields(enriched, macro=True)
+            enriched.update(inferred)
+            enriched.setdefault('type', 'macro_event')
+            weight = evidence_weight(enriched, macro=True)
+            if weight < min_relevance:
+                continue
+            sign = evidence_sign(enriched, macro=True)
+            contribution = sign * weight
+            directional_sum += contribution
+            weight_sum += abs(weight)
+            if contribution > 0:
+                bullish_weight += contribution
+            elif contribution < 0:
+                bearish_weight += abs(contribution)
+            relevant_macro.append(enriched)
+
+        relevant_total = len(relevant_news) + len(relevant_macro)
+        mixed_signals = bullish_weight > 0.15 and bearish_weight > 0.15 and abs(directional_sum) <= max(weight_sum * 0.2, 0.08)
+        directional_edge = directional_sum / weight_sum if weight_sum > 0.0 else 0.0
+        score = round(_clamp(directional_edge, -1.0, 1.0), 3)
+
+        if relevant_total == 0:
+            coverage = 'none'
+        elif relevant_total <= 2:
+            coverage = 'low'
+        elif relevant_total <= 6:
+            coverage = 'medium'
         else:
-            signal, score = _deterministic_headline_sentiment(headlines)
-            if runtime_skills:
-                score *= 0.8
-            score = round(float(score), 3)
+            coverage = 'high'
+
+        if relevant_total == 0:
+            signal = 'neutral'
+        elif score >= 0.10:
+            signal = 'bullish'
+        elif score <= -0.10:
+            signal = 'bearish'
+        else:
+            signal = 'neutral'
+
+        if relevant_total == 0:
+            confidence = 0.08
+        else:
+            coverage_component = {'low': 0.28, 'medium': 0.45, 'high': 0.62}.get(coverage, 0.28)
+            edge_component = min(abs(score), 1.0) * 0.30
+            confidence = _clamp(coverage_component + edge_component, 0.08, 0.95)
+            if mixed_signals:
+                confidence = _clamp(confidence * 0.7, 0.08, 0.95)
+        confidence = round(confidence, 3)
+
+        if fetch_status == 'error' and relevant_total == 0:
+            degraded = True
+            information_state = 'provider_failure'
+            decision_mode = 'source_degraded'
+            reason = 'All enabled news providers failed to return usable evidence'
+            summary = 'News providers failed during collection; the news analyst contributes no directional edge.'
+        elif relevant_total == 0:
             degraded = False
-            summary = 'LLM disabled for news-analyst. Deterministic skill-aware fallback.'
+            information_state = 'no_recent_news'
+            decision_mode = 'no_evidence'
+            reason = 'No recent relevant news or macro events were available from enabled providers'
+            summary = 'No fresh relevant news evidence was found; the news analyst contributes no directional bias.'
+            score = 0.0
+            signal = 'neutral'
+        elif mixed_signals:
+            degraded = False
+            information_state = 'mixed_signals'
+            decision_mode = 'neutral_from_mixed_news'
+            reason = 'Enabled providers returned mixed base-vs-quote directional catalysts with no dominant edge'
+            summary = 'News and macro evidence were mixed; no clean directional bias was retained.'
+            signal = 'neutral'
+            score = round(score * 0.35, 3)
+        elif coverage == 'low':
+            degraded = False
+            information_state = 'insufficient_relevance'
+            decision_mode = 'neutral_from_low_relevance' if signal == 'neutral' else 'directional'
+            reason = 'Evidence relevance remained low after filtering by pair proximity and freshness'
+            summary = 'Only low-coverage relevant evidence was available; directional conviction is reduced.'
+            score = round(score * 0.55, 3)
+        else:
+            degraded = False
+            if relevant_macro and not relevant_news:
+                information_state = 'macro_only'
+            elif relevant_news and not relevant_macro:
+                information_state = 'market_news_only'
+            else:
+                information_state = 'clear_directional_bias'
+            decision_mode = 'directional'
+            reason = 'Relevant news and macro evidence produced a directional edge'
+            summary = 'News evidence produced a directional edge with controlled confidence.'
+
+        llm_summary = ''
+        llm_fallback_used = False
+        llm_retry_used = False
+        llm_call_attempted = False
+        llm_skipped_reason: str | None = None
+        prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
+        system = ''
+        user = ''
+
+        if not llm_enabled and relevant_total > 0:
+            summary = 'LLM disabled for news-analyst. Deterministic skill-aware fallback used.'
+            llm_skipped_reason = 'llm_disabled'
+
+        should_call_llm = (
+            llm_enabled
+            and not degraded
+            and decision_mode in {'directional', 'neutral_from_mixed_news'}
+            and coverage in {'medium', 'high'}
+        )
+        if llm_enabled and not should_call_llm and llm_skipped_reason is None:
+            if degraded:
+                llm_skipped_reason = 'source_degraded'
+            elif coverage not in {'medium', 'high'}:
+                llm_skipped_reason = f'coverage_{coverage}'
+            else:
+                llm_skipped_reason = f'decision_mode_{decision_mode}'
+        if should_call_llm:
+            llm_call_attempted = True
+            evidence_lines: list[str] = []
+            for item in (relevant_news[:4] + relevant_macro[:2]):
+                if item.get('type') == 'macro_event':
+                    evidence_lines.append(
+                        f"- [macro] {item.get('event_name')} ({item.get('currency')}) importance={item.get('importance')}"
+                    )
+                else:
+                    title = _compact_prompt_text(item.get('title'), max_chars=170)
+                    summary = _compact_prompt_text(
+                        item.get('summary') or item.get('description'),
+                        max_chars=220,
+                    )
+                    published = str(item.get('published_at') or item.get('published') or '').strip()
+                    published_short = published[:10] if published else 'na'
+                    pair_rel = round(_clamp(_safe_float(item.get('pair_relevance'), 0.0), 0.0, 1.0), 2)
+                    hint = str(item.get('sentiment_hint') or 'unknown').strip().lower() or 'unknown'
+                    evidence_lines.append(
+                        f"- [news] {title} (date={published_short}, rel={pair_rel}, hint={hint}) | {summary or 'no summary'}"
+                    )
+            evidence_text = '\n'.join(evidence_lines) or '- none'
+
+            fallback_system = (
+                'Tu es un analyste news multi-actifs. '
+                'Confirme ou invalide un biais directionnel en restant strict et concis.'
+            )
+            fallback_user = (
+                'Pair: {pair}\nTimeframe: {timeframe}\nCoverage: {coverage}\n'
+                'Signal déterministe initial: {signal}\nScore initial: {score}\n'
+                'Titres:\n{headlines}\n'
+                'Réponds sur une seule ligne: bullish|bearish|neutral puis une justification <=20 mots.'
+            )
+            if db is not None:
+                prompt_info = self.prompt_service.render(
+                    db=db,
+                    agent_name=self.name,
+                    fallback_system=fallback_system,
+                    fallback_user=fallback_user,
+                    variables={
+                        'pair': ctx.pair,
+                        'timeframe': ctx.timeframe,
+                        'coverage': coverage,
+                        'signal': signal,
+                        'score': score,
+                        'evidence': evidence_text,
+                        'memory_context': _compact_memory_for_prompt(ctx.memory_context, limit=3),
+                        'headlines': evidence_text,
+                    },
+                )
+                system = prompt_info['system_prompt']
+                user = prompt_info['user_prompt']
+            else:
+                system = fallback_system
+                user = fallback_user.format(
+                    pair=ctx.pair,
+                    timeframe=ctx.timeframe,
+                    coverage=coverage,
+                    signal=signal,
+                    score=score,
+                    headlines=evidence_text,
+                    evidence=evidence_text,
+                )
+            system, user = _optimize_news_prompts_for_latency(system, user)
+
+            llm_res = self.llm.chat(
+                system,
+                user,
+                model=llm_model,
+                db=db,
+                max_tokens=96,
+                temperature=0.1,
+                request_timeout_seconds=45.0,
+            )
+            llm_text, llm_degraded = _normalize_llm_text_and_degraded(llm_res, require_text=True)
+
+            if _should_retry_empty_llm_response(llm_res, llm_text, llm_degraded):
+                llm_retry_used = True
+                llm_res = self.llm.chat(
+                    system,
+                    user,
+                    model=llm_model,
+                    db=db,
+                    max_tokens=384,
+                    temperature=0.0,
+                    request_timeout_seconds=45.0,
+                )
+                llm_text, llm_degraded = _normalize_llm_text_and_degraded(llm_res, require_text=True)
+
+            llm_summary = llm_text
+            if not llm_degraded and llm_text.strip():
+                llm_signal = _parse_signal_from_text(llm_text)
+                llm_bias = {'bullish': 0.08, 'bearish': -0.08, 'neutral': 0.0}[llm_signal]
+                score = round(_clamp(score * 0.9 + llm_bias * 0.1, -1.0, 1.0), 3)
+                if llm_signal in {'bullish', 'bearish'} and signal == 'neutral':
+                    signal = llm_signal
+                # Keep the reported signal and score directionally coherent for traceability.
+                if signal == 'bullish' and score <= 0.0:
+                    score = round(max(abs(score), 0.01), 3)
+                elif signal == 'bearish' and score >= 0.0:
+                    score = round(-max(abs(score), 0.01), 3)
+                llm_fallback_used = False
+                summary = llm_text
+            else:
+                llm_fallback_used = True
+                if not llm_summary.strip():
+                    llm_summary = _build_empty_llm_summary(llm_res, retried=llm_retry_used)
+                summary = 'LLM degraded for news-analyst. Deterministic skill-aware fallback used.'
+        elif not llm_summary.strip() and llm_skipped_reason:
+            llm_summary = f'LLM not called ({llm_skipped_reason})'
+
+        top_evidence = []
+        for item in (relevant_news[:4] + relevant_macro[:3]):
+            if item.get('type') == 'macro_event':
+                top_evidence.append(
+                    {
+                        'provider': item.get('provider'),
+                        'type': 'macro_event',
+                        'event_name': item.get('event_name'),
+                        'currency': item.get('currency'),
+                        'importance': item.get('importance'),
+                        'published_at': item.get('published_at'),
+                        'pair_relevance': item.get('pair_relevance'),
+                        'directional_hint': item.get('directional_hint'),
+                    }
+                )
+            else:
+                top_evidence.append(
+                    {
+                        'provider': item.get('provider'),
+                        'type': 'article',
+                        'title': item.get('title'),
+                        'url': item.get('url') or item.get('link'),
+                        'published_at': item.get('published_at') or item.get('published'),
+                        'summary': _compact_prompt_text(item.get('summary'), max_chars=300) or None,
+                        'description': _compact_prompt_text(item.get('description'), max_chars=300) or None,
+                        'publisher': item.get('publisher') or item.get('source_name'),
+                        'source_name': item.get('source_name') or item.get('publisher'),
+                        'pair_relevance': item.get('pair_relevance'),
+                        'sentiment_hint': item.get('sentiment_hint'),
+                    }
+                )
 
         resolved_skills = list(prompt_info.get('skills', runtime_skills)) if isinstance(prompt_info, dict) else list(runtime_skills)
         output = {
             'signal': signal,
-            'score': score,
+            'score': round(_clamp(score, -1.0, 1.0), 3),
+            'confidence': confidence,
+            'coverage': coverage,
+            'information_state': information_state,
+            'decision_mode': decision_mode,
+            'reason': reason,
             'summary': summary,
             'news_count': len(valid_news),
+            'macro_event_count': len(valid_macro_events),
+            'provider_status': provider_status,
+            'evidence': top_evidence,
+            'provider_symbol': provider_symbol,
+            'provider_reason': provider_reason,
+            'provider_symbols_scanned': provider_symbols_scanned,
+            'llm_fallback_used': llm_fallback_used,
+            'llm_retry_used': llm_retry_used,
+            'llm_call_attempted': llm_call_attempted,
+            'llm_skipped_reason': llm_skipped_reason,
+            'llm_summary': llm_summary,
             'degraded': degraded,
+            'fetch_status': fetch_status,
             'prompt_meta': {
                 'prompt_id': prompt_info.get('prompt_id'),
                 'prompt_version': prompt_info.get('version', 0),
@@ -740,8 +1420,8 @@ class NewsAnalystAgent:
         _enrich_prompt_meta_debug(
             output['prompt_meta'],
             runtime_skills=resolved_skills,
-            system_prompt=system,
-            user_prompt=user,
+            system_prompt=system if system else None,
+            user_prompt=user if user else None,
         )
         return output
 
@@ -1146,7 +1826,54 @@ class TraderAgent:
         bearish: dict[str, Any],
         db: Session | None = None,
     ) -> dict[str, Any]:
-        net_score = round(sum(float(v.get('score', 0.0) or 0.0) for v in agent_outputs.values()), 3)
+        news_output_name: str | None = None
+        news_output: dict[str, Any] | None = None
+        if isinstance(agent_outputs.get('news-analyst'), dict):
+            news_output_name = 'news-analyst'
+            news_output = agent_outputs.get('news-analyst')
+        elif isinstance(agent_outputs.get('news'), dict):
+            news_output_name = 'news'
+            news_output = agent_outputs.get('news')
+        else:
+            for name, output in agent_outputs.items():
+                if 'news' in str(name).lower() and isinstance(output, dict):
+                    news_output_name = str(name)
+                    news_output = output
+                    break
+
+        news_coverage = str((news_output or {}).get('coverage') or 'medium').strip().lower()
+        news_weight_multiplier = {
+            'none': 0.0,
+            'low': 0.35,
+            'medium': 1.0,
+            'high': 1.0,
+        }.get(news_coverage, 1.0)
+        if bool((news_output or {}).get('degraded')):
+            news_weight_multiplier = min(news_weight_multiplier, 0.35)
+        if str((news_output or {}).get('decision_mode') or '') == 'source_degraded':
+            news_weight_multiplier = 0.0
+
+        weighted_agent_scores: dict[str, float] = {}
+        raw_net_score = 0.0
+        for name, output in agent_outputs.items():
+            if not isinstance(output, dict):
+                continue
+            raw_score = float(output.get('score', 0.0) or 0.0)
+            raw_net_score += raw_score
+            effective_score = raw_score
+            if news_output_name is not None and name == news_output_name:
+                effective_score = round(raw_score * news_weight_multiplier, 4)
+            weighted_agent_scores[str(name)] = effective_score
+
+        net_score = round(raw_net_score if not weighted_agent_scores else sum(weighted_agent_scores.values()), 3)
+        raw_net_score = round(raw_net_score, 3)
+        news_score_raw = float((news_output or {}).get('score', 0.0) or 0.0)
+        news_score_effective = (
+            weighted_agent_scores.get(news_output_name, news_score_raw)
+            if news_output_name is not None
+            else news_score_raw
+        )
+
         bullish_confidence = min(max(float(bullish.get('confidence', 0.0) or 0.0), 0.0), 1.0)
         bearish_confidence = min(max(float(bearish.get('confidence', 0.0) or 0.0), 0.0), 1.0)
         debate_balance = round(bullish_confidence - bearish_confidence, 3)
@@ -1211,7 +1938,7 @@ class TraderAgent:
         for name, output in agent_outputs.items():
             if not isinstance(output, dict):
                 continue
-            score = float(output.get('score', 0.0) or 0.0)
+            score = weighted_agent_scores.get(str(name), float(output.get('score', 0.0) or 0.0))
             signal = str(output.get('signal', '') or '').strip().lower()
             if signal not in {'bullish', 'bearish', 'neutral'}:
                 default_threshold = 0.15 if 'technical' in str(name).lower() else 0.05
@@ -1546,7 +2273,12 @@ class TraderAgent:
             'decision_confidence': confidence,
             'edge_strength': edge_strength,
             'evidence_quality': evidence_quality,
+            'raw_net_score': raw_net_score,
             'net_score': net_score,
+            'news_coverage': news_coverage,
+            'news_weight_multiplier': round(news_weight_multiplier, 3),
+            'news_score_raw': round(news_score_raw, 4),
+            'news_score_effective': round(float(news_score_effective), 4),
             'debate_score': debate_score,
             'combined_score': combined_score,
             'combined_score_before_memory': round(combined_score_before_memory, 3),
@@ -1587,6 +2319,11 @@ class TraderAgent:
                 'bullish_confidence': bullish_confidence,
                 'bearish_confidence': bearish_confidence,
                 'base_net_score': net_score,
+                'raw_net_score': raw_net_score,
+                'news_coverage': news_coverage,
+                'news_weight_multiplier': round(news_weight_multiplier, 3),
+                'news_score_raw': round(news_score_raw, 4),
+                'news_score_effective': round(float(news_score_effective), 4),
                 'source_consensus_score': round(source_alignment_score, 3),
                 'debate_score': debate_score,
                 'raw_combined_score': raw_combined_score,
@@ -1706,6 +2443,9 @@ class TraderAgent:
                         [
                             f'decision_mode={decision_mode}',
                             f'net_score={net_score}',
+                            f'raw_net_score={raw_net_score}',
+                            f'news_coverage={news_coverage}',
+                            f'news_weight_multiplier={round(news_weight_multiplier, 3)}',
                             f'debate_score={debate_score}',
                             f'combined_score={combined_score}',
                             f'combined_score_before_memory={combined_score_before_memory}',
@@ -1742,6 +2482,9 @@ class TraderAgent:
                     [
                         f'decision_mode={decision_mode}',
                         f'net_score={net_score}',
+                        f'raw_net_score={raw_net_score}',
+                        f'news_coverage={news_coverage}',
+                        f'news_weight_multiplier={round(news_weight_multiplier, 3)}',
                         f'debate_score={debate_score}',
                         f'combined_score={combined_score}',
                         f'combined_score_before_memory={combined_score_before_memory}',

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from string import Formatter
 from typing import Any
 
@@ -140,6 +141,22 @@ class SafeDict(dict):
 class PromptTemplateService:
     def __init__(self) -> None:
         self.model_selector = AgentModelSelector()
+
+    @staticmethod
+    def _normalize_legacy_market_wording(text: str) -> str:
+        normalized = str(text or '')
+        replacements = (
+            (r'(?i)\bforex\b', 'marchés multi-actifs'),
+            (r'(?i)\bfx\b', 'multi-actifs'),
+            (r'(?i)(?:la\s+)?devise de base et la devise de cotation du pair', "l'actif analysé et son actif de référence"),
+            (r'(?i)devise de base', 'actif principal'),
+            (r'(?i)devise de cotation', 'actif de référence'),
+            (r'(?i)\bpair analysé\b', 'symbole analysé'),
+            (r'(?i)\bdu pair\b', 'du symbole'),
+        )
+        for pattern, repl in replacements:
+            normalized = re.sub(pattern, repl, normalized)
+        return normalized
 
     @staticmethod
     def _language_directive_for_agent(agent_name: str) -> str:
@@ -284,7 +301,12 @@ class PromptTemplateService:
             prompt_version = 0
             prompt_id = None
 
-        skills = self.model_selector.resolve_skills(db, agent_name)
+        system_prompt = self._normalize_legacy_market_wording(system_prompt)
+        user_template = self._normalize_legacy_market_wording(user_template)
+        skills = [
+            self._normalize_legacy_market_wording(item)
+            for item in self.model_selector.resolve_skills(db, agent_name)
+        ]
         system_prompt = self._append_skills_block(system_prompt, skills)
         required_vars = self._required_template_variables(user_template)
         missing_variables = [key for key in required_vars if key not in variables]

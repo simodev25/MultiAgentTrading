@@ -226,7 +226,7 @@ sequenceDiagram
 | Agent | Role | Noyau deterministe | LLM par defaut | Output cle |
 |---|---|---|---|---|
 | `technical-analyst` | bias technique | trend (+/-0.35), RSI (+/-0.25), MACD (+/-0.2), seuil signal 0.15 | OFF | `signal`, `score`, `indicators` |
-| `news-analyst` | sentiment news | fallback headlines keywords (+/-0.05..0.15) si LLM OFF | ON | `signal`, `score`, `summary`, `news_count` |
+| `news-analyst` | sentiment news/macro multi-provider | agrégation déterministe (relevance/freshness/credibility/importance) + fallback si LLM dégradé | ON | `signal`, `score`, `coverage`, `decision_mode`, `fetch_status`, `news_count`, `macro_event_count` |
 | `macro-analyst` | biais macro proxy | ATR/price > 0.01 -> neutral sinon suit trend (+/-0.1) | OFF | `signal`, `score`, `reason` |
 | `sentiment-agent` | momentum court terme | `change_pct` > 0.1 => +0.1, < -0.1 => -0.1 | OFF | `signal`, `score`, `reason` |
 | `bullish-researcher` | these haussiere | somme scores positifs capee [0,1] | ON | `arguments`, `confidence`, `llm_debate` |
@@ -243,8 +243,9 @@ Notes:
 
 ### 7.1 Formules de score
 
-1. `net_score`  
-Somme des `score` des 4 analystes.
+1. `raw_net_score` et `net_score`  
+- `raw_net_score`: somme brute des `score` des analystes.  
+- `net_score`: somme pondérée, avec modulation du score `news-analyst` selon `coverage` (`none=0.0`, `low=0.35`, `medium/high=1.0`).
 
 2. `debate_score`  
 - `preliminary_signal` selon signe de `net_score`

@@ -1,6 +1,6 @@
 # Multi-agent roles (V1)
 
-Ce fichier résume chaque agent de l’orchestrateur (ordre `FOREX` workflow) et leurs entrées/sorties clés.
+Ce fichier résume chaque agent de l’orchestrateur (workflow de trading multi-actifs) et leurs entrées/sorties clés.
 
 ## technical-analyst
 - Objectif: biais directionnel à partir des indicateurs techniques.
@@ -11,11 +11,16 @@ Ce fichier résume chaque agent de l’orchestrateur (ordre `FOREX` workflow) et
 - Skills: injectés dans system prompt si configurés (agent_skills).
 
 ## news-analyst
-- Objectif: sentiment directionnel depuis les news Yahoo + mémoire.
-- Entrées: premiers titres (max 5), memory_context, pair, timeframe.
-- Déterministe fallback: neutral si pas de news.
-- LLM (on par défaut): prompt seed `news-analyst`, applique skills. Score +0.2/-0.2 selon bullish/bearish, sinon 0.
-- Sorties: signal, score, summary (texte LLM ou fallback), news_count, degraded, prompt_meta.
+- Objectif: produire un biais directionnel gouvernable à partir d’un agrégat news/macro multi-provider.
+- Entrées: `news`, `macro_events`, `provider_status`, `fetch_status`, `memory_context`, `pair`, `timeframe`.
+- Providers: Yahoo Finance, NewsAPI, TradingEconomics, Finnhub, AlphaVantage (activables/désactivables par config).
+- Déterministe:
+  - normalisation + filtrage pertinence + agrégation directionnelle,
+  - séparation claire `no_evidence` vs `mixed_signals` vs `source_degraded`.
+- LLM (on par défaut): affinement borné sur preuves pertinentes (coverage medium/high), fallback déterministe si timeout/erreur.
+- Sorties legacy conservées: `signal`, `score`, `reason`, `summary`, `news_count`, `degraded`, `prompt_meta`.
+- Sorties ajoutées: `confidence`, `coverage`, `information_state`, `decision_mode`, `macro_event_count`, `provider_status`, `evidence`, `fetch_status`, `llm_fallback_used`, `llm_summary`.
+- Détails complets: `docs/news-analyst-multi-provider.md`.
 
 ## macro-analyst
 - Objectif: biais macro via volatilité ATR et trend.
@@ -48,11 +53,16 @@ Ce fichier résume chaque agent de l’orchestrateur (ordre `FOREX` workflow) et
 ## trader-agent
 - Objectif: décision finale BUY/SELL/HOLD + SL/TP.
 - Entrées: outputs des analystes, bullish/bearish packages, market_snapshot (atr, last_price), memory_context.
-- Déterministe: `net_score` = somme des scores analystes; `debate_score` = score de consensus de sources directionnelles (pas une simple copie de `bull_conf - bear_conf`); `combined_score` = score brut ajusté des pénalités de contradiction. Le gating final combine seuils (`min_combined_score`, `min_confidence`, `min_aligned_sources`) et garde-fous (`technical_neutral_gate`, `minimum_evidence_ok`, contradiction trend/MACD).
+- Déterministe:
+  - `raw_net_score` = somme brute des scores analystes,
+  - `net_score` = somme pondérée (le score `news-analyst` est modulé par `coverage`: `none=0`, `low=0.35`, `medium/high=1.0`),
+  - `debate_score` = score de consensus de sources directionnelles,
+  - `combined_score` = score brut ajusté des pénalités de contradiction et modulation mémoire.
+- Le gating final combine seuils (`min_combined_score`, `min_confidence`, `min_aligned_sources`) et garde-fous (`technical_neutral_gate`, `minimum_evidence_ok`, contradiction trend/MACD, memory risk block).
 - Mode par défaut: `conservative` (strict). Le mode actif est résolu via `connector_configs.settings.decision_mode` (fallback `.env DECISION_MODE`).
 - SL/TP: si prix dispo, SL = ATR*1.5 (sinon 0.3%) / TP = ATR*2.5 (sinon 0.6%), adaptés au side.
 - LLM (off par défaut): prompt seed `trader-agent`, produit execution_note.
-- Sorties: decision, confidence, net_score, debate_score, combined_score, decision_mode, execution_allowed, `minimum_evidence_ok`, `score_gate_ok`, `source_gate_ok`, `quality_gate_ok`, `decision_gates`, stop_loss, take_profit, rationale détaillée, execution_note, prompt_meta.
+- Sorties: decision, confidence, `raw_net_score`, `net_score`, `news_coverage`, `news_weight_multiplier`, `news_score_raw`, `news_score_effective`, debate_score, combined_score, decision_mode, execution_allowed, `minimum_evidence_ok`, `score_gate_ok`, `source_gate_ok`, `quality_gate_ok`, `decision_gates`, stop_loss, take_profit, rationale détaillée, execution_note, prompt_meta.
 
 ## risk-manager
 - Objectif: valider ou rejeter la proposition (exposition) en priorité via règles de risque.

@@ -142,7 +142,20 @@ class ForexOrchestrator:
             if not isinstance(output, dict):
                 continue
             compact_output: dict[str, Any] = {}
-            for key in ('signal', 'score', 'reason', 'summary', 'llm_summary', 'news_count', 'degraded'):
+            for key in (
+                'signal',
+                'score',
+                'reason',
+                'summary',
+                'llm_summary',
+                'news_count',
+                'macro_event_count',
+                'coverage',
+                'information_state',
+                'decision_mode',
+                'fetch_status',
+                'degraded',
+            ):
                 if key in output:
                     compact_output[key] = output.get(key)
             indicators = output.get('indicators')
@@ -420,7 +433,13 @@ class ForexOrchestrator:
                 ),
                 (
                     self.news_agent.name,
-                    {'news_count': len(context.news_context.get('news', [])), 'memory_context': context.memory_context},
+                    {
+                        'news_count': len(context.news_context.get('news', [])),
+                        'memory_context': context.memory_context,
+                        'news_symbol': context.news_context.get('symbol'),
+                        'news_reason': context.news_context.get('reason'),
+                        'news_symbols_scanned': context.news_context.get('symbols_scanned', []),
+                    },
                     lambda local_db: self.news_agent.run(context, db=local_db),
                 ),
                 (

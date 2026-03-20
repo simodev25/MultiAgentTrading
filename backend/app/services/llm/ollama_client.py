@@ -5,6 +5,7 @@ from typing import Any
 from urllib.parse import urlparse, urlunparse
 
 import httpx
+from sqlalchemy.orm import Session
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.core.config import get_settings
@@ -18,6 +19,7 @@ from app.observability.metrics import (
     llm_latency_seconds,
     llm_prompt_tokens_total,
 )
+from app.services.connectors.runtime_settings import RuntimeConnectorSettings
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +61,13 @@ class OllamaCloudClient:
             cls._shared_client_timeout_seconds = safe_timeout
             return cls._shared_client
 
-    def _normalized_api_key(self) -> str:
-        key = (self.settings.ollama_api_key or '').strip()
+    def _normalized_api_key(self, db: Session | None = None) -> str:
+        del db  # Runtime connector settings are resolved without DB session injection.
+        runtime_key = RuntimeConnectorSettings.get_string(
+            'ollama',
+            ('OLLAMA_API_KEY', 'ollama_api_key'),
+        )
+        key = (runtime_key or self.settings.ollama_api_key or '').strip()
         if len(key) >= 2 and key[0] == key[-1] and key[0] in {'"', "'"}:
             key = key[1:-1].strip()
         return key
@@ -93,8 +100,8 @@ class OllamaCloudClient:
 
         return base_url
 
-    def is_configured(self, base_url: str | None = None) -> bool:
-        key = self._normalized_api_key()
+    def is_configured(self, base_url: str | None = None, *, db: Session | None = None) -> bool:
+        key = self._normalized_api_key(db=db)
         if not key:
             return False
         if key.lower() in {'replace_me', 'changeme', 'change-me', 'your_api_key'}:
@@ -146,8 +153,15 @@ class OllamaCloudClient:
         retry=retry_if_exception(_is_retryable_ollama_error),
         reraise=True,
     )
-    def _call_remote(self, url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
-        client = self._get_http_client(self.settings.ollama_timeout_seconds)
+    def _call_remote(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        effective_timeout = self.settings.ollama_timeout_seconds if timeout_seconds is None else float(timeout_seconds)
+        client = self._get_http_client(effective_timeout)
         response = client.post(url, json=payload, headers=headers)
         response.raise_for_status()
         return response.json()
@@ -159,8 +173,16 @@ class OllamaCloudClient:
         completion_tokens = int(data.get('eval_count') or data.get('completion_tokens') or 0)
         return text, prompt_tokens, completion_tokens
 
-    def _build_chat_payload(self, model: str, system_prompt: str, user_prompt: str) -> dict[str, Any]:
-        return {
+    def _build_chat_payload(
+        self,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             'model': model,
             'messages': [
                 {'role': 'system', 'content': system_prompt},
@@ -168,10 +190,18 @@ class OllamaCloudClient:
             ],
             'stream': False,
         }
+        options: dict[str, Any] = {}
+        if max_tokens is not None:
+            options['num_predict'] = int(max(max_tokens, 1))
+        if temperature is not None:
+            options['temperature'] = float(temperature)
+        if options:
+            payload['options'] = options
+        return payload
 
-    def list_models(self) -> dict[str, Any]:
+    def list_models(self, db: Session | None = None) -> dict[str, Any]:
         base_url = self._normalized_base_url()
-        api_key = self._normalized_api_key()
+        api_key = self._normalized_api_key(db=db)
         timeout = max(min(int(self.settings.ollama_timeout_seconds), 30), 5)
 
         candidate_urls: list[str] = []
@@ -206,13 +236,41 @@ class OllamaCloudClient:
 
         return {'provider': 'ollama', 'models': [], 'source': None, 'error': '; '.join(errors[:2])}
 
-    def chat(self, system_prompt: str, user_prompt: str, model: str | None = None) -> dict[str, Any]:
+    def chat(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        model: str | None = None,
+        db: Session | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         provider = 'ollama-cloud'
         selected_model = (model or self.settings.ollama_model or '').strip() or self.settings.ollama_model
         started = time.perf_counter()
         base_url = self._normalized_base_url()
+        max_tokens_raw = kwargs.get('max_tokens')
+        temperature_raw = kwargs.get('temperature')
+        request_timeout_raw = kwargs.get('request_timeout_seconds')
+        max_tokens: int | None = None
+        temperature: float | None = None
+        request_timeout_seconds: float | None = None
+        try:
+            if max_tokens_raw is not None:
+                max_tokens = int(max_tokens_raw)
+        except (TypeError, ValueError):
+            max_tokens = None
+        try:
+            if temperature_raw is not None:
+                temperature = float(temperature_raw)
+        except (TypeError, ValueError):
+            temperature = None
+        try:
+            if request_timeout_raw is not None:
+                request_timeout_seconds = float(request_timeout_raw)
+        except (TypeError, ValueError):
+            request_timeout_seconds = None
 
-        if not self.is_configured(base_url=base_url):
+        if not self.is_configured(base_url=base_url, db=db):
             latency = time.perf_counter() - started
             llm_calls_total.labels(provider='fallback', status='degraded').inc()
             llm_latency_seconds.labels(provider='fallback', model=selected_model, status='degraded').observe(latency)
@@ -237,14 +295,20 @@ class OllamaCloudClient:
             }
 
         url = f"{base_url}/api/chat"
-        payload = self._build_chat_payload(selected_model, system_prompt, user_prompt)
+        payload = self._build_chat_payload(
+            selected_model,
+            system_prompt,
+            user_prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
         headers = {
-            'Authorization': f"Bearer {self._normalized_api_key()}",
+            'Authorization': f"Bearer {self._normalized_api_key(db=db)}",
             'Content-Type': 'application/json',
         }
 
         try:
-            data = self._call_remote(url, payload, headers)
+            data = self._call_remote(url, payload, headers, timeout_seconds=request_timeout_seconds)
             text, prompt_tokens, completion_tokens = self._extract_usage(data)
             cost_usd = self._estimate_cost_usd(prompt_tokens, completion_tokens)
             latency = time.perf_counter() - started
@@ -299,8 +363,15 @@ class OllamaCloudClient:
                     )
                     fallback_data = self._call_remote(
                         url,
-                        self._build_chat_payload(fallback_model, system_prompt, user_prompt),
+                        self._build_chat_payload(
+                            fallback_model,
+                            system_prompt,
+                            user_prompt,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                        ),
                         headers,
+                        timeout_seconds=request_timeout_seconds,
                     )
                     text, prompt_tokens, completion_tokens = self._extract_usage(fallback_data)
                     cost_usd = self._estimate_cost_usd(prompt_tokens, completion_tokens)

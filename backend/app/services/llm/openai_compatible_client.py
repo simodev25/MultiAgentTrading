@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 import httpx
+from sqlalchemy.orm import Session
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.core.config import get_settings
@@ -19,6 +20,7 @@ from app.observability.metrics import (
     llm_latency_seconds,
     llm_prompt_tokens_total,
 )
+from app.services.connectors.runtime_settings import RuntimeConnectorSettings
 
 logger = logging.getLogger(__name__)
 
@@ -58,11 +60,20 @@ class OpenAICompatibleClient:
             return 'Mistral'
         return 'OpenAI'
 
-    def _normalized_api_key(self) -> str:
+    def _normalized_api_key(self, db: Session | None = None) -> str:
+        del db  # Runtime connector settings are resolved without DB session injection.
         if self.provider == 'mistral':
-            key = (self.settings.mistral_api_key or '').strip()
+            runtime_key = RuntimeConnectorSettings.get_string(
+                'ollama',
+                ('MISTRAL_API_KEY', 'mistral_api_key'),
+            )
+            key = (runtime_key or self.settings.mistral_api_key or '').strip()
         else:
-            key = (self.settings.openai_api_key or '').strip()
+            runtime_key = RuntimeConnectorSettings.get_string(
+                'ollama',
+                ('OPENAI_API_KEY', 'openai_api_key'),
+            )
+            key = (runtime_key or self.settings.openai_api_key or '').strip()
         if len(key) >= 2 and key[0] == key[-1] and key[0] in {'"', "'"}:
             key = key[1:-1].strip()
         return key
@@ -86,8 +97,8 @@ class OpenAICompatibleClient:
             return float(self.settings.mistral_timeout_seconds)
         return float(self.settings.openai_timeout_seconds)
 
-    def is_configured(self, base_url: str | None = None) -> bool:
-        key = self._normalized_api_key()
+    def is_configured(self, base_url: str | None = None, *, db: Session | None = None) -> bool:
+        key = self._normalized_api_key(db=db)
         if not key:
             return False
         if key.lower() in {'replace_me', 'changeme', 'change-me', 'your_api_key'}:
@@ -197,8 +208,15 @@ class OpenAICompatibleClient:
         return prompt_tokens, completion_tokens
 
     @staticmethod
-    def _build_chat_payload(model: str, system_prompt: str, user_prompt: str) -> dict[str, Any]:
-        return {
+    def _build_chat_payload(
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             'model': model,
             'messages': [
                 {'role': 'system', 'content': system_prompt},
@@ -206,10 +224,15 @@ class OpenAICompatibleClient:
             ],
             'stream': False,
         }
+        if max_tokens is not None:
+            payload['max_tokens'] = int(max(max_tokens, 1))
+        if temperature is not None:
+            payload['temperature'] = float(temperature)
+        return payload
 
-    def list_models(self) -> dict[str, Any]:
+    def list_models(self, db: Session | None = None) -> dict[str, Any]:
         base_url = self._normalized_base_url()
-        if not self.is_configured(base_url=base_url):
+        if not self.is_configured(base_url=base_url, db=db):
             return {
                 'provider': self.provider,
                 'models': [],
@@ -218,7 +241,7 @@ class OpenAICompatibleClient:
             }
 
         headers = {
-            'Authorization': f'Bearer {self._normalized_api_key()}',
+            'Authorization': f'Bearer {self._normalized_api_key(db=db)}',
             'Accept': 'application/json',
         }
         url = f'{base_url}/models'
@@ -246,13 +269,34 @@ class OpenAICompatibleClient:
                 'error': str(exc),
             }
 
-    def chat(self, system_prompt: str, user_prompt: str, model: str | None = None) -> dict[str, Any]:
+    def chat(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        model: str | None = None,
+        db: Session | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         provider = self.provider
         selected_model = (model or self._default_model() or '').strip() or self._default_model()
         started = time.perf_counter()
         base_url = self._normalized_base_url()
+        max_tokens_raw = kwargs.get('max_tokens')
+        temperature_raw = kwargs.get('temperature')
+        max_tokens: int | None = None
+        temperature: float | None = None
+        try:
+            if max_tokens_raw is not None:
+                max_tokens = int(max_tokens_raw)
+        except (TypeError, ValueError):
+            max_tokens = None
+        try:
+            if temperature_raw is not None:
+                temperature = float(temperature_raw)
+        except (TypeError, ValueError):
+            temperature = None
 
-        if not self.is_configured(base_url=base_url):
+        if not self.is_configured(base_url=base_url, db=db):
             latency = time.perf_counter() - started
             llm_calls_total.labels(provider='fallback', status='degraded').inc()
             llm_latency_seconds.labels(provider='fallback', model=selected_model, status='degraded').observe(latency)
@@ -277,9 +321,15 @@ class OpenAICompatibleClient:
             }
 
         url = f'{base_url}/chat/completions'
-        payload = self._build_chat_payload(selected_model, system_prompt, user_prompt)
+        payload = self._build_chat_payload(
+            selected_model,
+            system_prompt,
+            user_prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
         headers = {
-            'Authorization': f'Bearer {self._normalized_api_key()}',
+            'Authorization': f'Bearer {self._normalized_api_key(db=db)}',
             'Content-Type': 'application/json',
         }
 
@@ -327,7 +377,13 @@ class OpenAICompatibleClient:
                         'POST',
                         url,
                         headers,
-                        payload=self._build_chat_payload(fallback_model, system_prompt, user_prompt),
+                        payload=self._build_chat_payload(
+                            fallback_model,
+                            system_prompt,
+                            user_prompt,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                        ),
                     )
                     text = self._extract_text(fallback_data)
                     prompt_tokens, completion_tokens = self._extract_usage(fallback_data)

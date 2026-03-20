@@ -21,6 +21,28 @@ def test_market_symbol_candidates_include_suffixless_variant_for_forex() -> None
     assert 'EURUSD.PRO' in candidates
 
 
+def test_metaapi_client_prefers_runtime_connector_settings_for_credentials(monkeypatch) -> None:
+    client = MetaApiClient()
+    client.settings.metaapi_token = 'env-token'
+    client.settings.metaapi_account_id = 'env-account'
+
+    def _fake_get_string(_connector_name: str, keys, **_kwargs) -> str:
+        if 'METAAPI_TOKEN' in keys:
+            return 'runtime-token'
+        if 'METAAPI_ACCOUNT_ID' in keys:
+            return 'runtime-account'
+        return ''
+
+    monkeypatch.setattr(
+        'app.services.trading.metaapi_client.RuntimeConnectorSettings.get_string',
+        _fake_get_string,
+    )
+
+    assert client._resolve_token() == 'runtime-token'
+    assert client._resolve_account_id(None) == 'runtime-account'
+    assert client._resolve_account_id('manual-account') == 'manual-account'
+
+
 def test_market_symbol_candidates_keep_crypto_without_suffix() -> None:
     candidates = MetaApiClient._market_symbol_candidates('BTCUSD')
     assert candidates == ['BTCUSD']

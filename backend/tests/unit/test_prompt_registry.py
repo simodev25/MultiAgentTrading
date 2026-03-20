@@ -53,7 +53,10 @@ def test_prompt_registry_render_appends_agent_skills() -> None:
                 enabled=True,
                 settings={
                     'agent_skills': {
-                        'news-analyst': ['Prioriser impact Forex', 'Citer les risques'],
+                        'news-analyst': [
+                            'Prioriser impact Forex',
+                            'Pondère selon la devise de base et la devise de cotation du pair.',
+                        ],
                     },
                 },
             )
@@ -69,8 +72,12 @@ def test_prompt_registry_render_appends_agent_skills() -> None:
         )
 
         assert 'Skills agent à appliquer:' in rendered['system_prompt']
-        assert '- Prioriser impact Forex' in rendered['system_prompt']
-        assert rendered['skills'] == ['Prioriser impact Forex', 'Citer les risques']
+        assert '- Prioriser impact marchés multi-actifs' in rendered['system_prompt']
+        assert "- Pondère selon l'actif analysé et son actif de référence." in rendered['system_prompt']
+        assert rendered['skills'] == [
+            'Prioriser impact marchés multi-actifs',
+            "Pondère selon l'actif analysé et son actif de référence.",
+        ]
 
 
 def test_prompt_registry_render_marks_missing_variables() -> None:

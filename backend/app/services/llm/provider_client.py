@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -26,23 +27,50 @@ class LlmClient:
             return self.mistral
         return self.ollama
 
+    @staticmethod
+    def _invoke_client_method(method: Any, *args: Any, db: Session | None = None, **kwargs: Any) -> Any:
+        if db is None:
+            return method(*args, **kwargs)
+
+        accepts_kwargs = False
+        accepts_db = False
+        try:
+            signature = inspect.signature(method)
+            for parameter in signature.parameters.values():
+                if parameter.kind is inspect.Parameter.VAR_KEYWORD:
+                    accepts_kwargs = True
+                if parameter.name == 'db':
+                    accepts_db = True
+        except (TypeError, ValueError):
+            accepts_kwargs = True
+
+        if accepts_db or accepts_kwargs:
+            return method(*args, db=db, **kwargs)
+        return method(*args, **kwargs)
+
     def chat(
         self,
         system_prompt: str,
         user_prompt: str,
         model: str | None = None,
         db: Session | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         provider = self._resolve_provider(db)
         client = self._provider_client(provider)
-        if provider == 'ollama':
-            return client.chat(system_prompt, user_prompt, model=model)
-        return client.chat(system_prompt, user_prompt, model=model)
+        return self._invoke_client_method(
+            client.chat,
+            system_prompt,
+            user_prompt,
+            model=model,
+            db=db,
+            **kwargs,
+        )
 
     def list_models(self, db: Session | None = None) -> dict[str, Any]:
         provider = self._resolve_provider(db)
         client = self._provider_client(provider)
-        payload = client.list_models()
+        payload = self._invoke_client_method(client.list_models, db=db)
         if not isinstance(payload, dict):
             return {'provider': provider, 'models': [], 'source': None, 'error': 'Invalid provider response'}
         if 'provider' not in payload:

@@ -1,7 +1,7 @@
 import json
 import os
 from functools import lru_cache
-from typing import Annotated, List
+from typing import Annotated, Any, List
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -114,6 +114,12 @@ class Settings(BaseSettings):
     yfinance_cache_frame_max_rows: int = Field(default=5000, alias='YFINANCE_CACHE_FRAME_MAX_ROWS')
     yfinance_cache_lock_ttl_seconds: float = Field(default=3.0, alias='YFINANCE_CACHE_LOCK_TTL_SECONDS')
     yfinance_cache_wait_timeout_seconds: float = Field(default=1.2, alias='YFINANCE_CACHE_WAIT_TIMEOUT_SECONDS')
+    news_providers: Annotated[dict[str, Any], NoDecode] = Field(default_factory=dict, alias='NEWS_PROVIDERS')
+    news_analysis: Annotated[dict[str, Any], NoDecode] = Field(default_factory=dict, alias='NEWS_ANALYSIS')
+    newsapi_api_key: str = Field(default='', alias='NEWSAPI_API_KEY')
+    tradingeconomics_api_key: str = Field(default='', alias='TRADINGECONOMICS_API_KEY')
+    finnhub_api_key: str = Field(default='', alias='FINNHUB_API_KEY')
+    alphavantage_api_key: str = Field(default='', alias='ALPHAVANTAGE_API_KEY')
 
     allow_live_trading: bool = Field(default=False, alias='ALLOW_LIVE_TRADING')
     enable_paper_execution: bool = Field(default=True, alias='ENABLE_PAPER_EXECUTION')
@@ -211,6 +217,25 @@ class Settings(BaseSettings):
         if normalized in SUPPORTED_DECISION_MODES:
             return normalized
         return 'conservative'
+
+    @field_validator('news_providers', 'news_analysis', mode='before')
+    @classmethod
+    def parse_json_map(cls, value: Any) -> dict[str, Any]:
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return {}
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                return {}
+        return {}
 
 
 @lru_cache

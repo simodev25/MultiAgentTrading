@@ -47,6 +47,48 @@ def test_trader_agent_outputs_buy_when_score_positive() -> None:
     assert result['take_profit'] is not None
 
 
+def test_trader_agent_nullifies_news_score_when_coverage_none() -> None:
+    agent = TraderAgent()
+    ctx = _context()
+    outputs = {
+        'technical-analyst': {'signal': 'bullish', 'score': 0.24},
+        'macro-analyst': {'signal': 'bullish', 'score': 0.12},
+        'sentiment-agent': {'signal': 'neutral', 'score': 0.0},
+        'news-analyst': {'signal': 'bearish', 'score': -0.2, 'coverage': 'none', 'decision_mode': 'no_evidence'},
+    }
+    bullish = {'arguments': ['x'], 'confidence': 0.7}
+    bearish = {'arguments': ['y'], 'confidence': 0.1}
+
+    result = agent.run(ctx, outputs, bullish, bearish)
+
+    assert result['raw_net_score'] == 0.16
+    assert result['net_score'] == 0.36
+    assert result['news_weight_multiplier'] == 0.0
+    assert result['news_score_raw'] == -0.2
+    assert result['news_score_effective'] == 0.0
+
+
+def test_trader_agent_reduces_news_score_when_coverage_low() -> None:
+    agent = TraderAgent()
+    ctx = _context()
+    outputs = {
+        'technical-analyst': {'signal': 'bullish', 'score': 0.2},
+        'macro-analyst': {'signal': 'bullish', 'score': 0.1},
+        'sentiment-agent': {'signal': 'neutral', 'score': 0.0},
+        'news-analyst': {'signal': 'bearish', 'score': -0.2, 'coverage': 'low', 'decision_mode': 'directional'},
+    }
+    bullish = {'arguments': ['x'], 'confidence': 0.8}
+    bearish = {'arguments': ['y'], 'confidence': 0.1}
+
+    result = agent.run(ctx, outputs, bullish, bearish)
+
+    assert result['raw_net_score'] == 0.1
+    assert result['net_score'] == 0.23
+    assert result['news_weight_multiplier'] == 0.35
+    assert result['news_score_raw'] == -0.2
+    assert result['news_score_effective'] == -0.07
+
+
 def test_trader_agent_low_edge_blocks_single_source_setup() -> None:
     agent = TraderAgent()
     ctx = _context()

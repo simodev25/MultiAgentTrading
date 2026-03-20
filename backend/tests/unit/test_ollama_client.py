@@ -30,7 +30,7 @@ def test_chat_falls_back_to_default_model_on_404(monkeypatch) -> None:
     monkeypatch.setattr(client, 'is_configured', lambda **_kwargs: True)
     monkeypatch.setattr(client, '_persist_log', lambda *args, **kwargs: None)
 
-    def fake_call_remote(url: str, payload: dict, headers: dict):
+    def fake_call_remote(url: str, payload: dict, headers: dict, **_kwargs):
         if payload.get('model') == 'llama3.1':
             raise _http_404_error(url)
         return {
@@ -80,3 +80,28 @@ def test_chat_normalizes_base_url_once_per_request(monkeypatch) -> None:
 
     assert result['degraded'] is False
     assert call_count == 1
+
+
+def test_build_chat_payload_applies_generation_options() -> None:
+    client = OllamaCloudClient()
+    payload = client._build_chat_payload(
+        'llama3.1',
+        'system',
+        'user',
+        max_tokens=64,
+        temperature=0.2,
+    )
+
+    assert payload['model'] == 'llama3.1'
+    assert payload['options']['num_predict'] == 64
+    assert payload['options']['temperature'] == 0.2
+
+
+def test_normalized_api_key_prefers_runtime_connector_settings(monkeypatch) -> None:
+    client = OllamaCloudClient()
+    client.settings.ollama_api_key = 'env-key'
+    monkeypatch.setattr(
+        'app.services.llm.ollama_client.RuntimeConnectorSettings.get_string',
+        lambda *_args, **_kwargs: 'runtime-key',
+    )
+    assert client._normalized_api_key() == 'runtime-key'

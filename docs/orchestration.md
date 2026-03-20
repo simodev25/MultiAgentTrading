@@ -25,7 +25,7 @@ Source de vérité: `backend/app/services/orchestrator/engine.py` (`WORKFLOW_STE
 | Agent | Rôle | LLM par défaut | Switch UI | Niveau |
 |---|---|---|---|---|
 | `technical-analyst` | Signal technique initial (trend/RSI/MACD) | Off | Oui | `N2` |
-| `news-analyst` | Analyse news Yahoo + sentiment | On | Oui | `N3` |
+| `news-analyst` | Analyse news/macro multi-provider + sentiment | On | Oui | `N3` |
 | `macro-analyst` | Biais macro proxy (volatilité/tendance) | Off | Oui | `N1` |
 | `sentiment-agent` | Momentum court terme | Off | Oui | `N1` |
 | `bullish-researcher` | Thèse haussière + invalidations | On | Oui | `N3` |
@@ -72,7 +72,7 @@ Via API:
     "decision_mode": "conservative",
     "agent_skills": {
       "news-analyst": [
-        "Prioriser les événements macro à fort impact Forex",
+        "Prioriser les événements macro à fort impact pour le symbole analysé",
         "Signaler explicitement les incertitudes des titres"
       ],
       "trader-agent": [
@@ -89,6 +89,13 @@ Via API:
 - `conservative` (défaut): strict, exige plus de convergence.
 - `balanced`: intermédiaire, plus souple sur les setups techniques clairs.
 - `permissive`: opportuniste encadré, tout en conservant les blocages forts (neutral technique quasi systématique, contradiction majeure bloquante).
+
+Spécifique `news-analyst`:
+
+- `coverage=none` => le score news est neutralisé dans `trader-agent` (poids nul).
+- `coverage=low` => score news fortement réduit.
+- `coverage=medium|high` => poids normal.
+- Ce mécanisme évite d’interpréter l’absence de news comme un `neutral` fort.
 
 ## Skills par agent
 
@@ -131,7 +138,7 @@ Formats supportés:
 ```json
 {
   "agent_skills": {
-    "news-analyst": ["Prioriser l'impact Forex", "Citer les incertitudes"],
+    "news-analyst": ["Prioriser l'impact multi-actifs par symbole", "Citer les incertitudes"],
     "trader-agent": ["Favoriser HOLD en cas de conflit fort"]
   }
 }

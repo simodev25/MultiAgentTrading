@@ -1,9 +1,9 @@
-# Forex Multi-Agent Trading Platform (V1)
+# Multi-Agent Trading Platform (V1)
 
-Plateforme IA multi-agent dédiée au Forex avec:
+Plateforme IA multi-agent orientée marchés multi-actifs (FX, indices, matières premières, crypto) avec:
 - Orchestration multi-agent (analystes, débat bullish/bearish, trader, risk manager, execution manager)
 - API FastAPI (JWT + RBAC sur endpoints REST)
-- Intégration LLM multi-provider (Ollama, OpenAI, Mistral), MetaApi (trading), yfinance (news + contexte)
+- Intégration LLM multi-provider (Ollama, OpenAI, Mistral), MetaApi (trading), yfinance (contexte marché), news multi-provider (Yahoo, NewsAPI, TradingEconomics, Finnhub, AlphaVantage)
 - Séparation simulation / paper / live (live désactivé par défaut)
 - Frontend React TypeScript (thème sombre premium)
 - Exécution asynchrone via Celery + RabbitMQ + Redis
@@ -14,6 +14,7 @@ Plateforme IA multi-agent dédiée au Forex avec:
 - Configuration LLM par agent (switch, modèle effectif, skills, catalogue modèles, prompts modifiables)
 - Gating décisionnel multi-profils (`conservative`, `balanced`, `permissive`) piloté depuis les Paramètres
 - Trading Control Room (menu `Config`): configuration connecteurs, provider/modèles LLM, comptes MetaApi, prompts et télémétrie LLM
+- Clés API runtime éditables depuis `Config > Sécurité` (OLLAMA/OPENAI/MISTRAL, NEWSAPI/TRADINGECONOMICS/FINNHUB/ALPHAVANTAGE, METAAPI_TOKEN/METAAPI_ACCOUNT_ID)
 - Backtesting avancé (Sharpe, Sortino, drawdown, profit factor)
 - Support multi-comptes MetaApi
 - Planification automatique des analyses (cron) avec sélection symbole/timeframe/mode/risque
@@ -25,6 +26,14 @@ Plateforme IA multi-agent dédiée au Forex avec:
 - `frontend/`: UI React/Vite
 - `infra/`: Docker monitoring + chart Helm
 - `docs/`: architecture, UX/UI, configuration, monitoring, tests
+
+## Documentation ciblée
+
+- Architecture agents: `docs/agents-architecture.md`
+- Contrat runtime des agents: `docs/agents.md`
+- Orchestration et gating: `docs/orchestration.md`
+- News multi-provider et contrat `news-analyst`: `docs/news-analyst-multi-provider.md`
+- Sources market/news: `docs/data-news.md`
 
 ## Démarrage rapide
 
@@ -210,6 +219,22 @@ Paramètre `.env` pour activer la vue trades MT5 réels (tables + graphes):
 - `ENABLE_METAAPI_REAL_TRADES_DASHBOARD=true`
 - `METAAPI_USE_SDK_FOR_MARKET_DATA=false` (recommandé pour limiter les abonnements SDK MetaApi)
 - `CELERY_WORKER_CONCURRENCY=2` (stabilité locale)
+
+Paramètres `.env` pour le pipeline news multi-provider:
+- `NEWS_PROVIDERS` (JSON map, activation/priorité/timeout par provider)
+- `NEWS_ANALYSIS` (JSON map, déduplication/relevance/limites)
+- `NEWSAPI_API_KEY`
+- `TRADINGECONOMICS_API_KEY`
+- `FINNHUB_API_KEY`
+- `ALPHAVANTAGE_API_KEY`
+
+Clés éditables depuis l'UI (`Config > Sécurité`), sans redémarrage:
+- `OLLAMA_API_KEY`, `OPENAI_API_KEY`, `MISTRAL_API_KEY` (stockées dans `connector_configs.settings` du connecteur `ollama`)
+- `NEWSAPI_API_KEY`, `TRADINGECONOMICS_API_KEY`, `FINNHUB_API_KEY`, `ALPHAVANTAGE_API_KEY` (connecteur `yfinance`)
+- `METAAPI_TOKEN`, `METAAPI_ACCOUNT_ID` (connecteur `metaapi`)
+- priorité runtime: valeur en base > variable `.env`
+- les champs affichent un aperçu masqué (la plupart des caractères cachés)
+- providers news activables/désactivables individuellement (Yahoo/NewsAPI/TradingEconomics/Finnhub/AlphaVantage)
 
 Paramètres `.env` UI (`frontend/.env`) pour la même vue:
 - `VITE_ENABLE_METAAPI_REAL_TRADES_DASHBOARD=true`

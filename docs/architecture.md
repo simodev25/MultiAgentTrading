@@ -2,7 +2,7 @@
 
 ## Périmètre
 
-- Classe d'actifs: Forex uniquement (V1).
+- Classe d'actifs: multi-actifs (V1), avec un focus opérationnel actuel sur les paires FX.
 - Paires supportées: `EURUSD`, `GBPUSD`, `USDJPY`, `USDCHF`, `AUDUSD`, `USDCAD`, `NZDUSD`, `EURJPY`, `GBPJPY`, `EURGBP`.
 - Timeframes supportés: `M5`, `M15`, `H1`, `H4`, `D1`.
 - Décisions: `BUY`, `SELL`, `HOLD`.
@@ -38,7 +38,7 @@ flowchart LR
 - `backend/app/api`: routes REST (`/runs`, `/backtests`, `/connectors`, `/prompts`, `/analytics`, `/trading`).
 - `backend/app/services/orchestrator`: orchestration multi-agent et persistence `agent_steps`.
 - `backend/app/services/llm`: client Ollama avec tentatives automatiques + logs coût/latence + mode dégradé.
-- `backend/app/services/market`: provider yfinance (snapshot, historique, news).
+- `backend/app/services/market`: provider marché (snapshot/historique via yfinance, news/macro multi-provider).
 - `backend/app/services/trading`: MetaApi SDK puis repli REST.
 - `backend/app/services/execution`: séparation `simulation`, `paper`, `live`.
 - `backend/app/services/risk`: règles de taille/risque et blocages.
