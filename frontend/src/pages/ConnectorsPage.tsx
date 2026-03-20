@@ -15,8 +15,7 @@ import type {
 const ORCHESTRATION_AGENTS = [
   'technical-analyst',
   'news-analyst',
-  'macro-analyst',
-  'sentiment-agent',
+  'market-context-analyst',
   'bullish-researcher',
   'bearish-researcher',
   'trader-agent',
@@ -32,8 +31,7 @@ const MODEL_OVERRIDE_EDITABLE_AGENTS = new Set(SWITCHABLE_LLM_AGENTS);
 const DEFAULT_AGENT_LLM_ENABLED: Record<string, boolean> = {
   'technical-analyst': false,
   'news-analyst': true,
-  'macro-analyst': false,
-  'sentiment-agent': false,
+  'market-context-analyst': false,
   'bullish-researcher': true,
   'bearish-researcher': true,
   'trader-agent': false,
@@ -51,13 +49,13 @@ const AGENT_PROMPT_FALLBACKS: Record<string, { system: string; user: string }> =
     system: 'Tu es un analyste news Forex.',
     user: 'Pair: {pair}\nTimeframe: {timeframe}\nMémoires pertinentes:\n{memory_context}\nTitres:\n{headlines}',
   },
-  'macro-analyst': {
-    system: 'Tu es un analyste macro Forex.',
-    user: 'Pair: {pair}\nTimeframe: {timeframe}\nTrend: {trend}\nATR ratio: {atr_ratio}\nVolatilité: {volatility}',
-  },
-  'sentiment-agent': {
-    system: 'Tu es un analyste sentiment Forex.',
-    user: 'Pair: {pair}\nTimeframe: {timeframe}\nChange pct: {change_pct}\nTrend: {trend}',
+  'market-context-analyst': {
+    system: 'Tu es un analyste de contexte de marché Forex.',
+    user: (
+      'Pair: {pair}\nTimeframe: {timeframe}\nTrend: {trend}\nLast price: {last_price}\n'
+      + 'Change pct: {change_pct}\nATR: {atr}\nATR ratio: {atr_ratio}\nRSI: {rsi}\n'
+      + 'EMA fast: {ema_fast}\nEMA slow: {ema_slow}\nMACD diff: {macd_diff}'
+    ),
   },
   'bullish-researcher': {
     system: 'Tu es un chercheur Forex haussier.',
@@ -390,14 +388,22 @@ export function ConnectorsPage() {
     const rawEnabled = settings.agent_llm_enabled && typeof settings.agent_llm_enabled === 'object'
       ? (settings.agent_llm_enabled as Record<string, unknown>)
       : {};
+    const legacyAwareValue = (source: Record<string, unknown>, agentName: string): unknown => {
+      if (source[agentName] !== undefined) return source[agentName];
+      if (agentName === 'market-context-analyst') {
+        if (source['macro-analyst'] !== undefined) return source['macro-analyst'];
+        if (source['sentiment-agent'] !== undefined) return source['sentiment-agent'];
+      }
+      return undefined;
+    };
 
     const next: Record<string, string> = {};
     const nextSkills: Record<string, string[]> = {};
     const nextEnabled: Record<string, boolean> = {};
     MODEL_EDIT_AGENTS.forEach((agentName) => {
-      const value = rawMap[agentName];
+      const value = legacyAwareValue(rawMap, agentName);
       next[agentName] = typeof value === 'string' ? value : '';
-      const skillsValue = rawSkills[agentName];
+      const skillsValue = legacyAwareValue(rawSkills, agentName);
       if (NON_SWITCHABLE_LLM_AGENTS.has(agentName)) {
         nextSkills[agentName] = [];
       } else if (Array.isArray(skillsValue)) {
@@ -411,7 +417,7 @@ export function ConnectorsPage() {
         nextEnabled[agentName] = false;
         return;
       }
-      const enabledValue = rawEnabled[agentName];
+      const enabledValue = legacyAwareValue(rawEnabled, agentName);
       nextEnabled[agentName] = typeof enabledValue === 'boolean'
         ? enabledValue
         : (DEFAULT_AGENT_LLM_ENABLED[agentName] ?? false);

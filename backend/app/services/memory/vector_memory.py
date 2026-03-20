@@ -481,11 +481,21 @@ class VectorMemoryService:
         }
 
         price_features = self._derive_price_features_from_snapshot(market)
+        market_context_signal = extract_signal('market-context-analyst')
+        if market_context_signal == 'unknown':
+            legacy_macro_signal = extract_signal('macro-analyst')
+            legacy_sentiment_signal = extract_signal('sentiment-agent')
+            if legacy_macro_signal != 'unknown':
+                market_context_signal = legacy_macro_signal
+            elif legacy_sentiment_signal != 'unknown':
+                market_context_signal = legacy_sentiment_signal
         analysis_features = {
             'technical_signal': extract_signal('technical-analyst'),
             'news_signal': extract_signal('news-analyst'),
-            'macro_signal': extract_signal('macro-analyst'),
-            'sentiment_signal': extract_signal('sentiment-agent'),
+            'market_context_signal': market_context_signal,
+            # Backward-compatible aliases kept for historical embeddings.
+            'macro_signal': market_context_signal,
+            'sentiment_signal': market_context_signal,
             'aligned_source_count': self._safe_int(
                 decision.get('aligned_source_count', decision_rationale.get('aligned_directional_source_count')),
                 default=0,

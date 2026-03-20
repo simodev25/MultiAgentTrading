@@ -42,7 +42,7 @@ def test_agent_model_selector_falls_back_to_env_default() -> None:
 
     assert selector.resolve(None, 'news-analyst') == 'llama3.1'
     assert selector.is_enabled(None, 'news-analyst') is True
-    assert selector.is_enabled(None, 'macro-analyst') is False
+    assert selector.is_enabled(None, 'market-context-analyst') is False
     assert selector.is_enabled(None, 'schedule-planner-agent') is True
 
     with Session(engine) as db:
@@ -70,7 +70,7 @@ def test_agent_model_selector_reads_enabled_overrides() -> None:
                 settings={
                     'agent_llm_enabled': {
                         'news-analyst': False,
-                        'macro-analyst': True,
+                        'market-context-analyst': True,
                     },
                 },
             )
@@ -79,7 +79,7 @@ def test_agent_model_selector_reads_enabled_overrides() -> None:
 
         selector = AgentModelSelector()
         assert selector.is_enabled(db, 'news-analyst') is False
-        assert selector.is_enabled(db, 'macro-analyst') is True
+        assert selector.is_enabled(db, 'market-context-analyst') is True
 
 
 def test_agent_model_selector_allows_risk_and_execution_overrides() -> None:
@@ -154,7 +154,7 @@ def test_agent_model_selector_resolves_agent_skills() -> None:
         assert selector.resolve_skills(db, 'news-analyst') == ['Prioriser sources fiables', 'Citer incertitude']
         assert selector.resolve_skills(db, 'trader-agent') == ['Décision exécutable', 'Respect du risque']
         assert selector.resolve_skills(db, 'risk-manager') == ['Valider le risque, sans découper la phrase']
-        assert selector.resolve_skills(db, 'macro-analyst') == []
+        assert selector.resolve_skills(db, 'market-context-analyst') == []
 
 
 def test_agent_model_selector_resolves_decision_mode_with_fallback() -> None:

@@ -12,8 +12,7 @@ from app.db.models.connector_config import ConnectorConfig
 DEFAULT_AGENT_LLM_ENABLED: dict[str, bool] = {
     'technical-analyst': False,
     'news-analyst': True,
-    'macro-analyst': False,
-    'sentiment-agent': False,
+    'market-context-analyst': False,
     'bullish-researcher': True,
     'bearish-researcher': True,
     'trader-agent': False,
@@ -30,6 +29,23 @@ MAX_AGENT_SKILL_LENGTH = 500
 SUPPORTED_DECISION_MODES = {'conservative', 'balanced', 'permissive'}
 DEFAULT_DECISION_MODE = 'conservative'
 DEFAULT_MEMORY_CONTEXT_ENABLED = False
+LEGACY_AGENT_ALIASES: dict[str, str] = {
+    'macro-analyst': 'market-context-analyst',
+    'sentiment-agent': 'market-context-analyst',
+}
+
+
+def normalize_agent_name(agent_name: str | None) -> str:
+    normalized = str(agent_name or '').strip()
+    if not normalized:
+        return ''
+    return LEGACY_AGENT_ALIASES.get(normalized, normalized)
+
+
+def _legacy_agent_aliases_for(agent_name: str) -> tuple[str, ...]:
+    if agent_name != 'market-context-analyst':
+        return ()
+    return ('macro-analyst', 'sentiment-agent')
 
 
 def normalize_llm_provider(value: str | None, fallback: str = 'ollama') -> str:
@@ -124,19 +140,22 @@ class AgentModelSelector:
         return str(self.settings.ollama_model or '').strip() or 'llama3.1'
 
     def is_enabled(self, db: Session | None, agent_name: str) -> bool:
-        default_enabled = DEFAULT_AGENT_LLM_ENABLED.get(agent_name, False)
+        normalized_agent_name = normalize_agent_name(agent_name)
+        default_enabled = DEFAULT_AGENT_LLM_ENABLED.get(normalized_agent_name, False)
         settings = self._load_llm_settings(db)
         raw_enabled = settings.get('agent_llm_enabled', {})
         if isinstance(raw_enabled, dict):
-            value = raw_enabled.get(agent_name)
-            if isinstance(value, bool):
-                return value
-            if isinstance(value, str):
-                normalized = value.strip().lower()
-                if normalized in {'1', 'true', 'yes', 'on'}:
-                    return True
-                if normalized in {'0', 'false', 'no', 'off'}:
-                    return False
+            candidate_names = (normalized_agent_name, *_legacy_agent_aliases_for(normalized_agent_name))
+            for candidate_name in candidate_names:
+                value = raw_enabled.get(candidate_name)
+                if isinstance(value, bool):
+                    return value
+                if isinstance(value, str):
+                    normalized = value.strip().lower()
+                    if normalized in {'1', 'true', 'yes', 'on'}:
+                        return True
+                    if normalized in {'0', 'false', 'no', 'off'}:
+                        return False
         return default_enabled
 
     def resolve(self, db: Session | None, agent_name: str | None = None) -> str:
@@ -144,22 +163,31 @@ class AgentModelSelector:
         fallback = self._provider_default_model(provider)
         settings = self._load_llm_settings(db)
         if agent_name:
+            normalized_agent_name = normalize_agent_name(agent_name)
             raw_agent_models = settings.get('agent_models', {})
             if isinstance(raw_agent_models, dict):
-                model = str(raw_agent_models.get(agent_name, '')).strip()
-                if model:
-                    return model
+                candidate_names = (normalized_agent_name, *_legacy_agent_aliases_for(normalized_agent_name))
+                for candidate_name in candidate_names:
+                    model = str(raw_agent_models.get(candidate_name, '')).strip()
+                    if model:
+                        return model
 
         default_model = str(settings.get('default_model', '')).strip()
         return default_model or fallback
 
     def resolve_skills(self, db: Session | None, agent_name: str) -> list[str]:
+        normalized_agent_name = normalize_agent_name(agent_name)
         settings = self._load_llm_settings(db)
         raw_map = settings.get('agent_skills', {})
         if not isinstance(raw_map, dict):
             return []
 
-        raw_value = raw_map.get(agent_name)
+        raw_value = raw_map.get(normalized_agent_name)
+        if raw_value is None:
+            for candidate_name in _legacy_agent_aliases_for(normalized_agent_name):
+                if candidate_name in raw_map:
+                    raw_value = raw_map.get(candidate_name)
+                    break
         raw_items: list[str]
         if isinstance(raw_value, str):
             text = raw_value.strip()

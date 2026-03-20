@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.db.base import Base
 from app.db.models.connector_config import ConnectorConfig
-from app.services.orchestrator.agents import AgentContext, MacroAnalystAgent, NewsAnalystAgent, TraderAgent
+from app.services.orchestrator.agents import AgentContext, MarketContextAnalystAgent, NewsAnalystAgent, TraderAgent
 
 
 def _context() -> AgentContext:
@@ -18,7 +18,7 @@ def _context() -> AgentContext:
     )
 
 
-def test_macro_agent_applies_deterministic_skill_guardrails() -> None:
+def test_market_context_agent_applies_deterministic_skill_guardrails() -> None:
     engine = create_engine('sqlite:///:memory:')
     Base.metadata.create_all(bind=engine)
 
@@ -28,9 +28,9 @@ def test_macro_agent_applies_deterministic_skill_guardrails() -> None:
                 connector_name='ollama',
                 enabled=True,
                 settings={
-                    'agent_llm_enabled': {'macro-analyst': False},
+                    'agent_llm_enabled': {'market-context-analyst': False},
                     'agent_skills': {
-                        'macro-analyst': [
+                        'market-context-analyst': [
                             "Ne présente une lecture directionnelle que si plusieurs éléments convergent; sinon parle d'incertitude."
                         ]
                     },
@@ -39,11 +39,14 @@ def test_macro_agent_applies_deterministic_skill_guardrails() -> None:
         )
         db.commit()
 
-        agent = MacroAnalystAgent()
+        agent = MarketContextAnalystAgent()
         result = agent.run(_context(), db=db)
 
-        assert result['signal'] == 'neutral'
-        assert result['reason'] == 'Skill guardrails applied (deterministic mode)'
+        assert result['signal'] in {'bullish', 'neutral'}
+        assert result['regime'] in {'trending', 'ranging', 'unstable', 'calm', 'volatile'}
+        assert result['momentum_bias'] in {'bullish', 'bearish', 'neutral'}
+        assert result['volatility_context'] in {'supportive', 'unsupportive', 'neutral'}
+        assert result['llm_summary'].startswith(result['signal'])
         assert result['prompt_meta']['skills_count'] == 1
 
 

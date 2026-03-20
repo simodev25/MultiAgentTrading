@@ -39,7 +39,7 @@ def test_sanitize_ollama_settings_normalizes_agent_skills() -> None:
             'trader-agent': ['Décision claire', 'Décision claire', 'Respecter SL/TP'],
             'risk-manager': "Valider le risque, sans casser la phrase.",
             '': ['ignore'],
-            'macro-analyst': 123,
+            'market-context-analyst': 123,
         },
     }
 
@@ -48,7 +48,7 @@ def test_sanitize_ollama_settings_normalizes_agent_skills() -> None:
     assert result['agent_skills']['trader-agent'] == ['Décision claire', 'Respecter SL/TP']
     assert result['agent_skills']['risk-manager'] == ["Valider le risque, sans casser la phrase."]
     assert '' not in result['agent_skills']
-    assert 'macro-analyst' not in result['agent_skills']
+    assert 'market-context-analyst' not in result['agent_skills']
 
 
 def test_sanitize_ollama_settings_normalizes_decision_mode() -> None:

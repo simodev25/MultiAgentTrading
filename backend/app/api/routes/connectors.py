@@ -13,6 +13,7 @@ from app.services.llm.model_selector import (
     AgentModelSelector,
     DEFAULT_DECISION_MODE,
     SUPPORTED_DECISION_MODES,
+    normalize_agent_name,
     normalize_decision_mode,
 )
 from app.services.llm.provider_client import LlmClient
@@ -64,7 +65,7 @@ def _normalize_agent_skills(raw_skills: object) -> dict[str, list[str]]:
 
     normalized: dict[str, list[str]] = {}
     for raw_agent_name, raw_value in raw_skills.items():
-        agent_name = str(raw_agent_name or '').strip()
+        agent_name = normalize_agent_name(str(raw_agent_name or '').strip())
         if not agent_name:
             continue
 
@@ -112,7 +113,9 @@ def _normalize_agent_skills(raw_skills: object) -> dict[str, list[str]]:
                 break
 
         if deduped:
-            normalized[agent_name] = deduped
+            existing = normalized.get(agent_name, [])
+            merged = existing + [item for item in deduped if item not in existing]
+            normalized[agent_name] = merged[:12]
 
     return normalized
 
@@ -137,8 +140,23 @@ def _normalize_bool_setting(value: object, *, fallback: bool = False) -> bool:
 def _sanitize_ollama_settings(raw_settings: dict) -> dict:
     settings = dict(raw_settings or {})
     raw_enabled = settings.get('agent_llm_enabled')
-    enabled = dict(raw_enabled) if isinstance(raw_enabled, dict) else {}
+    enabled = {normalize_agent_name(str(key)): value for key, value in dict(raw_enabled or {}).items()} if isinstance(raw_enabled, dict) else {}
+    if 'market-context-analyst' not in enabled:
+        for legacy_name in ('macro-analyst', 'sentiment-agent'):
+            if legacy_name in dict(raw_enabled or {}):
+                enabled['market-context-analyst'] = dict(raw_enabled or {}).get(legacy_name)
+                break
     settings['agent_llm_enabled'] = enabled
+
+    raw_models = settings.get('agent_models')
+    agent_models = {normalize_agent_name(str(key)): value for key, value in dict(raw_models or {}).items()} if isinstance(raw_models, dict) else {}
+    if 'market-context-analyst' not in agent_models:
+        for legacy_name in ('macro-analyst', 'sentiment-agent'):
+            if legacy_name in dict(raw_models or {}):
+                agent_models['market-context-analyst'] = dict(raw_models or {}).get(legacy_name)
+                break
+    settings['agent_models'] = agent_models
+
     settings['agent_skills'] = _normalize_agent_skills(settings.get('agent_skills'))
     settings['decision_mode'] = normalize_decision_mode(
         settings.get('decision_mode'),

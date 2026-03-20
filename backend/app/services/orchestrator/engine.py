@@ -23,10 +23,9 @@ from app.services.orchestrator.agents import (
     BearishResearcherAgent,
     BullishResearcherAgent,
     ExecutionManagerAgent,
-    MacroAnalystAgent,
+    MarketContextAnalystAgent,
     NewsAnalystAgent,
     RiskManagerAgent,
-    SentimentAgent,
     TechnicalAnalystAgent,
     TraderAgent,
 )
@@ -39,8 +38,7 @@ class ForexOrchestrator:
     WORKFLOW_STEPS = (
         'technical-analyst',
         'news-analyst',
-        'macro-analyst',
-        'sentiment-agent',
+        'market-context-analyst',
         'bullish-researcher',
         'bearish-researcher',
         'trader-agent',
@@ -60,8 +58,7 @@ class ForexOrchestrator:
 
         self.technical_agent = TechnicalAnalystAgent()
         self.news_agent = NewsAnalystAgent(self.prompt_service)
-        self.macro_agent = MacroAnalystAgent()
-        self.sentiment_agent = SentimentAgent()
+        self.market_context_agent = MarketContextAnalystAgent()
         self.bullish_researcher = BullishResearcherAgent(self.prompt_service)
         self.bearish_researcher = BearishResearcherAgent(self.prompt_service)
         self.trader_agent = TraderAgent()
@@ -443,14 +440,9 @@ class ForexOrchestrator:
                     lambda local_db: self.news_agent.run(context, db=local_db),
                 ),
                 (
-                    self.macro_agent.name,
+                    self.market_context_agent.name,
                     {'market': context.market_snapshot},
-                    lambda local_db: self.macro_agent.run(context, db=local_db),
-                ),
-                (
-                    self.sentiment_agent.name,
-                    {'market': context.market_snapshot},
-                    lambda local_db: self.sentiment_agent.run(context, db=local_db),
+                    lambda local_db: self.market_context_agent.run(context, db=local_db),
                 ),
             ]
         )

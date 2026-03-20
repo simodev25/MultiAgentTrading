@@ -4,13 +4,12 @@
 
 1. `technical-analyst`
 2. `news-analyst`
-3. `macro-analyst`
-4. `sentiment-agent`
-5. `bullish-researcher`
-6. `bearish-researcher`
-7. `trader-agent`
-8. `risk-manager`
-9. `execution-manager`
+3. `market-context-analyst`
+4. `bullish-researcher`
+5. `bearish-researcher`
+6. `trader-agent`
+7. `risk-manager`
+8. `execution-manager`
 
 Source de vérité: `backend/app/services/orchestrator/engine.py` (`WORKFLOW_STEPS`).
 
@@ -26,8 +25,7 @@ Source de vérité: `backend/app/services/orchestrator/engine.py` (`WORKFLOW_STE
 |---|---|---|---|---|
 | `technical-analyst` | Signal technique initial (trend/RSI/MACD) | Off | Oui | `N2` |
 | `news-analyst` | Analyse news/macro multi-provider + sentiment | On | Oui | `N3` |
-| `macro-analyst` | Biais macro proxy (volatilité/tendance) | Off | Oui | `N1` |
-| `sentiment-agent` | Momentum court terme | Off | Oui | `N1` |
+| `market-context-analyst` | Régime de marché, momentum contextuel et filtre de volatilité | Off | Oui | `N2` |
 | `bullish-researcher` | Thèse haussière + invalidations | On | Oui | `N3` |
 | `bearish-researcher` | Thèse baissière + invalidations | On | Oui | `N3` |
 | `trader-agent` | Décision `BUY/SELL/HOLD` + SL/TP | Off | Oui | `N2` |
@@ -63,8 +61,7 @@ Via API:
     "agent_llm_enabled": {
       "technical-analyst": false,
       "news-analyst": true,
-      "macro-analyst": false,
-      "sentiment-agent": false,
+      "market-context-analyst": false,
       "bullish-researcher": true,
       "bearish-researcher": true,
       "trader-agent": false

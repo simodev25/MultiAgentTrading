@@ -14,19 +14,12 @@
       "Accorde plus de valeur aux news récentes et aux événements encore actifs dans le pricing; les anciennes news servent surtout de contexte.",
       "Utilise la mémoire comme toile de fond pour la continuité narrative, jamais comme preuve supérieure à une news fraîche et pertinente."
     ],
-    "macro-analyst": [
-      "Traite ATR, trend et prix comme des proxys de régime de marché, pas comme une preuve suffisante d'une thèse macroéconomique complète.",
-      "Décris seulement volatilité, expansion ou contraction du régime, stabilité et clarté directionnelle.",
-      "Ne présente une lecture directionnelle que si plusieurs éléments convergent; sinon parle d'environnement mitigé ou d'incertitude.",
-      "Quand aucune donnée de calendrier, de banque centrale ou de taux n'est fournie, évite d'inférer des causalités macro trop précises.",
-      "Décris les conditions qui renforceraient ou invalideraient la lecture de régime au lieu de surinterpréter un seul facteur."
-    ],
-    "sentiment-agent": [
-      "Le sentiment ici est un proxy de momentum prix court terme, pas un sentiment news, social ou options.",
-      "Utilise change_pct et trend pour distinguer impulsion, continuation fatiguée, rebond technique et neutralité.",
-      "Réduis la conviction lorsque le mouvement est déjà étendu, lorsque le timeframe est très bruité ou lorsque le momentum contredit la tendance.",
-      "Un sentiment fort sans support du trend ou sans cohérence avec le contexte global doit rester un indice secondaire.",
-      "Privilégie la lecture de vitesse et d'essoufflement du move plutôt qu'une prédiction de retournement non démontrée."
+    "market-context-analyst": [
+      "Lis le marché comme un contexte de régime et de lisibilité, pas comme une preuve macroéconomique ou de sentiment externe.",
+      "Réduis fortement la conviction quand trend, momentum, volatilité et structure globale ne convergent pas clairement.",
+      "Traite la volatilité comme un filtre de qualité du contexte, jamais comme une raison automatique de renforcer un biais.",
+      "N'invente jamais de causalité fondamentale absente des données disponibles (banques centrales, taux, positioning, options, order flow, social sentiment).",
+      "Le résumé final doit rester strictement aligné avec le signal structuré, le score et la confiance."
     ],
     "bullish-researcher": [
       "Construis la meilleure thèse haussière possible à partir des analyses disponibles, sans inventer de catalyseur ni ignorer les contre-arguments sérieux.",

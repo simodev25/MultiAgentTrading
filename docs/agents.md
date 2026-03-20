@@ -22,19 +22,12 @@ Ce fichier résume chaque agent de l’orchestrateur (workflow de trading multi-
 - Sorties ajoutées: `confidence`, `coverage`, `information_state`, `decision_mode`, `macro_event_count`, `provider_status`, `evidence`, `fetch_status`, `llm_fallback_used`, `llm_summary`.
 - Détails complets: `docs/news-analyst-multi-provider.md`.
 
-## macro-analyst
-- Objectif: biais macro via volatilité ATR et trend.
-- Entrées: atr, last_price, trend, pair, timeframe.
-- Déterministe: si atr/price>0.01 => neutral; sinon suit trend (+0.1/-0.1).
-- LLM (off par défaut): prompt seed `macro-analyst`, ajoute +0.05/-0.05 selon LLM.
-- Sorties: signal, score, reason ou llm_summary, degraded, prompt_meta.
-
-## sentiment-agent
-- Objectif: sentiment court terme (price momentum).
-- Entrées: change_pct, trend, pair, timeframe.
-- Déterministe: +0.1/-0.1 si |change_pct|>0.1 sinon neutral.
-- LLM (off par défaut): prompt seed `sentiment-agent`, ajoute +0.05/-0.05.
-- Sorties: signal, score, llm_summary, degraded, prompt_meta.
+## market-context-analyst
+- Objectif: évaluer le régime de marché, le momentum contextuel et l'effet de la volatilité sans prétention macro-fondamentale ni sentiment externe.
+- Entrées: pair, timeframe, last_price, change_pct, trend, atr, atr_ratio, rsi, ema_fast, ema_slow, macd_diff (si disponible).
+- Déterministe: combine trend/momentum/EMA/RSI puis applique une réduction stricte de conviction en contexte mixte, instable ou volatil.
+- LLM (off par défaut): produit une note contextuelle secondaire; la sortie structurée reste la source de vérité.
+- Sorties: `signal`, `score`, `confidence`, `regime`, `momentum_bias`, `volatility_context`, `reason`, `llm_summary`, `degraded`, `prompt_meta`.
 
 ## bullish-researcher
 - Objectif: construire la meilleure thèse haussière.
@@ -91,7 +84,7 @@ Ce fichier résume chaque agent de l’orchestrateur (workflow de trading multi-
 - Sorties: actions (EXIT/UPDATE_SL_TP), llm_report, llm_prompt_meta, résumé dernier cycle.
 
 ## Orchestration (rappel)
-- Étape 1 (parallèle): technical-analyst, news-analyst, macro-analyst, sentiment-agent.
+- Étape 1 (parallèle): technical-analyst, news-analyst, market-context-analyst.
 - Étape 2 (parallèle): bullish-researcher, bearish-researcher.
 - Étape 3: trader-agent.
 - Étape 4: risk-manager.

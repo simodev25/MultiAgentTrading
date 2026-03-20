@@ -5,7 +5,12 @@ import json
 import re
 from pathlib import Path
 
-from app.services.llm.model_selector import DETERMINISTIC_ONLY_AGENTS, MAX_AGENT_SKILL_LENGTH, MAX_AGENT_SKILLS_PER_AGENT
+from app.services.llm.model_selector import (
+    DETERMINISTIC_ONLY_AGENTS,
+    MAX_AGENT_SKILL_LENGTH,
+    MAX_AGENT_SKILLS_PER_AGENT,
+    normalize_agent_name,
+)
 
 BOOTSTRAP_META_KEY = 'agent_skills_bootstrap_meta'
 _SKILL_SPLIT_RE = re.compile(r'[\n,]+')
@@ -176,14 +181,21 @@ def _normalize_agent_skills_map(raw_skills: object) -> dict[str, list[str]]:
 
     normalized: dict[str, list[str]] = {}
     for raw_agent_name, raw_items in raw_skills.items():
-        agent_name = _clean_text(raw_agent_name)
+        agent_name = normalize_agent_name(_clean_text(raw_agent_name))
         if not agent_name or agent_name in DETERMINISTIC_ONLY_AGENTS:
             continue
 
         items = _coerce_skill_items(raw_items)
         deduped = _dedupe_skill_items(items)
         if deduped:
-            normalized[agent_name] = deduped
+            merged = list(normalized.get(agent_name, []))
+            for item in deduped:
+                if item in merged:
+                    continue
+                merged.append(item)
+                if len(merged) >= MAX_AGENT_SKILLS_PER_AGENT:
+                    break
+            normalized[agent_name] = merged
     return normalized
 
 

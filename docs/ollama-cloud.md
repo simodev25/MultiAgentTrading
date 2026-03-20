@@ -42,8 +42,7 @@ Exemple:
   "agent_llm_enabled": {
     "technical-analyst": false,
     "news-analyst": true,
-    "macro-analyst": false,
-    "sentiment-agent": false,
+    "market-context-analyst": false,
     "bullish-researcher": true,
     "bearish-researcher": true,
     "trader-agent": false

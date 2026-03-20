@@ -199,8 +199,7 @@ def test_orchestrator_fails_live_run_when_llm_output_is_degraded(monkeypatch) ->
                 'analysis_outputs': {
                     'technical-analyst': {'signal': 'bullish', 'score': 0.2, 'degraded': True},
                     'news-analyst': {'signal': 'neutral', 'score': 0.0},
-                    'macro-analyst': {'signal': 'bullish', 'score': 0.1},
-                    'sentiment-agent': {'signal': 'bullish', 'score': 0.1},
+                    'market-context-analyst': {'signal': 'bullish', 'score': 0.2},
                 },
                 'bullish': {'arguments': ['Trend aligns'], 'confidence': 0.7},
                 'bearish': {'arguments': [], 'confidence': 0.0},
@@ -268,8 +267,7 @@ def test_orchestrator_allows_live_hold_when_no_trade_candidate_despite_degradati
                 'analysis_outputs': {
                     'technical-analyst': {'signal': 'neutral', 'score': 0.0, 'degraded': True},
                     'news-analyst': {'signal': 'neutral', 'score': 0.0},
-                    'macro-analyst': {'signal': 'neutral', 'score': 0.0},
-                    'sentiment-agent': {'signal': 'neutral', 'score': 0.0},
+                    'market-context-analyst': {'signal': 'neutral', 'score': 0.0},
                 },
                 'bullish': {'arguments': ['No edge'], 'confidence': 0.0, 'degraded': True},
                 'bearish': {'arguments': ['No edge'], 'confidence': 0.0, 'degraded': True},

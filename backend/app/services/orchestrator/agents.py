@@ -1426,218 +1426,385 @@ class NewsAnalystAgent:
         return output
 
 
-class MacroAnalystAgent:
-    name = 'macro-analyst'
+class MarketContextAnalystAgent:
+    name = 'market-context-analyst'
 
     def __init__(self) -> None:
         self.llm = LlmClient()
         self.model_selector = AgentModelSelector()
         self.prompt_service = PromptTemplateService()
 
-    def run(self, ctx: AgentContext, db: Session | None = None) -> dict[str, Any]:
-        market = ctx.market_snapshot
-        if market.get('degraded'):
-            return {'signal': 'neutral', 'score': 0.0, 'reason': 'Macro proxy unavailable'}
+    @staticmethod
+    def _as_direction(value: float, *, threshold: float = 0.02) -> int:
+        if value > threshold:
+            return 1
+        if value < -threshold:
+            return -1
+        return 0
 
-        volatility = market.get('atr', 0.0) / market.get('last_price', 1)
-        if volatility > 0.01:
-            output: dict[str, Any] = {'signal': 'neutral', 'score': 0.0, 'reason': 'High volatility suggests caution'}
-        elif market.get('trend') == 'bullish':
-            output = {'signal': 'bullish', 'score': 0.1, 'reason': 'Macro proxy aligned with trend'}
-        elif market.get('trend') == 'bearish':
-            output = {'signal': 'bearish', 'score': -0.1, 'reason': 'Macro proxy aligned with trend'}
+    @staticmethod
+    def _resolve_regime(
+        *,
+        trend_direction: int,
+        momentum_direction: int,
+        ema_direction: int,
+        atr_ratio: float,
+        change_pct: float,
+    ) -> str:
+        if atr_ratio >= 0.012:
+            return 'volatile'
+        if atr_ratio >= 0.009:
+            return 'unstable'
+
+        if (
+            trend_direction != 0
+            and trend_direction == momentum_direction
+            and trend_direction == ema_direction
+            and abs(change_pct) >= 0.04
+        ):
+            return 'trending'
+
+        if atr_ratio <= 0.0025 and abs(change_pct) <= 0.04:
+            return 'calm'
+
+        return 'ranging'
+
+    @staticmethod
+    def _resolve_volatility_context(atr_ratio: float, regime: str) -> str:
+        if regime in {'volatile', 'unstable'} or atr_ratio >= 0.01:
+            return 'unsupportive'
+        if regime == 'trending' and 0.0025 <= atr_ratio <= 0.0075:
+            return 'supportive'
+        return 'neutral'
+
+    @staticmethod
+    def _confidence_from_output(
+        *,
+        score: float,
+        signal: str,
+        regime: str,
+        mixed_context: bool,
+        trend_bias: str,
+        momentum_bias: str,
+        volatility_context: str,
+    ) -> str:
+        if signal == 'neutral':
+            return 'low'
+
+        magnitude = abs(float(score))
+        if magnitude >= 0.24:
+            confidence = 'high'
+        elif magnitude >= 0.14:
+            confidence = 'medium'
         else:
-            output = {'signal': 'neutral', 'score': 0.0, 'reason': 'No macro edge'}
+            confidence = 'low'
 
+        if mixed_context or regime in {'volatile', 'unstable'}:
+            if confidence == 'high':
+                return 'medium'
+            return 'low'
+
+        # If momentum and volatility are neutral, directional conviction is capped
+        # unless we explicitly have a strong trending inheritance from trend.
+        if momentum_bias == 'neutral' and volatility_context == 'neutral':
+            if trend_bias == signal and regime == 'trending' and magnitude >= 0.22:
+                return 'medium'
+            return 'low'
+        return confidence
+
+    @staticmethod
+    def _reason_from_output(
+        *,
+        signal: str,
+        regime: str,
+        trend_bias: str,
+        momentum_bias: str,
+        volatility_context: str,
+    ) -> str:
+        trend_is_directional = trend_bias in {'bullish', 'bearish'}
+        trend_aligned = trend_bias == signal and signal in {'bullish', 'bearish'}
+        momentum_aligned = momentum_bias == signal and signal in {'bullish', 'bearish'}
+        volatility_supportive = volatility_context == 'supportive' and signal in {'bullish', 'bearish'}
+
+        if signal == 'neutral':
+            if trend_is_directional and momentum_bias == 'neutral' and volatility_context == 'neutral':
+                return (
+                    f'Trend {trend_bias} mais contexte {regime} trop peu confirmant '
+                    'pour soutenir un biais directionnel exploitable.'
+                )
+            return (
+                f'Regime {regime} avec momentum {momentum_bias} et volatilite {volatility_context}: '
+                'contexte directionnel ambigu.'
+            )
+
+        if momentum_bias == 'neutral' and volatility_context == 'neutral':
+            if trend_aligned:
+                return (
+                    f'Trend {trend_bias} maintenu, sans confirmation forte du momentum ni de la volatilite ; '
+                    f'biais {signal} faible.'
+                )
+            return f'Contexte {regime} peu confirmant ; biais {signal} faible sans renfort net.'
+
+        support_count = int(trend_aligned) + int(momentum_aligned) + int(volatility_supportive)
+        if support_count >= 2:
+            return f'Regime {regime} avec confirmations contextuelles partielles ; biais {signal} prudent.'
+        if trend_aligned:
+            return f'Biais {signal} principalement herite du trend, avec soutien contextuel limite.'
+        if support_count == 1:
+            return f'Contexte {regime} compatible avec un biais {signal} leger, conviction limitee.'
+        return f'Le contexte ne contredit pas un biais {signal} faible, sans le renforcer nettement.'
+
+    @staticmethod
+    def _aligned_summary(output: dict[str, Any]) -> str:
+        signal = str(output.get('signal') or 'neutral')
+        score = round(_safe_float(output.get('score'), 0.0), 3)
+        confidence = str(output.get('confidence') or 'low')
+        regime = str(output.get('regime') or 'ranging')
+        momentum_bias = str(output.get('momentum_bias') or 'neutral')
+        volatility_context = str(output.get('volatility_context') or 'neutral')
+        reason = str(output.get('reason') or '').strip()
+        return (
+            f'{signal} (score={score}, confidence={confidence}) dans un regime {regime} '
+            f'avec momentum {momentum_bias} et volatilite {volatility_context}. {reason}'
+        ).strip()
+
+    def _build_structured_context(self, market: dict[str, Any]) -> dict[str, Any]:
+        if bool(market.get('degraded')):
+            return {
+                'signal': 'neutral',
+                'score': 0.0,
+                'confidence': 'low',
+                'regime': 'unstable',
+                'momentum_bias': 'neutral',
+                'volatility_context': 'neutral',
+                'reason': 'Market snapshot degraded; no reliable context bias.',
+                'degraded': True,
+                '_mixed_context': True,
+            }
+
+        trend = str(market.get('trend', 'neutral') or 'neutral').strip().lower()
+        if trend not in {'bullish', 'bearish', 'neutral'}:
+            trend = 'neutral'
+        trend_direction = 1 if trend == 'bullish' else -1 if trend == 'bearish' else 0
+
+        last_price = abs(_safe_float(market.get('last_price'), 0.0))
+        atr = abs(_safe_float(market.get('atr'), 0.0))
+        atr_ratio = abs(_safe_float(market.get('atr_ratio'), 0.0))
+        if atr_ratio <= 0.0 and last_price > 0.0:
+            atr_ratio = atr / last_price
+
+        change_pct = _safe_float(market.get('change_pct'), 0.0)
+        rsi = _safe_float(market.get('rsi'), 50.0)
+        ema_fast = _safe_float(market.get('ema_fast'), 0.0)
+        ema_slow = _safe_float(market.get('ema_slow'), 0.0)
+        macd_diff = _safe_float(market.get('macd_diff'), 0.0)
+
+        trend_component = 0.12 if trend_direction > 0 else -0.12 if trend_direction < 0 else 0.0
+        momentum_component = _clamp(change_pct / 0.25, -1.0, 1.0) * 0.14
+        if macd_diff > 0.0:
+            momentum_component += 0.05
+        elif macd_diff < 0.0:
+            momentum_component -= 0.05
+        momentum_component = _clamp(momentum_component, -0.2, 0.2)
+
+        ema_component = 0.06 if ema_fast > ema_slow else -0.06 if ema_fast < ema_slow else 0.0
+        rsi_component = 0.0
+        if rsi >= 70:
+            rsi_component = -0.05
+        elif rsi <= 30:
+            rsi_component = 0.05
+        elif trend_direction > 0 and rsi >= 55:
+            rsi_component = 0.03
+        elif trend_direction < 0 and rsi <= 45:
+            rsi_component = -0.03
+
+        momentum_bias = _score_to_signal(momentum_component, threshold=0.07)
+        momentum_direction = 1 if momentum_bias == 'bullish' else -1 if momentum_bias == 'bearish' else 0
+        ema_direction = self._as_direction(ema_component, threshold=0.01)
+        rsi_direction = self._as_direction(rsi_component, threshold=0.01)
+
+        regime = self._resolve_regime(
+            trend_direction=trend_direction,
+            momentum_direction=momentum_direction,
+            ema_direction=ema_direction,
+            atr_ratio=atr_ratio,
+            change_pct=change_pct,
+        )
+        volatility_context = self._resolve_volatility_context(atr_ratio, regime)
+
+        components = [trend_direction, momentum_direction, ema_direction, rsi_direction]
+        bullish_votes = sum(1 for value in components if value > 0)
+        bearish_votes = sum(1 for value in components if value < 0)
+        mixed_context = bullish_votes > 0 and bearish_votes > 0
+
+        score = trend_component + momentum_component + ema_component + rsi_component
+
+        if mixed_context:
+            score *= 0.5
+        if regime == 'unstable':
+            score *= 0.7
+        elif regime == 'volatile':
+            score *= 0.45
+        if volatility_context == 'unsupportive':
+            score *= 0.7
+        if momentum_bias == 'neutral' and trend_direction == 0:
+            score *= 0.65
+        if momentum_bias == 'neutral' and volatility_context == 'neutral':
+            if regime in {'calm', 'ranging'}:
+                score = _clamp(score, -0.13, 0.13)
+            else:
+                score = _clamp(score, -0.17, 0.17)
+
+        score = round(_clamp(score, -0.35, 0.35), 3)
+        if mixed_context and abs(score) < 0.18:
+            score = 0.0
+
+        signal = _score_to_signal(score, threshold=0.12)
+        confidence = self._confidence_from_output(
+            score=score,
+            signal=signal,
+            regime=regime,
+            mixed_context=mixed_context,
+            trend_bias=trend,
+            momentum_bias=momentum_bias,
+            volatility_context=volatility_context,
+        )
+        reason = self._reason_from_output(
+            signal=signal,
+            regime=regime,
+            trend_bias=trend,
+            momentum_bias=momentum_bias,
+            volatility_context=volatility_context,
+        )
+
+        return {
+            'signal': signal,
+            'score': score,
+            'confidence': confidence,
+            'regime': regime,
+            'momentum_bias': momentum_bias,
+            'volatility_context': volatility_context,
+            'reason': reason,
+            'degraded': False,
+            '_mixed_context': mixed_context,
+        }
+
+    def run(self, ctx: AgentContext, db: Session | None = None) -> dict[str, Any]:
+        output = self._build_structured_context(ctx.market_snapshot)
         llm_enabled = self.model_selector.is_enabled(db, self.name)
         runtime_skills = _resolve_runtime_skills(self.model_selector, db, self.name)
-        output['llm_enabled'] = llm_enabled
         llm_model = _resolve_llm_model(ctx, self.model_selector, db, self.name)
-        output['prompt_meta'] = {
-            'prompt_id': None,
-            'prompt_version': 0,
-            'llm_model': llm_model,
-            'llm_enabled': llm_enabled,
-            'skills_count': len(runtime_skills),
-        }
-        _enrich_prompt_meta_debug(output['prompt_meta'], runtime_skills=runtime_skills)
-        if not llm_enabled:
-            adjusted_score, adjusted_signal, changed = _apply_deterministic_skill_guardrail(
-                float(output.get('score', 0.0)),
-                base_threshold=0.05,
-                skills=runtime_skills,
-            )
-            output['score'] = adjusted_score
-            output['signal'] = adjusted_signal
-            if changed:
-                output['reason'] = 'Skill guardrails applied (deterministic mode)'
-            return output
 
-        fallback_system = 'Tu es un analyste macro multi-actifs. Réponds en français.'
-        fallback_user = (
-            'Pair: {pair}\nTimeframe: {timeframe}\nTrend: {trend}\nATR ratio: {atr_ratio}\n'
-            'Volatilité: {volatility}\nDonne un biais macro: bullish, bearish ou neutral puis une phrase concise.'
-        )
-        prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
-        if db is not None:
-            prompt_info = self.prompt_service.render(
-                db=db,
-                agent_name=self.name,
-                fallback_system=fallback_system,
-                fallback_user=fallback_user,
-                variables={
-                    'pair': ctx.pair,
-                    'timeframe': ctx.timeframe,
-                    'trend': market.get('trend'),
-                    'atr_ratio': round(volatility, 6),
-                    'volatility': market.get('atr'),
-                },
-            )
-            system_prompt = prompt_info['system_prompt']
-            user_prompt = prompt_info['user_prompt']
-        else:
-            system_prompt = fallback_system
-            user_prompt = fallback_user.format(
-                pair=ctx.pair,
-                timeframe=ctx.timeframe,
-                trend=market.get('trend'),
-                atr_ratio=round(volatility, 6),
-                volatility=market.get('atr'),
-            )
-        llm_res = self.llm.chat(
-            system_prompt,
-            user_prompt,
-            model=llm_model,
-            db=db,
-        )
-        llm_text, llm_degraded = _normalize_llm_text_and_degraded(llm_res, require_text=True)
-        llm_signal = _parse_signal_from_text(llm_text)
-        output['score'], output['signal'] = _merge_llm_signal(
+        adjusted_score, adjusted_signal, changed = _apply_deterministic_skill_guardrail(
             float(output.get('score', 0.0)),
-            llm_signal,
-            threshold=0.05,
-            llm_bias=0.05,
+            base_threshold=0.12,
+            skills=runtime_skills,
         )
-        output['llm_summary'] = llm_text
-        output['degraded'] = llm_degraded
+        output['score'] = adjusted_score
+        output['signal'] = adjusted_signal
+        output['confidence'] = self._confidence_from_output(
+            score=adjusted_score,
+            signal=adjusted_signal,
+            regime=str(output.get('regime') or 'ranging'),
+            mixed_context=bool(output.get('_mixed_context', False)),
+            trend_bias=str(ctx.market_snapshot.get('trend', 'neutral') or 'neutral').strip().lower(),
+            momentum_bias=str(output.get('momentum_bias') or 'neutral'),
+            volatility_context=str(output.get('volatility_context') or 'neutral'),
+        )
+        if changed:
+            output['reason'] = self._reason_from_output(
+                signal=adjusted_signal,
+                regime=str(output.get('regime') or 'ranging'),
+                trend_bias=str(ctx.market_snapshot.get('trend', 'neutral') or 'neutral').strip().lower(),
+                momentum_bias=str(output.get('momentum_bias') or 'neutral'),
+                volatility_context=str(output.get('volatility_context') or 'neutral'),
+            )
+
+        output['llm_enabled'] = llm_enabled
+        output['llm_call_attempted'] = False
+        output['llm_fallback_used'] = False
+        output['llm_note'] = ''
+
+        prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
+        system_prompt = ''
+        user_prompt = ''
+        if llm_enabled:
+            fallback_system = (
+                'You are market-context-analyst. '
+                'Evaluate only market regime, short-term contextual momentum, movement readability, and volatility context. '
+                'Do not invent macro-fundamental or external sentiment causality. '
+                'Keep analysis cautious and concise.'
+            )
+            fallback_user = (
+                'Pair: {pair}\nTimeframe: {timeframe}\nTrend: {trend}\nLast price: {last_price}\n'
+                'Change pct: {change_pct}\nATR: {atr}\nATR ratio: {atr_ratio}\nRSI: {rsi}\n'
+                'EMA fast: {ema_fast}\nEMA slow: {ema_slow}\n'
+                'Return only one concise context note (no trading instruction).'
+            )
+            variables = {
+                'pair': ctx.pair,
+                'timeframe': ctx.timeframe,
+                'trend': ctx.market_snapshot.get('trend'),
+                'last_price': ctx.market_snapshot.get('last_price'),
+                'change_pct': ctx.market_snapshot.get('change_pct'),
+                'atr': ctx.market_snapshot.get('atr'),
+                'atr_ratio': round(
+                    _safe_float(
+                        ctx.market_snapshot.get('atr_ratio'),
+                        abs(_safe_float(ctx.market_snapshot.get('atr'), 0.0)) / max(abs(_safe_float(ctx.market_snapshot.get('last_price'), 0.0)), 1e-9),
+                    ),
+                    6,
+                ),
+                'rsi': ctx.market_snapshot.get('rsi'),
+                'ema_fast': ctx.market_snapshot.get('ema_fast'),
+                'ema_slow': ctx.market_snapshot.get('ema_slow'),
+            }
+
+            if db is not None:
+                prompt_info = self.prompt_service.render(
+                    db=db,
+                    agent_name=self.name,
+                    fallback_system=fallback_system,
+                    fallback_user=fallback_user,
+                    variables=variables,
+                )
+                system_prompt = prompt_info['system_prompt']
+                user_prompt = prompt_info['user_prompt']
+            else:
+                system_prompt = fallback_system
+                user_prompt = fallback_user.format(**variables)
+
+            output['llm_call_attempted'] = True
+            llm_res = self.llm.chat(
+                system_prompt,
+                user_prompt,
+                model=llm_model,
+                db=db,
+                max_tokens=80,
+                temperature=0.0,
+            )
+            llm_text, llm_degraded = _normalize_llm_text_and_degraded(llm_res, require_text=True)
+            if not llm_degraded and llm_text.strip():
+                output['llm_note'] = _compact_prompt_text(llm_text, max_chars=220)
+            else:
+                output['llm_fallback_used'] = True
+
+        output['llm_summary'] = self._aligned_summary(output)
+        output.pop('_mixed_context', None)
+
+        resolved_skills = list(prompt_info.get('skills', runtime_skills)) if isinstance(prompt_info, dict) else list(runtime_skills)
         output['prompt_meta'] = {
             'prompt_id': prompt_info.get('prompt_id'),
             'prompt_version': prompt_info.get('version', 0),
             'llm_model': llm_model,
             'llm_enabled': llm_enabled,
-            'skills_count': len(prompt_info.get('skills', runtime_skills)),
+            'skills_count': len(resolved_skills),
         }
         _enrich_prompt_meta_debug(
             output['prompt_meta'],
-            runtime_skills=list(prompt_info.get('skills', runtime_skills)),
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-        )
-        return output
-
-
-class SentimentAgent:
-    name = 'sentiment-agent'
-
-    def __init__(self) -> None:
-        self.llm = LlmClient()
-        self.model_selector = AgentModelSelector()
-        self.prompt_service = PromptTemplateService()
-
-    def run(self, ctx: AgentContext, db: Session | None = None) -> dict[str, Any]:
-        market = ctx.market_snapshot
-        if market.get('degraded'):
-            return {'signal': 'neutral', 'score': 0.0, 'reason': 'Sentiment unavailable'}
-
-        change_pct = market.get('change_pct', 0.0)
-        if change_pct > 0.1:
-            output: dict[str, Any] = {'signal': 'bullish', 'score': 0.1, 'reason': 'Short-term price momentum positive'}
-        elif change_pct < -0.1:
-            output = {'signal': 'bearish', 'score': -0.1, 'reason': 'Short-term price momentum negative'}
-        else:
-            output = {'signal': 'neutral', 'score': 0.0, 'reason': 'Flat momentum'}
-
-        llm_enabled = self.model_selector.is_enabled(db, self.name)
-        runtime_skills = _resolve_runtime_skills(self.model_selector, db, self.name)
-        output['llm_enabled'] = llm_enabled
-        llm_model = _resolve_llm_model(ctx, self.model_selector, db, self.name)
-        output['prompt_meta'] = {
-            'prompt_id': None,
-            'prompt_version': 0,
-            'llm_model': llm_model,
-            'llm_enabled': llm_enabled,
-            'skills_count': len(runtime_skills),
-        }
-        _enrich_prompt_meta_debug(output['prompt_meta'], runtime_skills=runtime_skills)
-        if not llm_enabled:
-            adjusted_score, adjusted_signal, changed = _apply_deterministic_skill_guardrail(
-                float(output.get('score', 0.0)),
-                base_threshold=0.05,
-                skills=runtime_skills,
-            )
-            output['score'] = adjusted_score
-            output['signal'] = adjusted_signal
-            if changed:
-                output['reason'] = 'Skill guardrails applied (deterministic mode)'
-            return output
-
-        fallback_system = 'Tu es un analyste sentiment multi-actifs. Réponds en français.'
-        fallback_user = (
-            'Pair: {pair}\nTimeframe: {timeframe}\nChange pct: {change_pct}\nTrend: {trend}\n'
-            'Classe le sentiment: bullish, bearish ou neutral puis une justification concise.'
-        )
-        prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
-        if db is not None:
-            prompt_info = self.prompt_service.render(
-                db=db,
-                agent_name=self.name,
-                fallback_system=fallback_system,
-                fallback_user=fallback_user,
-                variables={
-                    'pair': ctx.pair,
-                    'timeframe': ctx.timeframe,
-                    'change_pct': change_pct,
-                    'trend': market.get('trend'),
-                },
-            )
-            system_prompt = prompt_info['system_prompt']
-            user_prompt = prompt_info['user_prompt']
-        else:
-            system_prompt = fallback_system
-            user_prompt = fallback_user.format(
-                pair=ctx.pair,
-                timeframe=ctx.timeframe,
-                change_pct=change_pct,
-                trend=market.get('trend'),
-            )
-        llm_res = self.llm.chat(
-            system_prompt,
-            user_prompt,
-            model=llm_model,
-            db=db,
-        )
-        llm_text, llm_degraded = _normalize_llm_text_and_degraded(llm_res, require_text=True)
-        llm_signal = _parse_signal_from_text(llm_text)
-        output['score'], output['signal'] = _merge_llm_signal(
-            float(output.get('score', 0.0)),
-            llm_signal,
-            threshold=0.05,
-            llm_bias=0.05,
-        )
-        output['llm_summary'] = llm_text
-        output['degraded'] = llm_degraded
-        output['prompt_meta'] = {
-            'prompt_id': prompt_info.get('prompt_id'),
-            'prompt_version': prompt_info.get('version', 0),
-            'llm_model': llm_model,
-            'llm_enabled': llm_enabled,
-            'skills_count': len(prompt_info.get('skills', runtime_skills)),
-        }
-        _enrich_prompt_meta_debug(
-            output['prompt_meta'],
-            runtime_skills=list(prompt_info.get('skills', runtime_skills)),
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
+            runtime_skills=resolved_skills,
+            system_prompt=system_prompt if system_prompt else None,
+            user_prompt=user_prompt if user_prompt else None,
         )
         return output
 
@@ -1927,30 +2094,41 @@ class TraderAgent:
             'technical-analyst': 0.12,
             'technical': 0.12,
             'news-analyst': 0.08,
-            'macro-analyst': 0.08,
-            'sentiment-agent': 0.08,
+            'market-context-analyst': 0.08,
+            'market-context': 0.08,
         }
         directional_sources: dict[str, list[str]] = {'bullish': [], 'bearish': []}
         independent_sources: dict[str, list[str]] = {'bullish': [], 'bearish': []}
         independent_strength: dict[str, float] = {'bullish': 0.0, 'bearish': 0.0}
-        independent_agent_names = {'news-analyst', 'macro-analyst', 'sentiment-agent'}
+        independent_agent_names = {'news-analyst', 'market-context-analyst'}
 
         for name, output in agent_outputs.items():
             if not isinstance(output, dict):
                 continue
-            score = weighted_agent_scores.get(str(name), float(output.get('score', 0.0) or 0.0))
+            raw_name = str(name)
+            normalized_name = raw_name.strip().lower()
+            canonical_name = raw_name
+            if (
+                'market-context' in normalized_name
+                or 'macro' in normalized_name
+                or 'sentiment' in normalized_name
+            ):
+                canonical_name = 'market-context-analyst'
+
+            score = weighted_agent_scores.get(raw_name, float(output.get('score', 0.0) or 0.0))
             signal = str(output.get('signal', '') or '').strip().lower()
             if signal not in {'bullish', 'bearish', 'neutral'}:
-                default_threshold = 0.15 if 'technical' in str(name).lower() else 0.05
+                default_threshold = 0.15 if 'technical' in normalized_name else 0.05
                 signal = _score_to_signal(score, default_threshold)
             if signal not in {'bullish', 'bearish'}:
                 continue
-            credibility_threshold = source_thresholds.get(name, 0.08)
+            credibility_threshold = source_thresholds.get(canonical_name, source_thresholds.get(raw_name, 0.08))
             if abs(score) < credibility_threshold:
                 continue
-            directional_sources[signal].append(name)
-            if name in independent_agent_names:
-                independent_sources[signal].append(name)
+            if canonical_name not in directional_sources[signal]:
+                directional_sources[signal].append(canonical_name)
+            if canonical_name in independent_agent_names and canonical_name not in independent_sources[signal]:
+                independent_sources[signal].append(canonical_name)
                 independent_strength[signal] += abs(score)
 
         preliminary_signal = 'bullish' if net_score > 0.0 else 'bearish' if net_score < 0.0 else 'neutral'

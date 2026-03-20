@@ -30,8 +30,7 @@ class OrderGuardianService:
     LLM_AGENT_NAMES = (
         'technical-analyst',
         'news-analyst',
-        'macro-analyst',
-        'sentiment-agent',
+        'market-context-analyst',
         'bullish-researcher',
         'bearish-researcher',
         'trader-agent',

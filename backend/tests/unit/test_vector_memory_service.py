@@ -148,8 +148,7 @@ def test_add_run_memory_enriches_payload_with_structured_features() -> None:
                 'analysis_outputs': {
                     'technical-analyst': {'signal': 'bullish'},
                     'news-analyst': {'signal': 'neutral'},
-                    'macro-analyst': {'signal': 'bullish'},
-                    'sentiment-agent': {'signal': 'bullish'},
+                    'market-context-analyst': {'signal': 'bullish'},
                 },
             },
             decision={
@@ -179,6 +178,7 @@ def test_add_run_memory_enriches_payload_with_structured_features() -> None:
         assert payload['price_context']['last_price'] == 1.1052
         assert payload['price_features']['rsi_bucket'] in {'oversold', 'low', 'neutral', 'high', 'overbought', 'unknown'}
         assert payload['analysis_features']['technical_signal'] == 'bullish'
+        assert payload['analysis_features']['market_context_signal'] == 'bullish'
         assert payload['decision_features']['decision'] == 'BUY'
         assert payload['decision_features']['decision_mode'] == 'balanced'
         assert payload['outcome_features']['execution_status'] == 'simulated'

@@ -149,6 +149,7 @@ def test_order_guardian_uses_dedicated_model_override_without_overwriting_agent_
     overrides = service._guardian_llm_model_overrides(db)
 
     assert overrides.get('news-analyst') == 'gpt-oss:120b-cloud'
+    assert overrides.get('market-context-analyst') == 'gpt-oss:120b-cloud'
     assert 'trader-agent' not in overrides
 
 

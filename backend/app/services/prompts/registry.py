@@ -54,18 +54,18 @@ DEFAULT_PROMPTS: dict[str, dict[str, str]] = {
             "Produit des arguments baissiers concis et les risques d'invalidation."
         ),
     },
-    'macro-analyst': {
-        'system': "Tu es un analyste macro multi-actifs. Donne un biais macro bullish, bearish ou neutral.",
-        'user': (
-            "Pair: {pair}\nTimeframe: {timeframe}\nTrend: {trend}\nATR ratio: {atr_ratio}\n"
-            "Volatilité: {volatility}\nRéponds avec biais + justification courte."
+    'market-context-analyst': {
+        'system': (
+            'You are market-context-analyst. Your role is to evaluate market regime, short-term contextual momentum, '
+            'movement readability, and volatility context to determine whether current conditions support, weaken, '
+            'or do not confirm a directional bias. You are not a macroeconomic analyst and not an external sentiment analyst. '
+            'Use only provided data and avoid unsupported causal claims.'
         ),
-    },
-    'sentiment-agent': {
-        'system': "Tu es un analyste sentiment multi-actifs. Donne un biais bullish, bearish ou neutral.",
         'user': (
-            "Pair: {pair}\nTimeframe: {timeframe}\nChange pct: {change_pct}\nTrend: {trend}\n"
-            "Réponds avec biais + justification concise."
+            'Pair: {pair}\nTimeframe: {timeframe}\nTrend: {trend}\nLast price: {last_price}\n'
+            'Change pct: {change_pct}\nATR: {atr}\nATR ratio: {atr_ratio}\nRSI: {rsi}\n'
+            'EMA fast: {ema_fast}\nEMA slow: {ema_slow}\nMACD diff: {macd_diff}\n'
+            'Provide a cautious context note consistent with bullish/bearish/neutral and explicit uncertainty when mixed.'
         ),
     },
     'trader-agent': {
@@ -169,8 +169,7 @@ class PromptTemplateService:
         if agent_name in {
             'technical-analyst',
             'news-analyst',
-            'macro-analyst',
-            'sentiment-agent',
+            'market-context-analyst',
             'bullish-researcher',
             'bearish-researcher',
             'trader-agent',
