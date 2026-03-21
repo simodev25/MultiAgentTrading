@@ -169,6 +169,29 @@ Formats supportés:
   - `ORCHESTRATOR_SECOND_PASS_MIN_COMBINED_SCORE` (0.0-1.0)
 - La trace finale expose l'objet `second_pass` (tentative, raison, pass sélectionné).
 
+## Runtime supervisor auto-organisé (agentic fort)
+
+- Le runtime inclut un superviseur autonome qui pilote des cycles de réévaluation.
+- Actions possibles par cycle: `accept`, `rerun_with_memory_refresh`, `rerun_with_conflict_focus`, `rerun_due_to_degraded_outputs`, `finalize_hold`.
+- Le superviseur garde les barrières déterministes (risk/execution) et n'autorise pas de boucle infinie (cap de cycles + garde-fou de stagnation).
+
+Paramètres:
+
+- `ORCHESTRATOR_AUTONOMY_ENABLED` (bool)
+- `ORCHESTRATOR_AUTONOMY_MAX_CYCLES` (1-5)
+- `ORCHESTRATOR_AUTONOMY_ACCEPT_MIN_CONFIDENCE` (0.0-1.0)
+- `ORCHESTRATOR_AUTONOMY_ACCEPT_MIN_EVIDENCE` (0.0-1.0)
+- `ORCHESTRATOR_AUTONOMY_MEMORY_LIMIT_STEP` (1-10)
+- `ORCHESTRATOR_AUTONOMY_MEMORY_LIMIT_MAX` (5-50)
+- `ORCHESTRATOR_AUTONOMY_MODEL_BOOST_ENABLED` (bool)
+- `ORCHESTRATOR_MEMORY_SEARCH_LIMIT` (1-50)
+
+Traçabilité:
+
+- `analysis_runs.decision.runtime_supervisor` (cycles, action choisie, cycle sélectionné).
+- `analysis_runs.trace.runtime_supervisor` (mêmes métadonnées pour audit runtime).
+- `second_pass` reste exposé pour compatibilité descendante.
+
 ## Contrat de sortie (résumé)
 
 ```json

@@ -379,6 +379,284 @@ class ForexOrchestrator:
                 return True
         return False
 
+    def _prefer_autonomy_bundle(
+        self,
+        primary_bundle: dict[str, Any],
+        secondary_bundle: dict[str, Any],
+    ) -> bool:
+        primary_trader = primary_bundle.get('trader_decision')
+        if not isinstance(primary_trader, dict):
+            primary_trader = {}
+        secondary_trader = secondary_bundle.get('trader_decision')
+        if not isinstance(secondary_trader, dict):
+            secondary_trader = {}
+
+        if self._prefer_second_pass_result(primary_trader, secondary_trader):
+            return True
+
+        primary_decision = self._normalize_trade_decision(primary_trader.get('decision', 'HOLD'))
+        secondary_decision = self._normalize_trade_decision(secondary_trader.get('decision', 'HOLD'))
+        primary_confidence = self._safe_float(primary_trader.get('confidence'), 0.0)
+        secondary_confidence = self._safe_float(secondary_trader.get('confidence'), 0.0)
+        primary_evidence = self._safe_float(primary_trader.get('evidence_strength', primary_trader.get('evidence_quality')), 0.0)
+        secondary_evidence = self._safe_float(secondary_trader.get('evidence_strength', secondary_trader.get('evidence_quality')), 0.0)
+        primary_degraded_count = len(self._collect_bundle_degraded_agents(primary_bundle))
+        secondary_degraded_count = len(self._collect_bundle_degraded_agents(secondary_bundle))
+
+        if secondary_degraded_count < primary_degraded_count:
+            return True
+
+        if primary_decision == secondary_decision == 'HOLD':
+            primary_follow_up = bool(primary_trader.get('needs_follow_up', False))
+            secondary_follow_up = bool(secondary_trader.get('needs_follow_up', False))
+            if primary_follow_up and not secondary_follow_up:
+                return True
+            return secondary_confidence >= primary_confidence + 0.10
+
+        if primary_decision == secondary_decision and primary_decision in {'BUY', 'SELL'}:
+            if secondary_evidence >= primary_evidence + 0.08 and secondary_confidence >= primary_confidence:
+                return True
+            return secondary_confidence >= primary_confidence + 0.10
+
+        if primary_decision in {'BUY', 'SELL'} and secondary_decision in {'BUY', 'SELL'}:
+            return bool(
+                secondary_confidence >= primary_confidence + 0.20
+                and secondary_evidence >= primary_evidence + 0.10
+                and not bool(secondary_trader.get('strong_conflict', False))
+            )
+
+        return False
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
+
+    @staticmethod
+    def _normalize_trade_decision(value: Any) -> str:
+        decision = str(value or '').strip().upper()
+        if decision in {'BUY', 'SELL', 'HOLD'}:
+            return decision
+        return 'HOLD'
+
+    def _load_memory_state(
+        self,
+        *,
+        db: Session,
+        pair: str,
+        timeframe: str,
+        market: dict[str, Any],
+        decision_mode: str,
+        memory_retrieval_context: dict[str, Any],
+        memory_context_enabled: bool,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        if not memory_context_enabled:
+            return [], self.memory_service.empty_memory_signal(
+                'memory_context_disabled',
+                retrieved_count=0,
+                decision_mode=decision_mode,
+            )
+
+        effective_limit = max(1, int(limit))
+        memory_context = self.memory_service.search(
+            db=db,
+            pair=pair,
+            timeframe=timeframe,
+            query=f'{pair} {timeframe} trend {market.get("trend", "unknown")}',
+            limit=effective_limit,
+            retrieval_context=memory_retrieval_context,
+        )
+        memory_signal = self.memory_service.compute_memory_signal(
+            memory_context,
+            market_snapshot=market,
+            decision_mode=decision_mode,
+        )
+        return memory_context, memory_signal
+
+    def _collect_bundle_degraded_agents(self, analysis_bundle: dict[str, Any]) -> list[str]:
+        analysis_outputs = analysis_bundle.get('analysis_outputs')
+        if not isinstance(analysis_outputs, dict):
+            analysis_outputs = {}
+        named_outputs: dict[str, dict[str, Any] | None] = {
+            **analysis_outputs,
+            self.bullish_researcher.name: analysis_bundle.get('bullish'),
+            self.bearish_researcher.name: analysis_bundle.get('bearish'),
+            self.trader_agent.name: analysis_bundle.get('trader_decision'),
+            self.risk_manager_agent.name: analysis_bundle.get('risk'),
+        }
+        return sorted(dict.fromkeys(self._collect_degraded_agents(named_outputs)))
+
+    def _build_autonomy_cycle_assessment(
+        self,
+        *,
+        cycle_index: int,
+        max_cycles: int,
+        analysis_bundle: dict[str, Any],
+    ) -> dict[str, Any]:
+        trader_decision = analysis_bundle.get('trader_decision')
+        if not isinstance(trader_decision, dict):
+            trader_decision = {}
+        risk_output = analysis_bundle.get('risk')
+        if not isinstance(risk_output, dict):
+            risk_output = {}
+
+        decision = self._normalize_trade_decision(trader_decision.get('decision', 'HOLD'))
+        confidence = self._safe_float(trader_decision.get('confidence'), 0.0)
+        evidence_strength = self._safe_float(
+            trader_decision.get(
+                'evidence_strength',
+                trader_decision.get('evidence_quality', trader_decision.get('confidence', 0.0)),
+            ),
+            0.0,
+        )
+        combined_score = abs(self._safe_float(trader_decision.get('combined_score'), 0.0))
+        uncertainty_level = str(trader_decision.get('uncertainty_level') or 'high').strip().lower() or 'high'
+        needs_follow_up = bool(trader_decision.get('needs_follow_up', False))
+        follow_up_reason = str(trader_decision.get('follow_up_reason') or '').strip().lower() or None
+        strong_conflict = bool(trader_decision.get('strong_conflict', False))
+        execution_allowed = bool(trader_decision.get('execution_allowed', decision in {'BUY', 'SELL'}))
+        risk_accepted = bool(risk_output.get('accepted', False))
+        degraded_agents = self._collect_bundle_degraded_agents(analysis_bundle)
+        should_second_pass, second_pass_reason = self._should_trigger_second_pass(trader_decision)
+
+        remaining_cycles = max(max_cycles - (cycle_index + 1), 0)
+        action = 'accept'
+        action_reason = 'decision_ready'
+        if not self.settings.orchestrator_autonomy_enabled:
+            action = 'accept'
+            action_reason = 'autonomy_disabled'
+        elif remaining_cycles > 0 and degraded_agents:
+            action = 'rerun_due_to_degraded_outputs'
+            action_reason = 'degraded_outputs'
+        elif remaining_cycles > 0 and should_second_pass:
+            if strong_conflict:
+                action = 'rerun_with_conflict_focus'
+            elif follow_up_reason in {'insufficient_evidence', 'low_edge'}:
+                action = 'rerun_with_memory_refresh'
+            else:
+                action = 'rerun_second_pass'
+            action_reason = second_pass_reason
+        elif decision in {'BUY', 'SELL'} and execution_allowed and risk_accepted:
+            min_confidence = float(self.settings.orchestrator_autonomy_accept_min_confidence)
+            min_evidence = float(self.settings.orchestrator_autonomy_accept_min_evidence)
+            if confidence < min_confidence or evidence_strength < min_evidence:
+                if remaining_cycles > 0:
+                    action = 'rerun_with_conflict_focus'
+                    action_reason = 'directional_low_quality'
+                else:
+                    action = 'accept_with_low_quality'
+                    action_reason = 'cycle_cap_reached'
+            else:
+                action = 'accept'
+                action_reason = 'directional_quality_ok'
+        elif decision == 'HOLD' and (needs_follow_up or strong_conflict) and remaining_cycles == 0:
+            action = 'finalize_hold'
+            action_reason = 'cycle_cap_reached_for_hold'
+
+        return {
+            'cycle': cycle_index + 1,
+            'remaining_cycles': remaining_cycles,
+            'decision': decision,
+            'confidence': round(confidence, 4),
+            'combined_score': round(combined_score, 4),
+            'evidence_strength': round(evidence_strength, 4),
+            'uncertainty_level': uncertainty_level,
+            'needs_follow_up': needs_follow_up,
+            'follow_up_reason': follow_up_reason,
+            'strong_conflict': strong_conflict,
+            'execution_allowed': execution_allowed,
+            'risk_accepted': risk_accepted,
+            'degraded_agents': degraded_agents,
+            'should_second_pass': should_second_pass,
+            'second_pass_reason': second_pass_reason,
+            'action': action,
+            'action_reason': action_reason,
+            'should_rerun': action.startswith('rerun_') and remaining_cycles > 0,
+        }
+
+    def _build_autonomy_model_overrides(
+        self,
+        *,
+        db: Session,
+        action: str,
+        degraded_agents: list[str],
+    ) -> dict[str, str]:
+        if not self.settings.orchestrator_autonomy_model_boost_enabled:
+            return {}
+
+        default_model = str(self.model_selector.resolve(db)).strip()
+        if not default_model:
+            return {}
+
+        target_agents: set[str] = set()
+        if action in {'rerun_with_conflict_focus', 'rerun_second_pass'}:
+            target_agents.update(
+                {
+                    self.news_agent.name,
+                    self.bullish_researcher.name,
+                    self.bearish_researcher.name,
+                    self.trader_agent.name,
+                }
+            )
+        if action == 'rerun_due_to_degraded_outputs':
+            target_agents.update(str(name).strip() for name in degraded_agents if str(name).strip())
+
+        if not target_agents:
+            return {}
+
+        overrides: dict[str, str] = {}
+        for agent_name in sorted(target_agents):
+            current_model = str(self.model_selector.resolve(db, agent_name)).strip()
+            if current_model and current_model != default_model:
+                overrides[agent_name] = default_model
+        return overrides
+
+    @staticmethod
+    def _selected_pass_label(selected_cycle: int) -> str:
+        if selected_cycle <= 1:
+            return 'first'
+        if selected_cycle == 2:
+            return 'second'
+        return f'pass-{selected_cycle}'
+
+    def _build_second_pass_meta_from_autonomy(self, autonomy_meta: dict[str, Any]) -> dict[str, Any]:
+        cycles = autonomy_meta.get('cycles')
+        if not isinstance(cycles, list):
+            cycles = []
+        first_cycle = cycles[0] if cycles else {}
+        second_cycle = cycles[1] if len(cycles) > 1 else {}
+        selected_cycle = max(int(autonomy_meta.get('selected_cycle', 1) or 1), 1)
+        attempt_count = max(int(autonomy_meta.get('second_pass_attempt_count', 0) or 0), 0)
+        attempted = attempt_count > 0
+
+        trigger_reason: str | None = None
+        for cycle in cycles:
+            if not isinstance(cycle, dict):
+                continue
+            if bool(cycle.get('should_second_pass')) and str(cycle.get('action') or '').startswith('rerun_'):
+                trigger_reason = str(cycle.get('action_reason') or '') or None
+                break
+
+        result: dict[str, Any] = {
+            'enabled': bool(self.settings.orchestrator_second_pass_enabled),
+            'attempted': attempted,
+            'attempt_count': attempt_count,
+            'trigger_reason': trigger_reason,
+            'selected_pass': self._selected_pass_label(selected_cycle),
+            'first_decision': self._normalize_trade_decision(first_cycle.get('decision', 'HOLD')),
+            'first_confidence': self._safe_float(first_cycle.get('confidence'), 0.0),
+        }
+        if attempted and second_cycle:
+            result['second_decision'] = self._normalize_trade_decision(second_cycle.get('decision', 'HOLD'))
+            result['second_confidence'] = self._safe_float(second_cycle.get('confidence'), 0.0)
+            result['used_second_pass_result'] = selected_cycle >= 2
+        else:
+            result['skip_reason'] = str(first_cycle.get('action_reason') or 'no_second_pass_condition')
+        return result
+
     def analyze_context(
         self,
         context: AgentContext,
@@ -573,26 +851,17 @@ class ForexOrchestrator:
             market,
             decision_mode=decision_mode,
         )
-        memory_context: list[dict[str, Any]] = []
-        memory_signal: dict[str, Any] = self.memory_service.empty_memory_signal(
-            'memory_context_disabled',
-            retrieved_count=0,
+        memory_limit = max(int(self.settings.orchestrator_memory_search_limit), 1)
+        memory_context, memory_signal = self._load_memory_state(
+            db=db,
+            pair=run.pair,
+            timeframe=run.timeframe,
+            market=market,
             decision_mode=decision_mode,
+            memory_retrieval_context=memory_retrieval_context,
+            memory_context_enabled=memory_context_enabled,
+            limit=memory_limit,
         )
-        if memory_context_enabled:
-            memory_context = self.memory_service.search(
-                db=db,
-                pair=run.pair,
-                timeframe=run.timeframe,
-                query=f'{run.pair} {run.timeframe} trend {market.get("trend", "unknown")}',
-                limit=5,
-                retrieval_context=memory_retrieval_context,
-            )
-            memory_signal = self.memory_service.compute_memory_signal(
-                memory_context,
-                market_snapshot=market,
-                decision_mode=decision_mode,
-            )
 
         context = AgentContext(
             pair=run.pair,
@@ -603,6 +872,7 @@ class ForexOrchestrator:
             news_context=news,
             memory_context=memory_context,
             memory_signal=memory_signal,
+            llm_model_overrides={},
         )
         price_history: list[dict[str, Any]] = []
         if self.settings.debug_trade_json_enabled and self.settings.debug_trade_json_include_price_history:
@@ -616,32 +886,29 @@ class ForexOrchestrator:
                 logger.exception('debug price history fetch failed run_id=%s', run_id)
 
         try:
-            analysis_bundle = self.analyze_context(context=context, db=db, run=run, record_steps=True, emit_step_logs=True)
-            analysis_outputs = analysis_bundle['analysis_outputs']
-            bullish = analysis_bundle['bullish']
-            bearish = analysis_bundle['bearish']
-            trader_decision = analysis_bundle['trader_decision']
-            risk_output = analysis_bundle['risk']
-            second_pass_meta: dict[str, Any] = {
-                'enabled': bool(self.settings.orchestrator_second_pass_enabled),
-                'attempted': False,
-                'attempt_count': 0,
-                'trigger_reason': None,
-                'selected_pass': 'first',
-                'first_decision': str(trader_decision.get('decision', 'HOLD') or 'HOLD'),
-                'first_confidence': float(trader_decision.get('confidence', 0.0) or 0.0),
-            }
+            autonomy_enabled = bool(self.settings.orchestrator_autonomy_enabled)
+            max_cycles = max(int(self.settings.orchestrator_autonomy_max_cycles), 1)
+            if not autonomy_enabled:
+                max_cycles = 1
+
             max_second_pass_attempts = max(int(self.settings.orchestrator_second_pass_max_attempts), 0)
+            second_pass_attempt_count = 0
+            cycle_summaries: list[dict[str, Any]] = []
 
-            for _ in range(max_second_pass_attempts):
-                should_second_pass, trigger_reason = self._should_trigger_second_pass(trader_decision)
-                if not should_second_pass:
-                    second_pass_meta['skip_reason'] = trigger_reason
-                    break
+            selected_bundle: dict[str, Any] | None = None
+            selected_cycle = 1
+            selected_memory_context: list[dict[str, Any]] = list(memory_context)
+            selected_memory_signal: dict[str, Any] = dict(memory_signal)
+            selected_model_overrides: dict[str, str] = dict(context.llm_model_overrides or {})
 
-                second_pass_meta['attempted'] = True
-                second_pass_meta['attempt_count'] = int(second_pass_meta.get('attempt_count', 0)) + 1
-                second_pass_meta['trigger_reason'] = trigger_reason
+            current_memory_context: list[dict[str, Any]] = list(memory_context)
+            current_memory_signal: dict[str, Any] = dict(memory_signal)
+            current_model_overrides: dict[str, str] = {}
+
+            for cycle_index in range(max_cycles):
+                context.memory_context = current_memory_context
+                context.memory_signal = current_memory_signal
+                context.llm_model_overrides = dict(current_model_overrides)
 
                 candidate_bundle = self.analyze_context(
                     context=context,
@@ -650,22 +917,118 @@ class ForexOrchestrator:
                     record_steps=True,
                     emit_step_logs=True,
                 )
-                candidate_trader_decision = candidate_bundle['trader_decision']
-                second_pass_meta['second_decision'] = str(candidate_trader_decision.get('decision', 'HOLD') or 'HOLD')
-                second_pass_meta['second_confidence'] = float(candidate_trader_decision.get('confidence', 0.0) or 0.0)
 
-                if self._prefer_second_pass_result(trader_decision, candidate_trader_decision):
-                    analysis_bundle = candidate_bundle
-                    analysis_outputs = analysis_bundle['analysis_outputs']
-                    bullish = analysis_bundle['bullish']
-                    bearish = analysis_bundle['bearish']
-                    trader_decision = analysis_bundle['trader_decision']
-                    risk_output = analysis_bundle['risk']
-                    second_pass_meta['selected_pass'] = 'second'
-                    second_pass_meta['used_second_pass_result'] = True
+                if selected_bundle is None:
+                    selected_bundle = candidate_bundle
+                    selected_cycle = cycle_index + 1
+                    selected_memory_context = list(current_memory_context)
+                    selected_memory_signal = dict(current_memory_signal)
+                    selected_model_overrides = dict(current_model_overrides)
+                elif self._prefer_autonomy_bundle(selected_bundle, candidate_bundle):
+                    selected_bundle = candidate_bundle
+                    selected_cycle = cycle_index + 1
+                    selected_memory_context = list(current_memory_context)
+                    selected_memory_signal = dict(current_memory_signal)
+                    selected_model_overrides = dict(current_model_overrides)
+
+                cycle_assessment = self._build_autonomy_cycle_assessment(
+                    cycle_index=cycle_index,
+                    max_cycles=max_cycles,
+                    analysis_bundle=candidate_bundle,
+                )
+                cycle_assessment['memory_context_count'] = len(current_memory_context)
+                cycle_assessment['memory_limit'] = memory_limit
+                cycle_assessment['memory_signal_used'] = bool(current_memory_signal.get('used', False))
+                cycle_assessment['llm_model_overrides'] = dict(current_model_overrides)
+
+                if bool(cycle_assessment.get('should_second_pass')) and bool(cycle_assessment.get('should_rerun')):
+                    if not self.settings.orchestrator_second_pass_enabled:
+                        cycle_assessment['should_rerun'] = False
+                        cycle_assessment['action'] = 'accept'
+                        cycle_assessment['action_reason'] = 'second_pass_feature_disabled'
+                    elif second_pass_attempt_count >= max_second_pass_attempts:
+                        cycle_assessment['should_rerun'] = False
+                        cycle_assessment['action'] = 'finalize_hold'
+                        cycle_assessment['action_reason'] = 'second_pass_attempt_limit_reached'
+
+                if bool(cycle_assessment.get('should_rerun')) and cycle_summaries:
+                    previous = cycle_summaries[-1]
+                    previous_degraded = previous.get('degraded_agents')
+                    current_degraded = cycle_assessment.get('degraded_agents')
+                    stagnating = bool(
+                        previous.get('action') == cycle_assessment.get('action')
+                        and previous.get('decision') == cycle_assessment.get('decision')
+                        and previous_degraded == current_degraded
+                        and abs(self._safe_float(previous.get('confidence')) - self._safe_float(cycle_assessment.get('confidence'))) <= 0.02
+                        and abs(self._safe_float(previous.get('combined_score')) - self._safe_float(cycle_assessment.get('combined_score'))) <= 0.02
+                    )
+                    if stagnating:
+                        cycle_assessment['should_rerun'] = False
+                        cycle_assessment['action'] = (
+                            'finalize_hold'
+                            if str(cycle_assessment.get('decision') or 'HOLD').upper() == 'HOLD'
+                            else 'accept'
+                        )
+                        cycle_assessment['action_reason'] = 'stagnation_guardrail'
+
+                cycle_summaries.append(cycle_assessment)
+
+                if bool(cycle_assessment.get('should_rerun')) and bool(cycle_assessment.get('should_second_pass')):
+                    second_pass_attempt_count += 1
+
+                if not bool(cycle_assessment.get('should_rerun')):
                     break
 
-                second_pass_meta['used_second_pass_result'] = False
+                rerun_action = str(cycle_assessment.get('action') or '')
+                if memory_context_enabled and rerun_action == 'rerun_with_memory_refresh':
+                    next_limit = min(
+                        memory_limit + int(self.settings.orchestrator_autonomy_memory_limit_step),
+                        max(int(self.settings.orchestrator_autonomy_memory_limit_max), memory_limit),
+                    )
+                    memory_limit = max(next_limit, memory_limit)
+                    current_memory_context, current_memory_signal = self._load_memory_state(
+                        db=db,
+                        pair=run.pair,
+                        timeframe=run.timeframe,
+                        market=market,
+                        decision_mode=decision_mode,
+                        memory_retrieval_context=memory_retrieval_context,
+                        memory_context_enabled=memory_context_enabled,
+                        limit=memory_limit,
+                    )
+
+                current_model_overrides = self._build_autonomy_model_overrides(
+                    db=db,
+                    action=rerun_action,
+                    degraded_agents=list(cycle_assessment.get('degraded_agents', [])),
+                )
+
+            if selected_bundle is None:
+                raise RuntimeError('Orchestrator produced no analysis bundle.')
+
+            analysis_bundle = selected_bundle
+            analysis_outputs = analysis_bundle['analysis_outputs']
+            bullish = analysis_bundle['bullish']
+            bearish = analysis_bundle['bearish']
+            trader_decision = analysis_bundle['trader_decision']
+            risk_output = analysis_bundle['risk']
+
+            memory_context = selected_memory_context
+            memory_signal = selected_memory_signal
+            context.memory_context = memory_context
+            context.memory_signal = memory_signal
+            context.llm_model_overrides = selected_model_overrides
+
+            autonomy_meta = {
+                'enabled': autonomy_enabled,
+                'max_cycles': max_cycles,
+                'executed_cycles': len(cycle_summaries),
+                'selected_cycle': selected_cycle,
+                'second_pass_attempt_count': second_pass_attempt_count,
+                'selected_pass': self._selected_pass_label(selected_cycle),
+                'cycles': cycle_summaries,
+            }
+            second_pass_meta = self._build_second_pass_meta_from_autonomy(autonomy_meta)
 
             if str(run.mode or '').strip().lower() == 'live':
                 candidate_outputs = {
@@ -755,6 +1118,7 @@ class ForexOrchestrator:
                 'execution': execution_result,
                 'execution_manager': execution_output,
                 'second_pass': second_pass_meta,
+                'runtime_supervisor': autonomy_meta,
             }
             run.status = 'completed'
             trace_payload = {
@@ -770,6 +1134,7 @@ class ForexOrchestrator:
                 'requested_metaapi_account_ref': metaapi_account_ref,
                 'workflow': list(self.WORKFLOW_STEPS),
                 'second_pass': second_pass_meta,
+                'runtime_supervisor': autonomy_meta,
             }
             if self.settings.debug_trade_json_enabled:
                 debug_payload = self._build_debug_trade_payload(

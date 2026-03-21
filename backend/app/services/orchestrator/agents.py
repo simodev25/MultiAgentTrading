@@ -1316,12 +1316,17 @@ class NewsAnalystAgent:
             summary = 'LLM disabled for news-analyst. Deterministic skill-aware fallback used.'
             llm_skipped_reason = 'llm_disabled'
 
+        llm_tie_breaker_mode = bool(
+            decision_mode == 'neutral_from_mixed_news'
+            and coverage in {'medium', 'high'}
+            and relevant_total >= 4
+        )
         should_call_llm = (
             llm_enabled
             and not degraded
             and decision_mode in {'directional', 'neutral_from_mixed_news'}
             and coverage in {'medium', 'high'}
-            and evidence_strength >= llm_min_evidence_strength
+            and (evidence_strength >= llm_min_evidence_strength or llm_tie_breaker_mode)
             and not self._is_llm_circuit_open()
         )
         if llm_enabled and not should_call_llm and llm_skipped_reason is None:

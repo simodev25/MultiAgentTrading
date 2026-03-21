@@ -495,3 +495,209 @@ def test_orchestrator_second_pass_can_promote_hold_to_directional_trade(monkeypa
         assert completed_run.decision.get('second_pass', {}).get('attempted') is True
         assert completed_run.decision.get('second_pass', {}).get('selected_pass') == 'second'
         assert completed_run.trace.get('second_pass', {}).get('selected_pass') == 'second'
+
+
+def test_orchestrator_runtime_supervisor_refreshes_memory_before_second_pass(monkeypatch) -> None:
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(bind=engine)
+
+    with Session(engine) as db:
+        run = _seed_run(db, mode='simulation')
+        orchestrator = ForexOrchestrator()
+        orchestrator.settings.orchestrator_autonomy_enabled = True
+        orchestrator.settings.orchestrator_autonomy_max_cycles = 3
+        orchestrator.settings.orchestrator_second_pass_enabled = True
+        orchestrator.settings.orchestrator_second_pass_max_attempts = 2
+        orchestrator.settings.orchestrator_memory_search_limit = 5
+        orchestrator.settings.orchestrator_autonomy_memory_limit_step = 2
+        orchestrator.settings.orchestrator_autonomy_memory_limit_max = 9
+
+        monkeypatch.setattr(orchestrator.prompt_service, 'seed_defaults', lambda _db: None)
+        monkeypatch.setattr(orchestrator.model_selector, 'resolve_memory_context_enabled', lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(orchestrator.market_provider, 'get_market_snapshot', lambda *_args, **_kwargs: {
+            'degraded': False,
+            'pair': 'EURUSD',
+            'timeframe': 'H1',
+            'last_price': 1.102,
+            'atr': 0.001,
+            'trend': 'bullish',
+        })
+        monkeypatch.setattr(orchestrator.market_provider, 'get_news_context', lambda *_args, **_kwargs: {
+            'degraded': False,
+            'pair': 'EURUSD',
+            'news': [],
+        })
+
+        search_limits: list[int] = []
+
+        def fake_search(**kwargs):
+            limit = int(kwargs.get('limit', 0) or 0)
+            search_limits.append(limit)
+            return [{'summary': f'memory-{index + 1}', 'score': 0.5} for index in range(min(limit, 3))]
+
+        monkeypatch.setattr(orchestrator.memory_service, 'search', fake_search)
+        monkeypatch.setattr(orchestrator.memory_service, 'add_run_memory', lambda *_args, **_kwargs: None)
+
+        calls = {'count': 0}
+
+        def fake_analyze_context(*_args, **kwargs):
+            calls['count'] += 1
+            local_context = kwargs.get('context')
+            memory_items = list(getattr(local_context, 'memory_context', []))
+            if calls['count'] == 1:
+                return {
+                    'analysis_outputs': {'technical-analyst': {'signal': 'bullish', 'score': 0.24}},
+                    'bullish': {'arguments': ['trend aligns'], 'confidence': 0.62},
+                    'bearish': {'arguments': ['counter move possible'], 'confidence': 0.31},
+                    'trader_decision': {
+                        'decision': 'HOLD',
+                        'confidence': 0.43,
+                        'combined_score': 0.24,
+                        'strong_conflict': False,
+                        'needs_follow_up': True,
+                        'follow_up_reason': 'insufficient_evidence',
+                        'decision_gates': ['insufficient_aligned_sources'],
+                        'execution_allowed': False,
+                        'evidence_strength': 0.31,
+                        'entry': 1.102,
+                        'stop_loss': None,
+                        'take_profit': None,
+                        'memory_count': len(memory_items),
+                    },
+                    'risk': {
+                        'accepted': True,
+                        'suggested_volume': 0.0,
+                        'reasons': ['No trade requested (HOLD).'],
+                    },
+                }
+
+            return {
+                'analysis_outputs': {'technical-analyst': {'signal': 'bullish', 'score': 0.36}},
+                'bullish': {'arguments': ['trend aligns strongly'], 'confidence': 0.79},
+                'bearish': {'arguments': ['bearish case weakens'], 'confidence': 0.12},
+                'trader_decision': {
+                    'decision': 'BUY',
+                    'confidence': 0.71,
+                    'combined_score': 0.33,
+                    'strong_conflict': False,
+                    'needs_follow_up': False,
+                    'follow_up_reason': None,
+                    'decision_gates': ['technical_neutral_exception'],
+                    'execution_allowed': True,
+                    'evidence_strength': 0.58,
+                    'entry': 1.102,
+                    'stop_loss': 1.1,
+                    'take_profit': 1.106,
+                    'memory_count': len(memory_items),
+                },
+                'risk': {
+                    'accepted': True,
+                    'suggested_volume': 0.2,
+                    'reasons': ['Risk checks passed.'],
+                },
+            }
+
+        monkeypatch.setattr(orchestrator, 'analyze_context', fake_analyze_context)
+        monkeypatch.setattr(
+            orchestrator.execution_manager_agent,
+            'run',
+            lambda *_args, **_kwargs: {
+                'decision': 'BUY',
+                'should_execute': False,
+                'side': 'BUY',
+                'volume': 0.2,
+                'reason': 'Execution disabled in test.',
+                'degraded': False,
+            },
+        )
+
+        completed_run = asyncio.run(orchestrator.execute(db, run, risk_percent=1.0))
+
+        assert completed_run.status == 'completed'
+        assert calls['count'] == 2
+        assert search_limits == [5, 7]
+        assert completed_run.decision.get('decision') == 'BUY'
+        assert completed_run.decision.get('second_pass', {}).get('selected_pass') == 'second'
+        runtime_supervisor = completed_run.decision.get('runtime_supervisor', {})
+        assert runtime_supervisor.get('executed_cycles') == 2
+        assert runtime_supervisor.get('selected_cycle') == 2
+        assert runtime_supervisor.get('cycles', [])[0].get('action') == 'rerun_with_memory_refresh'
+
+
+def test_orchestrator_runtime_supervisor_stops_on_stagnation_guardrail(monkeypatch) -> None:
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(bind=engine)
+
+    with Session(engine) as db:
+        run = _seed_run(db, mode='simulation')
+        orchestrator = ForexOrchestrator()
+        orchestrator.settings.orchestrator_autonomy_enabled = True
+        orchestrator.settings.orchestrator_autonomy_max_cycles = 4
+        orchestrator.settings.orchestrator_second_pass_enabled = True
+        orchestrator.settings.orchestrator_second_pass_max_attempts = 3
+
+        monkeypatch.setattr(orchestrator.prompt_service, 'seed_defaults', lambda _db: None)
+        monkeypatch.setattr(orchestrator.market_provider, 'get_market_snapshot', lambda *_args, **_kwargs: {
+            'degraded': False,
+            'pair': 'EURUSD',
+            'timeframe': 'H1',
+            'last_price': 1.102,
+            'atr': 0.001,
+            'trend': 'neutral',
+        })
+        monkeypatch.setattr(orchestrator.market_provider, 'get_news_context', lambda *_args, **_kwargs: {
+            'degraded': False,
+            'pair': 'EURUSD',
+            'news': [],
+        })
+        monkeypatch.setattr(orchestrator.memory_service, 'search', lambda **_kwargs: [])
+        monkeypatch.setattr(orchestrator.memory_service, 'add_run_memory', lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(
+            orchestrator,
+            'analyze_context',
+            lambda *_args, **_kwargs: {
+                'analysis_outputs': {'technical-analyst': {'signal': 'neutral', 'score': 0.0}},
+                'bullish': {'arguments': ['weak bullish signal'], 'confidence': 0.40},
+                'bearish': {'arguments': ['weak bearish signal'], 'confidence': 0.41},
+                'trader_decision': {
+                    'decision': 'HOLD',
+                    'confidence': 0.39,
+                    'combined_score': 0.21,
+                    'strong_conflict': True,
+                    'needs_follow_up': True,
+                    'follow_up_reason': 'strong_conflict',
+                    'decision_gates': ['strong_conflict', 'low_edge'],
+                    'execution_allowed': False,
+                    'evidence_strength': 0.33,
+                    'entry': 1.102,
+                    'stop_loss': None,
+                    'take_profit': None,
+                },
+                'risk': {
+                    'accepted': True,
+                    'suggested_volume': 0.0,
+                    'reasons': ['No trade requested (HOLD).'],
+                },
+            },
+        )
+        monkeypatch.setattr(
+            orchestrator.execution_manager_agent,
+            'run',
+            lambda *_args, **_kwargs: {
+                'decision': 'HOLD',
+                'should_execute': False,
+                'side': None,
+                'volume': 0.0,
+                'reason': 'No execution for HOLD.',
+                'degraded': False,
+            },
+        )
+
+        completed_run = asyncio.run(orchestrator.execute(db, run, risk_percent=1.0))
+
+        assert completed_run.status == 'completed'
+        runtime_supervisor = completed_run.decision.get('runtime_supervisor', {})
+        assert runtime_supervisor.get('executed_cycles') == 2
+        cycles = runtime_supervisor.get('cycles', [])
+        assert cycles[1].get('action_reason') == 'stagnation_guardrail'
+        assert completed_run.decision.get('second_pass', {}).get('attempt_count') == 1
