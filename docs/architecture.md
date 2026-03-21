@@ -44,7 +44,9 @@ flowchart LR
 - `backend/app/services/risk`: règles de taille/risque et blocages.
 - `backend/app/services/scheduler`: planification cron des runs (dispatch via Celery Beat) + génération automatique de plans actifs (LLM + fallback déterministe).
 - `backend/app/services/prompts`: prompts versionnés/activables en base.
-- `backend/app/services/memory`: mémoire vectorielle (Qdrant + repli SQL cosine), filtrée par `pair` et `timeframe`.
+- `backend/app/services/memory`: mémoire hybride:
+  - `VectorMemoryService` (Qdrant + repli SQL cosine), filtrée par `pair` et `timeframe`, utilisée pour le `memory_signal` déterministe.
+  - `MemoriMemoryService` (optionnel) pour rappel sémantique additionnel inter-runs/inter-agents.
 - `backend/app/services/backtest`: stratégies `agents_v1` et `ema_rsi`.
 
 ## Frontières de sécurité (V1)

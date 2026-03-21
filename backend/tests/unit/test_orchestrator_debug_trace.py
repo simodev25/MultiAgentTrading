@@ -388,6 +388,241 @@ def test_orchestrator_skips_memory_context_search_when_disabled(monkeypatch) -> 
         assert completed_run.trace.get('memory_signal', {}).get('used') is False
 
 
+def test_orchestrator_appends_memori_context_without_changing_vector_memory_signal(monkeypatch) -> None:
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(bind=engine)
+
+    with Session(engine) as db:
+        run = _seed_run(db, mode='simulation')
+        orchestrator = ForexOrchestrator()
+        orchestrator.settings.memori_enabled = True
+
+        monkeypatch.setattr(orchestrator.prompt_service, 'seed_defaults', lambda _db: None)
+        monkeypatch.setattr(orchestrator.model_selector, 'resolve_memory_context_enabled', lambda *_args, **_kwargs: True)
+        monkeypatch.setattr(orchestrator.model_selector, 'resolve_decision_mode', lambda *_args, **_kwargs: 'balanced')
+        monkeypatch.setattr(orchestrator.market_provider, 'get_market_snapshot', lambda *_args, **_kwargs: {
+            'degraded': False,
+            'pair': 'EURUSD',
+            'timeframe': 'H1',
+            'last_price': 1.102,
+            'atr': 0.001,
+            'trend': 'bullish',
+        })
+        monkeypatch.setattr(orchestrator.market_provider, 'get_news_context', lambda *_args, **_kwargs: {
+            'degraded': False,
+            'pair': 'EURUSD',
+            'news': [],
+        })
+
+        vector_signal_input: dict[str, object] = {}
+
+        monkeypatch.setattr(
+            orchestrator.memory_service,
+            'search',
+            lambda **_kwargs: [
+                {
+                    'summary': 'Vector memory case',
+                    'source_type': 'run_outcome',
+                    'score': 0.88,
+                    'payload': {
+                        'decision_features': {'decision': 'BUY'},
+                        'outcome_features': {'outcome_label': 'win', 'rr_realized': 0.6},
+                    },
+                }
+            ],
+        )
+
+        def fake_compute_memory_signal(memory_cases, **_kwargs):
+            vector_signal_input['cases'] = list(memory_cases)
+            return {
+                'used': True,
+                'retrieved_count': len(memory_cases),
+                'eligible_count': len(memory_cases),
+                'score_adjustment': 0.0,
+                'confidence_adjustment': 0.0,
+            }
+
+        monkeypatch.setattr(orchestrator.memory_service, 'compute_memory_signal', fake_compute_memory_signal)
+        monkeypatch.setattr(orchestrator.memory_service, 'add_run_memory', lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(
+            orchestrator.memori_memory_service,
+            'recall',
+            lambda **_kwargs: (
+                [
+                    {
+                        'summary': 'Memori semantic fact',
+                        'source_type': 'memori_fact',
+                        'score': 0.76,
+                        'payload': {'provider': 'memori'},
+                    }
+                ],
+                {
+                    'enabled': True,
+                    'available': True,
+                    'returned_count': 1,
+                    'entity_id': 'fx:eurusd:h1',
+                    'process_id': 'forex-orchestrator',
+                    'error': None,
+                },
+            ),
+        )
+        monkeypatch.setattr(
+            orchestrator.memori_memory_service,
+            'store_run_memory',
+            lambda *_args, **_kwargs: {'enabled': True, 'available': True, 'stored': False, 'error': 'store_disabled'},
+        )
+
+        observed_context: dict[str, object] = {}
+
+        def fake_analyze_context(*_args, **kwargs):
+            local_context = kwargs.get('context')
+            observed_context['memory_context'] = list(getattr(local_context, 'memory_context', []))
+            observed_context['memory_signal'] = dict(getattr(local_context, 'memory_signal', {}))
+            return {
+                'analysis_outputs': {'technical-analyst': {'signal': 'neutral', 'score': 0.0}},
+                'bullish': {'arguments': ['No edge'], 'confidence': 0.0},
+                'bearish': {'arguments': ['No edge'], 'confidence': 0.0},
+                'trader_decision': {
+                    'decision': 'HOLD',
+                    'entry': 1.102,
+                    'stop_loss': None,
+                    'take_profit': None,
+                    'confidence': 0.1,
+                },
+                'risk': {
+                    'accepted': True,
+                    'suggested_volume': 0.0,
+                    'reasons': ['No trade requested (HOLD).'],
+                },
+            }
+
+        monkeypatch.setattr(orchestrator, 'analyze_context', fake_analyze_context)
+        monkeypatch.setattr(
+            orchestrator.execution_manager_agent,
+            'run',
+            lambda *_args, **_kwargs: {
+                'decision': 'HOLD',
+                'should_execute': False,
+                'side': None,
+                'volume': 0.0,
+                'reason': 'No execution for decision=HOLD.',
+                'degraded': False,
+            },
+        )
+
+        completed_run = asyncio.run(orchestrator.execute(db, run, risk_percent=1.0))
+
+        assert completed_run.status == 'completed'
+        signal_cases = vector_signal_input.get('cases')
+        assert isinstance(signal_cases, list)
+        assert len(signal_cases) == 1
+        assert signal_cases[0]['summary'] == 'Vector memory case'
+
+        context_items = observed_context.get('memory_context')
+        assert isinstance(context_items, list)
+        summaries = {str(item.get('summary', '')) for item in context_items if isinstance(item, dict)}
+        assert 'Vector memory case' in summaries
+        assert 'Memori semantic fact' in summaries
+
+        runtime_memory = completed_run.trace.get('memory_runtime', {})
+        assert runtime_memory.get('sources', {}).get('vector') == 1
+        assert runtime_memory.get('sources', {}).get('memori') == 1
+
+
+def test_orchestrator_records_memori_memory_persistence_in_trace(monkeypatch) -> None:
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(bind=engine)
+
+    with Session(engine) as db:
+        run = _seed_run(db, mode='simulation')
+        orchestrator = ForexOrchestrator()
+
+        monkeypatch.setattr(orchestrator.prompt_service, 'seed_defaults', lambda _db: None)
+        monkeypatch.setattr(orchestrator.market_provider, 'get_market_snapshot', lambda *_args, **_kwargs: {
+            'degraded': False,
+            'pair': 'EURUSD',
+            'timeframe': 'H1',
+            'last_price': 1.102,
+            'atr': 0.001,
+            'trend': 'neutral',
+        })
+        monkeypatch.setattr(orchestrator.market_provider, 'get_news_context', lambda *_args, **_kwargs: {
+            'degraded': False,
+            'pair': 'EURUSD',
+            'news': [],
+        })
+        monkeypatch.setattr(orchestrator.memory_service, 'search', lambda **_kwargs: [])
+
+        class _VectorEntry:
+            id = 42
+
+        monkeypatch.setattr(orchestrator.memory_service, 'add_run_memory', lambda *_args, **_kwargs: _VectorEntry())
+
+        stored_run_ids: list[int] = []
+
+        def fake_memori_store(run_entity):
+            stored_run_ids.append(run_entity.id)
+            return {
+                'enabled': True,
+                'available': True,
+                'stored': True,
+                'stored_fact_count': 3,
+                'entity_id': 'fx:eurusd:h1',
+                'process_id': 'forex-orchestrator',
+                'error': None,
+            }
+
+        monkeypatch.setattr(orchestrator.memori_memory_service, 'store_run_memory', fake_memori_store)
+        monkeypatch.setattr(
+            orchestrator.memori_memory_service,
+            'recall',
+            lambda **_kwargs: ([], {'enabled': False, 'available': False, 'returned_count': 0, 'error': None}),
+        )
+
+        monkeypatch.setattr(
+            orchestrator,
+            'analyze_context',
+            lambda *_args, **_kwargs: {
+                'analysis_outputs': {'technical-analyst': {'signal': 'neutral', 'score': 0.0}},
+                'bullish': {'arguments': ['No edge'], 'confidence': 0.0},
+                'bearish': {'arguments': ['No edge'], 'confidence': 0.0},
+                'trader_decision': {
+                    'decision': 'HOLD',
+                    'entry': 1.102,
+                    'stop_loss': None,
+                    'take_profit': None,
+                    'confidence': 0.1,
+                },
+                'risk': {
+                    'accepted': True,
+                    'suggested_volume': 0.0,
+                    'reasons': ['No trade requested (HOLD).'],
+                },
+            },
+        )
+        monkeypatch.setattr(
+            orchestrator.execution_manager_agent,
+            'run',
+            lambda *_args, **_kwargs: {
+                'decision': 'HOLD',
+                'should_execute': False,
+                'side': None,
+                'volume': 0.0,
+                'reason': 'No execution for decision=HOLD.',
+                'degraded': False,
+            },
+        )
+
+        completed_run = asyncio.run(orchestrator.execute(db, run, risk_percent=1.0))
+
+        assert completed_run.status == 'completed'
+        assert stored_run_ids == [completed_run.id]
+        assert completed_run.trace.get('memory_persistence', {}).get('vector', {}).get('stored') is True
+        assert completed_run.trace.get('memory_persistence', {}).get('vector', {}).get('entry_id') == 42
+        assert completed_run.trace.get('memory_persistence', {}).get('memori', {}).get('stored') is True
+        assert completed_run.decision.get('memory_persistence', {}).get('memori', {}).get('stored') is True
+
+
 def test_orchestrator_second_pass_can_promote_hold_to_directional_trade(monkeypatch) -> None:
     engine = create_engine('sqlite:///:memory:')
     Base.metadata.create_all(bind=engine)

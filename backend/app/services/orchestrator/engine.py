@@ -17,6 +17,7 @@ from app.observability.metrics import analysis_runs_total, orchestrator_step_dur
 from app.services.execution.executor import ExecutionService
 from app.services.llm.model_selector import AgentModelSelector
 from app.services.market.yfinance_provider import YFinanceMarketProvider
+from app.services.memory.memori_memory import MemoriMemoryService
 from app.services.memory.vector_memory import VectorMemoryService
 from app.services.orchestrator.agents import (
     AgentContext,
@@ -52,6 +53,7 @@ class ForexOrchestrator:
         self.settings = get_settings()
         self.market_provider = YFinanceMarketProvider()
         self.memory_service = VectorMemoryService()
+        self.memori_memory_service = MemoriMemoryService()
         self.prompt_service = PromptTemplateService()
         self.execution_service = ExecutionService()
         self.model_selector = AgentModelSelector()
@@ -198,6 +200,7 @@ class ForexOrchestrator:
         news: dict[str, Any],
         memory_context: list[dict[str, Any]],
         memory_signal: dict[str, Any],
+        memory_runtime: dict[str, Any],
         price_history: list[dict[str, Any]],
         analysis_outputs: dict[str, dict[str, Any]],
         bullish: dict[str, Any],
@@ -237,6 +240,7 @@ class ForexOrchestrator:
                 'news_context': self._json_safe(news),
                 'memory_context': self._json_safe(memory_context),
                 'memory_signal': self._json_safe(memory_signal),
+                'memory_runtime': self._json_safe(memory_runtime),
             },
             'workflow': list(self.WORKFLOW_STEPS),
             'agent_steps': step_payloads,
@@ -441,6 +445,55 @@ class ForexOrchestrator:
             return decision
         return 'HOLD'
 
+    @staticmethod
+    def _build_memori_query(
+        *,
+        pair: str,
+        timeframe: str,
+        market: dict[str, Any],
+        decision_mode: str,
+        memory_retrieval_context: dict[str, Any],
+    ) -> str:
+        context = memory_retrieval_context if isinstance(memory_retrieval_context, dict) else {}
+        trend = str(market.get('trend', context.get('trend', 'unknown')) or 'unknown')
+        technical_signal = str(context.get('technical_signal', trend) or trend)
+        rsi_bucket = str(context.get('rsi_bucket', 'unknown') or 'unknown')
+        macd_state = str(context.get('macd_state', 'unknown') or 'unknown')
+        volatility_regime = str(context.get('volatility_regime', 'unknown') or 'unknown')
+        contradiction_level = str(context.get('contradiction_level', 'unknown') or 'unknown')
+        resolved_mode = str(decision_mode or context.get('decision_mode', 'conservative') or 'conservative')
+        return (
+            f'{pair} {timeframe} trend {trend} technical_signal {technical_signal} '
+            f'rsi_bucket {rsi_bucket} macd_state {macd_state} volatility {volatility_regime} '
+            f'contradiction {contradiction_level} decision_mode {resolved_mode}'
+        )
+
+    @staticmethod
+    def _merge_memory_contexts(
+        vector_items: list[dict[str, Any]],
+        memori_items: list[dict[str, Any]],
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        effective_limit = max(int(limit), 1)
+
+        for item in list(vector_items or []) + list(memori_items or []):
+            if not isinstance(item, dict):
+                continue
+            summary = str(item.get('summary', '') or '').strip()
+            source_type = str(item.get('source_type', '') or '').strip().lower()
+            dedupe_key = (source_type, summary)
+            if summary and dedupe_key in seen:
+                continue
+            if summary:
+                seen.add(dedupe_key)
+            merged.append(item)
+            if len(merged) >= effective_limit:
+                break
+        return merged
+
     def _load_memory_state(
         self,
         *,
@@ -452,16 +505,33 @@ class ForexOrchestrator:
         memory_retrieval_context: dict[str, Any],
         memory_context_enabled: bool,
         limit: int,
-    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+        memori_enabled = bool(getattr(self.settings, 'memori_enabled', False))
+        memori_limit = max(1, int(getattr(self.settings, 'memori_recall_limit', 3) or 3))
+        memori_meta: dict[str, Any] = {
+            'enabled': memori_enabled,
+            'available': False,
+            'returned_count': 0,
+            'error': None,
+        }
         if not memory_context_enabled:
-            return [], self.memory_service.empty_memory_signal(
+            memori_meta['error'] = 'memory_context_disabled'
+            memory_signal = self.memory_service.empty_memory_signal(
                 'memory_context_disabled',
                 retrieved_count=0,
                 decision_mode=decision_mode,
             )
+            memory_runtime = {
+                'context_enabled': False,
+                'combined_context_count': 0,
+                'sources': {'vector': 0, 'memori': 0},
+                'vector': {'retrieved_count': 0, 'limit': 0, 'used_for_signal': False},
+                'memori': memori_meta,
+            }
+            return [], memory_signal, memory_runtime
 
         effective_limit = max(1, int(limit))
-        memory_context = self.memory_service.search(
+        vector_memory_context = self.memory_service.search(
             db=db,
             pair=pair,
             timeframe=timeframe,
@@ -470,11 +540,50 @@ class ForexOrchestrator:
             retrieval_context=memory_retrieval_context,
         )
         memory_signal = self.memory_service.compute_memory_signal(
-            memory_context,
+            vector_memory_context,
             market_snapshot=market,
             decision_mode=decision_mode,
         )
-        return memory_context, memory_signal
+
+        memori_query = self._build_memori_query(
+            pair=pair,
+            timeframe=timeframe,
+            market=market,
+            decision_mode=decision_mode,
+            memory_retrieval_context=memory_retrieval_context,
+        )
+        memori_context, memori_meta = self.memori_memory_service.recall(
+            pair=pair,
+            timeframe=timeframe,
+            query=memori_query,
+            limit=memori_limit,
+        )
+        combined_limit = min(max(effective_limit + memori_limit, effective_limit), 60)
+        combined_context = self._merge_memory_contexts(
+            vector_memory_context,
+            memori_context,
+            limit=combined_limit,
+        )
+
+        memory_runtime = {
+            'context_enabled': True,
+            'combined_context_count': len(combined_context),
+            'sources': {
+                'vector': len(vector_memory_context),
+                'memori': len(memori_context),
+            },
+            'vector': {
+                'retrieved_count': len(vector_memory_context),
+                'limit': effective_limit,
+                'used_for_signal': bool(memory_signal.get('used', False)),
+            },
+            'memori': {
+                **(memori_meta if isinstance(memori_meta, dict) else {}),
+                'query': memori_query,
+                'limit': memori_limit,
+            },
+        }
+        return combined_context, memory_signal, memory_runtime
 
     def _collect_bundle_degraded_agents(self, analysis_bundle: dict[str, Any]) -> list[str]:
         analysis_outputs = analysis_bundle.get('analysis_outputs')
@@ -852,7 +961,7 @@ class ForexOrchestrator:
             decision_mode=decision_mode,
         )
         memory_limit = max(int(self.settings.orchestrator_memory_search_limit), 1)
-        memory_context, memory_signal = self._load_memory_state(
+        memory_context, memory_signal, memory_runtime_meta = self._load_memory_state(
             db=db,
             pair=run.pair,
             timeframe=run.timeframe,
@@ -899,10 +1008,12 @@ class ForexOrchestrator:
             selected_cycle = 1
             selected_memory_context: list[dict[str, Any]] = list(memory_context)
             selected_memory_signal: dict[str, Any] = dict(memory_signal)
+            selected_memory_runtime_meta: dict[str, Any] = self._json_safe(memory_runtime_meta)
             selected_model_overrides: dict[str, str] = dict(context.llm_model_overrides or {})
 
             current_memory_context: list[dict[str, Any]] = list(memory_context)
             current_memory_signal: dict[str, Any] = dict(memory_signal)
+            current_memory_runtime_meta: dict[str, Any] = self._json_safe(memory_runtime_meta)
             current_model_overrides: dict[str, str] = {}
 
             for cycle_index in range(max_cycles):
@@ -923,12 +1034,14 @@ class ForexOrchestrator:
                     selected_cycle = cycle_index + 1
                     selected_memory_context = list(current_memory_context)
                     selected_memory_signal = dict(current_memory_signal)
+                    selected_memory_runtime_meta = self._json_safe(current_memory_runtime_meta)
                     selected_model_overrides = dict(current_model_overrides)
                 elif self._prefer_autonomy_bundle(selected_bundle, candidate_bundle):
                     selected_bundle = candidate_bundle
                     selected_cycle = cycle_index + 1
                     selected_memory_context = list(current_memory_context)
                     selected_memory_signal = dict(current_memory_signal)
+                    selected_memory_runtime_meta = self._json_safe(current_memory_runtime_meta)
                     selected_model_overrides = dict(current_model_overrides)
 
                 cycle_assessment = self._build_autonomy_cycle_assessment(
@@ -939,6 +1052,12 @@ class ForexOrchestrator:
                 cycle_assessment['memory_context_count'] = len(current_memory_context)
                 cycle_assessment['memory_limit'] = memory_limit
                 cycle_assessment['memory_signal_used'] = bool(current_memory_signal.get('used', False))
+                cycle_assessment['memori_context_count'] = int(
+                    ((current_memory_runtime_meta.get('sources') or {}).get('memori', 0) or 0)
+                )
+                cycle_assessment['memori_available'] = bool(
+                    ((current_memory_runtime_meta.get('memori') or {}).get('available', False))
+                )
                 cycle_assessment['llm_model_overrides'] = dict(current_model_overrides)
 
                 if bool(cycle_assessment.get('should_second_pass')) and bool(cycle_assessment.get('should_rerun')):
@@ -986,7 +1105,11 @@ class ForexOrchestrator:
                         max(int(self.settings.orchestrator_autonomy_memory_limit_max), memory_limit),
                     )
                     memory_limit = max(next_limit, memory_limit)
-                    current_memory_context, current_memory_signal = self._load_memory_state(
+                    (
+                        current_memory_context,
+                        current_memory_signal,
+                        current_memory_runtime_meta,
+                    ) = self._load_memory_state(
                         db=db,
                         pair=run.pair,
                         timeframe=run.timeframe,
@@ -1015,6 +1138,7 @@ class ForexOrchestrator:
 
             memory_context = selected_memory_context
             memory_signal = selected_memory_signal
+            memory_runtime_meta = selected_memory_runtime_meta
             context.memory_context = memory_context
             context.memory_signal = memory_signal
             context.llm_model_overrides = selected_model_overrides
@@ -1119,6 +1243,7 @@ class ForexOrchestrator:
                 'execution_manager': execution_output,
                 'second_pass': second_pass_meta,
                 'runtime_supervisor': autonomy_meta,
+                'memory_runtime': memory_runtime_meta,
             }
             run.status = 'completed'
             trace_payload = {
@@ -1130,6 +1255,7 @@ class ForexOrchestrator:
                 'memory_context': memory_context,
                 'memory_context_enabled': memory_context_enabled,
                 'memory_signal': memory_signal,
+                'memory_runtime': memory_runtime_meta,
                 'memory_retrieval_context': memory_retrieval_context,
                 'requested_metaapi_account_ref': metaapi_account_ref,
                 'workflow': list(self.WORKFLOW_STEPS),
@@ -1146,6 +1272,7 @@ class ForexOrchestrator:
                     news=news,
                     memory_context=memory_context,
                     memory_signal=memory_signal,
+                    memory_runtime=memory_runtime_meta,
                     price_history=price_history,
                     analysis_outputs=analysis_outputs,
                     bullish=bullish,
@@ -1171,7 +1298,38 @@ class ForexOrchestrator:
             db.commit()
             db.refresh(run)
 
-            self.memory_service.add_run_memory(db, run)
+            vector_memory_meta: dict[str, Any] = {
+                'stored': False,
+                'entry_id': None,
+                'error': None,
+            }
+            try:
+                vector_entry = self.memory_service.add_run_memory(db, run)
+                vector_memory_meta['stored'] = True
+                if vector_entry is not None:
+                    vector_memory_meta['entry_id'] = getattr(vector_entry, 'id', None)
+            except Exception as exc:
+                logger.exception('vector memory persistence failed run_id=%s', run.id)
+                vector_memory_meta['error'] = str(exc)
+
+            memori_store_meta = self.memori_memory_service.store_run_memory(run)
+            memory_persistence_meta = {
+                'vector': vector_memory_meta,
+                'memori': self._json_safe(memori_store_meta),
+            }
+
+            if isinstance(run.trace, dict):
+                run.trace = {**run.trace, 'memory_persistence': memory_persistence_meta}
+            else:
+                run.trace = {'memory_persistence': memory_persistence_meta}
+
+            if isinstance(run.decision, dict):
+                run.decision = {**run.decision, 'memory_persistence': memory_persistence_meta}
+            else:
+                run.decision = {'memory_persistence': memory_persistence_meta}
+
+            db.commit()
+            db.refresh(run)
             analysis_runs_total.labels(status='completed').inc()
             return run
         except Exception as exc:

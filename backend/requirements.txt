@@ -22,6 +22,7 @@ opentelemetry-sdk==1.36.0
 opentelemetry-instrumentation-fastapi==0.57b0
 qdrant-client==1.15.1
 pgvector==0.4.1
+memori==3.2.3
 metaapi-cloud-sdk
 email-validator==2.2.0
 pytest==8.4.1

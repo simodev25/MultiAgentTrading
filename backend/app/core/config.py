@@ -54,6 +54,17 @@ class Settings(BaseSettings):
     qdrant_collection: str = Field(default='forex_long_term_memory', alias='QDRANT_COLLECTION')
     memory_vector_size: int = Field(default=64, alias='MEMORY_VECTOR_SIZE')
     enable_pgvector: bool = Field(default=False, alias='ENABLE_PGVECTOR')
+    memori_enabled: bool = Field(default=False, alias='MEMORI_ENABLED')
+    memori_process_id: str = Field(default='forex-orchestrator', alias='MEMORI_PROCESS_ID')
+    memori_entity_prefix: str = Field(default='fx', alias='MEMORI_ENTITY_PREFIX')
+    memori_recall_limit: int = Field(default=3, ge=1, le=20, alias='MEMORI_RECALL_LIMIT')
+    memori_recall_min_similarity: float = Field(
+        default=0.12,
+        ge=0.0,
+        le=1.0,
+        alias='MEMORI_RECALL_MIN_SIMILARITY',
+    )
+    memori_store_run_memories: bool = Field(default=True, alias='MEMORI_STORE_RUN_MEMORIES')
 
     ollama_base_url: str = Field(default='https://ollama.com', alias='OLLAMA_BASE_URL')
     ollama_api_key: str = Field(default='', alias='OLLAMA_API_KEY')

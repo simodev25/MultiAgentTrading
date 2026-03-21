@@ -192,6 +192,29 @@ Traçabilité:
 - `analysis_runs.trace.runtime_supervisor` (mêmes métadonnées pour audit runtime).
 - `second_pass` reste exposé pour compatibilité descendante.
 
+## Mémoire hybride vectorielle + Memori (optionnel)
+
+- La mémoire déterministe existante (`VectorMemoryService`) reste la source de vérité pour `memory_signal`.
+- `Memori` est branché comme couche sémantique additionnelle pour enrichir `memory_context`.
+- La décision trader/risk continue d’être bornée par des garde-fous déterministes; Memori n’écrit pas directement le score de risque.
+
+Variables d’environnement:
+
+- `MEMORI_ENABLED` (bool)
+- `MEMORI_PROCESS_ID` (string, défaut `forex-orchestrator`)
+- `MEMORI_ENTITY_PREFIX` (string, défaut `fx`)
+- `MEMORI_RECALL_LIMIT` (1-20)
+- `MEMORI_RECALL_MIN_SIMILARITY` (0.0-1.0)
+- `MEMORI_STORE_RUN_MEMORIES` (bool)
+
+Traçabilité runtime:
+
+- `analysis_runs.trace.memory_runtime` expose:
+  - nombre de contextes `vector` et `memori`,
+  - métadonnées de recall Memori,
+  - taille finale du contexte injecté.
+- `analysis_runs.trace.memory_persistence` expose le statut de persistance post-run (`vector` + `memori`).
+
 ## Contrat de sortie (résumé)
 
 ```json

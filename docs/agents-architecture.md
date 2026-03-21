@@ -1,139 +1,89 @@
-# Architecture Agents - MultiAgentTrading
+# Architecture des agents (V1)
 
-Date: 2026-03-19  
-Scope: backend trading orchestration + agents satellites (`schedule-planner-agent`, `order-guardian`)  
-Source of truth: code Python + tests unitaires + traces JSON (`backend/debug-traces/run-*.json`)
+Ce document décrit, de manière opérationnelle et fidèle au code, comment fonctionne la chaîne multi-agent de trading.
 
-Note de mise à jour runtime:
-- Le workflow actif remplace désormais `macro-analyst` et `sentiment-agent` par `market-context-analyst`.
-- Les mentions `macro-analyst` / `sentiment-agent` restantes dans ce document correspondent à des alias legacy conservés pour compatibilité.
+Périmètre principal couvert:
 
-## 1) Objectif
+- Orchestration runtime: `backend/app/services/orchestrator/engine.py`
+- Logique agents: `backend/app/services/orchestrator/agents.py`
+- Mémoire vectorielle: `backend/app/services/memory/vector_memory.py`
+- Mémoire sémantique Memori: `backend/app/services/memory/memori_memory.py`
+- Exécution ordres: `backend/app/services/execution/executor.py`
+- Risque déterministe: `backend/app/services/risk/rules.py`
+- Entrées API et tâche asynchrone: `backend/app/api/routes/runs.py`, `backend/app/tasks/run_analysis_task.py`
+- Config prompts/modèles: `backend/app/services/prompts/registry.py`, `backend/app/services/llm/model_selector.py`
 
-Ce document explique l'architecture complete des agents:
-- orchestration
-- prompts
-- skills
-- memoire
-- decision BUY/SELL/HOLD
-- risque + execution
-- traces et observabilite
+## 1. Vue d'ensemble
 
-Le contenu est ancre sur le code actuel, pas sur une specification theorique.
+Le système suit une chaîne d'analyse agentique supervisée, puis applique des barrières de sécurité déterministes avant toute exécution d'ordre.
 
-## 2) Artefacts inspectes
+Principe clef:
 
-Code principal:
-- `backend/app/services/orchestrator/engine.py`
-- `backend/app/services/orchestrator/agents.py`
-- `backend/app/services/prompts/registry.py`
-- `backend/app/services/llm/model_selector.py`
-- `backend/app/services/llm/provider_client.py`
-- `backend/app/services/llm/ollama_client.py`
-- `backend/app/services/llm/openai_compatible_client.py`
-- `backend/app/services/memory/vector_memory.py`
-- `backend/app/services/risk/rules.py`
-- `backend/app/services/execution/executor.py`
-- `backend/app/services/llm/skill_bootstrap.py`
-- `backend/app/api/routes/connectors.py`
-- `backend/app/services/scheduler/automation_agent.py`
-- `backend/app/services/trading/order_guardian.py`
+- Agentique fort sur l'analyse et la réévaluation (`runtime_supervisor` avec cycles, second pass, arbitrage de bundle).
+- Déterministe strict sur les garde-fous critiques (risk engine, checks d'exécution, idempotence, blocages live).
 
-Modele de donnees:
-- `backend/app/db/models/run.py`
-- `backend/app/db/models/agent_step.py`
-- `backend/app/db/models/prompt_template.py`
-- `backend/app/db/models/llm_call_log.py`
-- `backend/app/db/models/connector_config.py`
-- `backend/app/db/models/memory_entry.py`
-
-Tests utilises comme preuve comportementale:
-- `backend/tests/unit/test_trader_agent.py`
-- `backend/tests/unit/test_risk_execution_agents.py`
-- `backend/tests/unit/test_orchestrator_debug_trace.py`
-- `backend/tests/unit/test_connectors_settings_sanitization.py`
-
-Traces runtime inspectees:
-- `backend/debug-traces/run-45...run-74` (30 runs, horodatage UTC 2026-03-19 14:34 -> 14:43)
-
-## 3) Vue systeme
-
-Ce schema est maintenant aligne sur l'ordre reel du run (meme granularite que la section 4).
+Flux macro:
 
 ```mermaid
-graph LR
-    A[API /runs] --> B[AnalysisRun DB]
-    B --> C[ForexOrchestrator.execute]
-    C --> D[Market Provider YFinance]
-    C --> E[VectorMemoryService.search]
-    C --> CTX[analysis context]
+flowchart TD
+  A[POST /api/v1/runs] --> B[AnalysisRun pending]
+  B --> C{async_execution}
+  C -- true --> D[Celery task run_analysis_task.execute]
+  C -- false --> E[ForexOrchestrator.execute]
+  D --> E
 
-    subgraph S1["Etape 1 - Analyse parallele"]
-      TA[technical-analyst]
-      NA[news-analyst]
-      MA[macro-analyst]
-      SA[sentiment-agent]
-    end
+  E --> F[Market snapshot + News context]
+  E --> G[Memory retrieval Vector + Memori]
+  E --> H[analyze_context]
 
-    subgraph S2["Etape 2 - Debat parallele"]
-      BULL[bullish-researcher]
-      BEAR[bearish-researcher]
-    end
+  H --> H1[technical/news/market-context en parallèle]
+  H --> H2[bullish/bearish en parallèle]
+  H --> H3[trader]
+  H --> H4[risk]
 
-    CTX --> TA
-    CTX --> NA
-    CTX --> MA
-    CTX --> SA
+  E --> I[runtime_supervisor cycles]
+  I --> J[execution-manager]
+  J --> K[ExecutionService]
 
-    TA --> SNAP[analysis_outputs snapshot]
-    NA --> SNAP
-    MA --> SNAP
-    SA --> SNAP
-
-    SNAP --> BULL
-    SNAP --> BEAR
-
-    BULL --> TR[trader-agent]
-    BEAR --> TR
-    TR --> RM[risk-manager]
-    RM --> EM[execution-manager]
-    EM --> EXE[ExecutionService]
-    EXE --> BRK[MetaApi / simulation-paper-live]
-
-    C --> STEPDB[AgentStep DB]
-    C --> TRACE[run.trace + debug JSON]
-    C --> ADDMEM[VectorMemoryService.add_run_memory]
-
-    TA -. prompt render .-> PTS[PromptTemplateService]
-    NA -. prompt render .-> PTS
-    MA -. prompt render .-> PTS
-    SA -. prompt render .-> PTS
-    BULL -. prompt render .-> PTS
-    BEAR -. prompt render .-> PTS
-    TR -. prompt render .-> PTS
-    RM -. prompt render .-> PTS
-    EM -. prompt render .-> PTS
-
-    PTS --> PTDB[prompt_templates]
-    PTS --> SKILLS[connector_configs.settings.agent_skills]
-
-    TA -. llm chat if enabled .-> LLM[LlmClient]
-    NA -. llm chat if enabled .-> LLM
-    MA -. llm chat if enabled .-> LLM
-    SA -. llm chat if enabled .-> LLM
-    BULL -. llm chat if enabled .-> LLM
-    BEAR -. llm chat if enabled .-> LLM
-    TR -. llm chat if enabled .-> LLM
-    RM -. llm chat if enabled .-> LLM
-    EM -. llm chat if enabled .-> LLM
-
-    LLM --> PROVIDERS[Ollama / OpenAI / Mistral]
-    LLM --> LOGS[llm_call_logs + metrics]
+  K --> L[analysis_runs + agent_steps + execution_orders]
+  L --> M[store memory vector + memori]
 ```
 
-## 4) Cycle d'un run (ordre reel)
+## 2. Point d'entrée run
 
-`ForexOrchestrator.WORKFLOW_STEPS`:
+Chemin API:
+
+- `POST /api/v1/runs` crée un `AnalysisRun` en `pending`.
+- Si `async_execution=true` (défaut), run passe en `queued` puis exécution via Celery.
+- Sinon l'orchestrateur tourne dans la requête HTTP.
+
+Fichiers:
+
+- `backend/app/api/routes/runs.py`
+- `backend/app/tasks/run_analysis_task.py`
+
+Contrôles d'entrée importants:
+
+- `timeframe` doit appartenir à `settings.default_timeframes`.
+- `mode=live` exige rôle élevé (`super-admin`, `admin`, `trader-operator`).
+- `metaapi_account_ref` est validé si fourni.
+
+## 3. Orchestrateur: responsabilités exactes
+
+Classe: `ForexOrchestrator`.
+
+Responsabilités:
+
+- Charger les contextes marché/news/mémoire.
+- Exécuter les agents dans l'ordre et avec parallélisme contrôlé.
+- Piloter les cycles d'autonomie (`runtime_supervisor`).
+- Appliquer les aborts live sur outputs dégradés critiques.
+- Enchaîner `execution-manager` puis `ExecutionService`.
+- Persister trace complète (`analysis_runs`, `agent_steps`, `execution_orders`).
+- Enrichir mémoire post-run (vector + Memori).
+
+Ordre de workflow déclaré (`WORKFLOW_STEPS`):
+
 1. `technical-analyst`
 2. `news-analyst`
 3. `market-context-analyst`
@@ -143,638 +93,771 @@ graph LR
 7. `risk-manager`
 8. `execution-manager`
 
-Execution:
-- etape 1 en parallele (3 agents)
-- etape 2 en parallele (debat bullish/bearish)
-- etape 3/4/5 en serie (decision -> risque -> execution)
+## 4. Contrat de contexte transmis aux agents
+
+Dataclass `AgentContext`:
+
+- `pair`
+- `timeframe`
+- `mode`
+- `risk_percent`
+- `market_snapshot`
+- `news_context`
+- `memory_context`
+- `memory_signal`
+- `llm_model_overrides`
+
+Règle importante:
+
+- `memory_context` peut contenir vector + Memori.
+- `memory_signal` est calculé uniquement depuis la mémoire vectorielle déterministe.
+
+## 5. Pipeline `analyze_context`
+
+`analyze_context` exécute 3 sous-phases:
+
+1) Analyse initiale parallèle:
+
+- `technical-analyst`
+- `news-analyst`
+- `market-context-analyst`
+
+2) Débat parallèle:
+
+- `bullish-researcher`
+- `bearish-researcher`
+
+3) Synthèse et garde-fou:
+
+- `trader-agent`
+- `risk-manager`
+
+Sortie `analysis_bundle`:
+
+- `analysis_outputs`
+- `bullish`
+- `bearish`
+- `trader_decision`
+- `risk`
+
+Parallélisme:
+
+- contrôlé par `ORCHESTRATOR_PARALLEL_WORKERS`.
+- chaque step est mesuré (`orchestrator_step_duration_seconds`) et persisté dans `agent_steps` si mode record.
+
+## 6. Architecture détaillée des agents
+
+### 6.0 Contrat I/O synthétique
+
+| Agent | Entrées principales | Sorties principales | Déterministe vs LLM |
+|---|---|---|---|
+| `technical-analyst` | `market_snapshot` | `signal`, `score`, `indicators` | Déterministe d'abord, LLM optionnel en ajustement |
+| `news-analyst` | `news_context`, `memory_context` | `signal`, `score`, `coverage`, `evidence` | Déterministe majoritaire, LLM conditionnel avec circuit breaker |
+| `market-context-analyst` | `market_snapshot` | `signal`, `score`, `regime`, `volatility_context` | Déterministe majoritaire, LLM note contextuelle optionnelle |
+| `bullish-researcher` | outputs analytiques compactés + `memory_context` | `arguments`, `confidence` | Déterministe + débat LLM conditionnel |
+| `bearish-researcher` | outputs analytiques compactés + `memory_context` | `arguments`, `confidence` | Déterministe + débat LLM conditionnel |
+| `trader-agent` | `analysis_outputs`, `bullish`, `bearish`, `memory_signal` | `decision`, `confidence`, `decision_gates`, `memory_signal` | Gating déterministe fort, LLM uniquement pour note finale |
+| `risk-manager` | `trader_decision`, `risk_percent`, `mode` | `accepted`, `suggested_volume`, `reasons` | RiskEngine déterministe; LLM revue contractuelle optionnelle |
+| `execution-manager` | `trader_decision`, `risk_output`, `mode` | `should_execute`, `side`, `volume`, `reason` | Déterministe d'abord; LLM sous contrat strict, plus strict en live |
+
+Diagramme de séquence global (section 6):
 
 ```mermaid
 sequenceDiagram
-    participant API as /runs
-    participant ORCH as ForexOrchestrator
-    participant MKT as MarketProvider
-    participant MEM as VectorMemory
-    participant TECH as technical-analyst
-    participant NEWS as news-analyst
-    participant MACRO as macro-analyst
-    participant SENT as sentiment-agent
+    participant O as Orchestrateur
+    participant T as technical-analyst
+    participant N as news-analyst
+    participant M as market-context-analyst
     participant BULL as bullish-researcher
     participant BEAR as bearish-researcher
     participant TR as trader-agent
-    participant RISK as risk-manager
-    participant EXM as execution-manager
-    participant EX as ExecutionService
-    participant DB as DB + debug trace
+    participant R as risk-manager
 
-    API->>ORCH: execute(run, risk_percent, account_ref)
-    ORCH->>MKT: get_market_snapshot + news
-    ORCH->>MEM: search(pair,timeframe,query)
-    par Initial analysis
-      ORCH->>TECH: run(context)
-      ORCH->>NEWS: run(context)
-      ORCH->>MACRO: run(context)
-      ORCH->>SENT: run(context)
-    and Debate
-      ORCH->>BULL: run(context, analysis_outputs)
-      ORCH->>BEAR: run(context, analysis_outputs)
+    par Analyse initiale
+        O->>T: run(context)
+        T-->>O: signal/score technique
+    and
+        O->>N: run(context)
+        N-->>O: signal/score news + evidence
+    and
+        O->>M: run(context)
+        M-->>O: régime + signal contextuel
     end
-    ORCH->>TR: run(context, analysis_outputs, bullish, bearish)
-    ORCH->>RISK: run(context, trader_decision)
-    ORCH->>EXM: run(context, trader_decision, risk_output)
-    alt should_execute BUY/SELL
-      ORCH->>EX: execute order
-    else blocked
-      ORCH->>EX: skip
+
+    par Débat contradictoire
+        O->>BULL: run(analysis_outputs, memory_context)
+        BULL-->>O: arguments haussiers + confidence
+    and
+        O->>BEAR: run(analysis_outputs, memory_context)
+        BEAR-->>O: arguments baissiers + confidence
     end
-    ORCH->>DB: agent_steps + run.decision + run.trace + debug JSON
-    ORCH->>MEM: add_run_memory
+
+    O->>TR: run(analysis_outputs, bullish, bearish, memory_signal)
+    TR-->>O: décision BUY/SELL/HOLD + gates
+
+    O->>R: run(trader_decision, risk_percent, mode)
+    R-->>O: accepted + suggested_volume + reasons
 ```
 
-## 5) Contrat de contexte et bundles
+### 6.1 `technical-analyst`
 
-### 5.1 `AgentContext` (input commun agents)
+Rôle:
 
-```json
-{
-  "pair": "EURUSD.PRO",
-  "timeframe": "M15",
-  "mode": "live|paper|simulation",
-  "risk_percent": 1.0,
-  "market_snapshot": {},
-  "news_context": {},
-  "memory_context": [],
-  "llm_model_overrides": {}
-}
-```
+- produire un biais technique initial.
 
-### 5.2 Bundle d'analyse (`analyze_context`)
+Entrées:
 
-```json
-{
-  "analysis_outputs": {
-    "technical-analyst": {"signal": "bullish", "score": 0.3},
-    "news-analyst": {"signal": "neutral", "score": 0.0},
-    "macro-analyst": {"signal": "bullish", "score": 0.1},
-    "sentiment-agent": {"signal": "neutral", "score": 0.0}
-  },
-  "bullish": {"arguments": [], "confidence": 0.0},
-  "bearish": {"arguments": [], "confidence": 0.0},
-  "trader_decision": {},
-  "risk": {}
-}
-```
+- `market_snapshot`: trend, RSI, MACD, prix.
 
-## 6) Catalogue des agents (core trading)
+Logique déterministe:
 
-| Agent | Role | Noyau deterministe | LLM par defaut | Output cle |
-|---|---|---|---|---|
-| `technical-analyst` | bias technique | trend (+/-0.35), RSI (+/-0.25), MACD (+/-0.2), seuil signal 0.15 | OFF | `signal`, `score`, `indicators` |
-| `news-analyst` | sentiment news/macro multi-provider | agrégation déterministe (relevance/freshness/credibility/importance) + fallback si LLM dégradé | ON | `signal`, `score`, `coverage`, `decision_mode`, `fetch_status`, `news_count`, `macro_event_count` |
-| `macro-analyst` | biais macro proxy | ATR/price > 0.01 -> neutral sinon suit trend (+/-0.1) | OFF | `signal`, `score`, `reason` |
-| `sentiment-agent` | momentum court terme | `change_pct` > 0.1 => +0.1, < -0.1 => -0.1 | OFF | `signal`, `score`, `reason` |
-| `bullish-researcher` | these haussiere | somme scores positifs capee [0,1] | ON | `arguments`, `confidence`, `llm_debate` |
-| `bearish-researcher` | these baissiere | somme scores negatifs (abs) capee [0,1] | ON | `arguments`, `confidence`, `llm_debate` |
-| `trader-agent` | decision finale | scoring + gating + SL/TP | OFF | `decision`, `confidence`, `combined_score`, `execution_allowed`, `rationale` |
-| `risk-manager` | validation risque | `RiskEngine.evaluate` + volume multiplier | OFF | `accepted`, `suggested_volume`, `reasons` |
-| `execution-manager` | autorisation execution | trader+risk guardrails | OFF | `should_execute`, `side`, `volume`, `reason` |
+- score de base = somme de composantes trend/RSI/MACD.
+- seuils de signal: > `0.15` bullish, < `-0.15` bearish, sinon neutral.
+- si LLM off: skill guardrails déterministes peuvent ajuster score/seuil.
 
-Notes:
-- si un agent est `llm_enabled=False`, il reste totalement fonctionnel en mode deterministe.
-- certains chemins early-return (ex: `news` absente, market `degraded`) renvoient un payload minimal sans `prompt_meta`.
+LLM (optionnel):
 
-## 7) Moteur de decision (TraderAgent)
+- prompt versionné via `PromptTemplateService`.
+- fusion signal déterministe + signal LLM via `_merge_llm_signal`.
 
-### 7.1 Formules de score
+Sortie typique:
 
-1. `raw_net_score` et `net_score`  
-- `raw_net_score`: somme brute des `score` des analystes.  
-- `net_score`: somme pondérée, avec modulation du score `news-analyst` selon `coverage` (`none=0.0`, `low=0.35`, `medium/high=1.0`).
+- `signal`, `score`, `indicators`, `llm_summary`, `degraded`, `prompt_meta`.
 
-2. `debate_score`  
-- `preliminary_signal` selon signe de `net_score`
-- `source_alignment_score` base sur consensus directionnel des sources credibles
-- `debate_score = sign(preliminary_signal) * source_alignment_score * 0.12`
-- si `strong_conflict` (bullish_conf>=0.35 et bearish_conf>=0.35 et ecart<=0.2), `debate_score *= 0.5`
-
-3. `raw_combined_score = net_score + debate_score`
-
-4. Penalite contradiction trend/momentum  
-- opposition si `(trend bullish && macd_diff < 0)` ou `(trend bearish && macd_diff > 0)`
-- ratio: `abs(macd_diff)/atr` (ou `abs(macd_diff)` si `atr=0`)
-- niveaux:
-  - `major` si ratio >= 0.12
-  - `moderate` si ratio >= 0.05
-  - `weak` si active dans policy mode (seulement permissive actuellement)
-- penalite appliquee vers zero sur `combined_score`
-
-5. `confidence`
-- `edge_strength = min(abs(combined_score), 1.0)`
-- `evidence_quality = clamp(source_coverage*0.55 + independent_coverage*0.25 + technical_support - contradiction_quality_penalty - neutral_quality_penalty, 0..1)`
-- `decision_confidence_base = min(edge_strength*0.7 + evidence_quality*0.5, 1.0)`
-- `confidence = decision_confidence_base * confidence_multiplier(mode + contradiction)`
-
-### 7.2 Sources, evidence et seuils de credibilite
-
-Une source est directionnelle si:
-- signal deduit/explicite `bullish` ou `bearish`
-- et `abs(score)` >= seuil credibilite:
-  - `technical-analyst`: 0.12
-  - `news-analyst`: 0.08
-  - `macro-analyst`: 0.08
-  - `sentiment-agent`: 0.08
-
-Sources independantes:
-- `news-analyst`, `macro-analyst`, `sentiment-agent`
-
-### 7.3 Gate stack (ordre logique)
-
-```mermaid
-flowchart TD
-    A[combined_score -> candidate BUY/SELL/HOLD] --> B[score_gate_ok]
-    B --> C[confidence_gate_ok]
-    C --> D[source_gate_ok]
-    D --> E[major_contradiction_block?]
-    E --> F[minimum_evidence_ok]
-    F --> G[quality_gate_ok]
-    G --> H{decision_ready?}
-    H -- no --> I[decision = HOLD; low_edge=true]
-    H -- yes --> J[decision = BUY/SELL; low_edge=false]
-    J --> K[execution_allowed = true iff minimum_evidence_ok && !major_contradiction_block]
-```
-
-`quality_gate_ok` exige:
-- pas de `strong_conflict`
-- pas de `technical_neutral_block`
-- seuil directionnel (`decision_buy_threshold` / `decision_sell_threshold`) respecte
-
-### 7.4 Technical neutral + exceptions
-
-Si `technical_signal == neutral`:
-- blocage par defaut (`technical_neutral_gate`)
-- exception possible (`technical_neutral_exception`) seulement si convergence non-technique suffisante (sources independantes + force + combined score) selon policy du mode
-
-### 7.5 Overrides
-
-1. `technical_single_source_override`
-- active seulement si policy l'autorise
-- autorise un trade meme si `aligned_source_count < min_aligned_sources`
-- conditions strictes: signal technique aligne + score technique min + score/confidence min
-
-2. `permissive_technical_override`
-- reserve mode `permissive`
-- autorise BUY/SELL si technique directionnel fort, seuils score/confidence passes, pas de contradiction major
-- utilise pour eviter faux negatifs lorsque les sources independantes sont absentes/neutres
-
-3. `low_edge_override` (alias legacy)
-- mappe `technical_alignment_support`
-- conserve compatibilite payloads historiques
-
-## 8) Policies des 3 modes
-
-### 8.1 Seuils principaux
-
-| Parametre | Conservative | Balanced | Permissive |
-|---|---:|---:|---:|
-| `min_combined_score` | 0.30 | 0.25 | 0.22 |
-| `min_confidence` | 0.35 | 0.30 | 0.26 |
-| `min_aligned_sources` | 2 | 1 | 1 |
-| `technical_neutral_exception_min_sources` | 2 | 2 | 3 |
-| `technical_neutral_exception_min_strength` | 0.22 | 0.20 | 0.28 |
-| `technical_neutral_exception_min_combined` | 0.30 | 0.25 | 0.35 |
-| `allow_low_edge_technical_override` | false | true | true |
-| `allow_technical_single_source_override` | false | false | true |
-| `technical_single_source_min_score` | 0.00 | 0.00 | 0.22 |
-
-### 8.2 Penalites contradiction (trend vs momentum)
-
-| Parametre | Conservative | Balanced | Permissive |
-|---|---:|---:|---:|
-| weak penalty | 0.00 | 0.00 | 0.02 |
-| weak confidence mult. | 1.00 | 1.00 | 0.96 |
-| weak volume mult. | 1.00 | 1.00 | 0.90 |
-| moderate penalty | 0.06 | 0.05 | 0.05 |
-| moderate confidence mult. | 0.85 | 0.88 | 0.90 |
-| moderate volume mult. | 0.75 | 0.70 | 0.60 |
-| major penalty | 0.12 | 0.10 | 0.10 |
-| major confidence mult. | 0.70 | 0.75 | 0.75 |
-| major volume mult. | 0.55 | 0.50 | 0.45 |
-| `block_major_contradiction` | true | true | true |
-
-## 9) Prompts: versioning + rendu runtime
-
-### 9.1 Sources prompts
-- defaults seeds dans `DEFAULT_PROMPTS`
-- versions stockees en DB (`prompt_templates`) avec `(agent_name, version)` unique
-- une version active par agent
-
-### 9.2 Pipeline de rendu prompt
-
-```mermaid
-flowchart LR
-    A[PromptTemplateService.render] --> B{active prompt exists?}
-    B -- yes --> C[DB prompt version]
-    B -- no --> D[fallback system/user]
-    C --> E[append agent_skills block]
-    D --> E
-    E --> F[SafeDict variable interpolation]
-    F --> G[force language directive FR]
-    G --> H[system_prompt + user_prompt + metadata]
-```
-
-Metadonnees par appel:
-- `prompt_id`
-- `prompt_version`
-- `llm_model`
-- `llm_enabled`
-- `skills_count`
-- `skills` (si debug trade json actif)
-- `system_prompt` / `user_prompt` (si `DEBUG_TRADE_JSON_INCLUDE_PROMPTS=true`)
-
-## 10) Skills architecture
-
-### 10.1 Ou sont configurees les skills
-
-Dans `connector_configs` (connector `ollama`) -> `settings.agent_skills`.
-
-Format normalise:
-```json
-{
-  "agent_skills": {
-    "trader-agent": [
-      "HOLD par defaut si edge ambigu",
-      "Exiger coherence stop-loss/take-profit"
-    ],
-    "risk-manager": [
-      "Ne jamais accepter sans stop loss valide"
-    ]
-  }
-}
-```
-
-Contraintes de normalisation:
-- max 12 skills/agent
-- max 500 caracteres/skill
-- dedupe case-insensitive
-- parsing multi-formats (`list`, JSON string, lignes, `;`, `||`)
-
-### 10.2 Bootstrap automatique au demarrage
-
-Si `AGENT_SKILLS_BOOTSTRAP_FILE` est defini:
-- charge un JSON externe
-- extrait skills (`agent_skills`, `agent_skill_map`, ou payload de proposal)
-- merge/replace selon `AGENT_SKILLS_BOOTSTRAP_MODE`
-- option `APPLY_ONCE` avec fingerprint SHA256
-
-```mermaid
-flowchart TD
-    A[Startup main.py] --> B[load ollama connector settings]
-    B --> C[bootstrap_agent_skills_into_settings]
-    C --> D{file valid + skills found?}
-    D -- no --> E[no change]
-    D -- yes --> F{mode merge/replace}
-    F --> G[normalize + dedupe + cap limits]
-    G --> H[update connector settings]
-    H --> I[store bootstrap meta fingerprint]
-```
-
-### 10.3 Impact skills en mode deterministe
-
-Quand LLM est OFF, certains agents appliquent des guardrails skills:
-- seuil plus strict si mots cle (`convergence`, `prudence`, `neutral`, ...)
-- attenuation score (`*0.75`) pour patterns `hold`, `faux signal`, ...
-
-Effet:
-- skills ne sont pas uniquement "prompt-level", elles influencent aussi la logique deterministe.
-
-## 11) Memoire long-terme
-
-### 11.1 Fonctionnement
-
-`VectorMemoryService`:
-- embedding deterministe SHA256 -> vecteur taille 64 normalise
-- stockage SQL (`memory_entries`) + optional Qdrant
-- `search()`:
-  - priorite Qdrant si dispo
-  - fallback cosine SQL
-  - dedupe `(pair, source_type, summary)`
-- `add_run_memory()` apres chaque run complete
-
-### 11.2 Donnees stockees
-
-`summary` de run:
-- `"PAIR TIMEFRAME -> DECISION confidence=... net_score=..."`
-
-`payload`:
-- `risk`, `execution`, `status`, `created_at`
+Diagramme de séquence `technical-analyst`:
 
 ```mermaid
 sequenceDiagram
-    participant O as Orchestrator
-    participant M as VectorMemoryService
-    participant Q as Qdrant
-    participant DB as memory_entries
+    participant O as Orchestrateur
+    participant T as technical-analyst
+    participant P as PromptTemplateService
+    participant S as AgentModelSelector
+    participant L as LLM Provider
 
-    O->>M: search(pair,timeframe,query,limit=5)
-    alt Qdrant available
-      M->>Q: vector search + filter pair/timeframe
-      Q-->>M: ids + scores
-      M->>DB: hydrate ids
-    else fallback
-      M->>DB: recent 100 entries
-      M->>M: cosine local ranking
+    O->>T: run(context.market_snapshot)
+    T->>T: score déterministe (trend/RSI/MACD)
+    T->>S: is_enabled(model, agent)
+    alt LLM activé
+        T->>P: render(prompt versionné)
+        T->>L: chat(system_prompt, user_prompt)
+        L-->>T: signal LLM + texte
+        T->>T: merge score déterministe + biais LLM
+    else LLM désactivé
+        T->>T: appliquer skill guardrails déterministes
     end
-    M-->>O: memory_context[]
-
-    O->>M: add_run_memory(run)
-    M->>DB: insert memory_entries
-    M->>Q: upsert point (best effort)
+    T-->>O: signal + score + prompt_meta
 ```
 
-## 12) Frontiere decision -> risque -> execution
+### 6.2 `news-analyst`
 
-### 12.1 Regles deterministes
+Rôle:
 
-1. Trader produit:
-- `decision` (BUY/SELL/HOLD)
-- `execution_allowed` (gate final trading)
-- `volume_multiplier` (impact contradiction)
+- transformer news + macro-events en signal directionnel pondéré.
 
-2. RiskManager:
-- applique `RiskEngine.evaluate`
-- si `execution_allowed=false`, force decision effective HOLD pour le risk check
-- applique `volume_multiplier` sur `suggested_volume` (clamp [0.01, 2.0] et [0.1,1.0] pour le multiplier)
+Entrées:
 
-3. ExecutionManager:
-- `deterministic_allowed = risk.accepted && decision in {BUY,SELL} && execution_allowed`
-- sinon `should_execute=false`
+- `news_context.news`
+- `news_context.macro_events`
+- métadonnées providers (`fetch_status`, provider_status, symbol scanné)
+- `memory_context` (injecté dans prompt LLM)
 
-4. ExecutionService:
-- `simulation`: jamais d'ordre broker
-- `paper`: envoi MetaApi si active, fallback paper-simulated si MetaApi indispo
-- `live`: bloque si `ALLOW_LIVE_TRADING=false`
+Logique déterministe:
 
-### 12.2 Guardrails mode live
+- filtrage pertinence/fraîcheur/crédibilité.
+- scoring directionnel base-vs-quote (pair relevance, macro relevance).
+- classification couverture: `none|low|medium|high`.
+- états informationnels: `no_recent_news`, `mixed_signals`, `clear_directional_bias`, etc.
 
-- si un agent renvoie `degraded=true`, run live est abort (exception)
-- si `execution-manager` LLM est active en live:
-  - execution autorisee uniquement si LLM confirme exactement la decision deterministe
-  - sinon HOLD force
-- `major_contradiction_block` bloque execution pour tous les modes
+Résilience LLM:
+
+- circuit breaker local (`_llm_consecutive_failures`, `_llm_circuit_open_until`).
+- appel LLM seulement si couverture/evidence suffisantes.
+- retry spécifique si réponse vide et stop_reason tronqué.
+- fallback déterministe si LLM dégradé.
+
+Sortie typique:
+
+- `signal`, `score`, `confidence`, `coverage`, `evidence_strength`
+- `information_state`, `decision_mode`
+- `provider_status`, `evidence`
+- `llm_fallback_used`, `llm_retry_used`, `llm_call_attempted`, `llm_circuit_open`
+- `degraded`, `prompt_meta`
+
+Diagramme de séquence `news-analyst`:
 
 ```mermaid
-stateDiagram-v2
-    [*] --> TraderDecision
-    TraderDecision --> RiskCheck: decision BUY/SELL + execution_allowed
-    TraderDecision --> HoldLocked: decision HOLD ou low_edge
-    RiskCheck --> ExecEligible: accepted=true
-    RiskCheck --> HoldLocked: accepted=false
-    ExecEligible --> BrokerCall: should_execute=true
-    HoldLocked --> [*]
-    BrokerCall --> [*]
+sequenceDiagram
+    participant O as Orchestrateur
+    participant N as news-analyst
+    participant P as PromptTemplateService
+    participant L as LLM Provider
+
+    O->>N: run(news_context, memory_context)
+    N->>N: filtrer relevance/freshness/credibility
+    N->>N: scorer direction base-vs-quote
+    N->>N: déterminer coverage + information_state
+
+    alt should_call_llm=true
+        N->>P: render(prompt versionné)
+        N->>L: chat(max_tokens=96)
+        L-->>N: réponse
+        alt réponse vide tronquée
+            N->>L: retry chat(max_tokens=384)
+            L-->>N: réponse retry
+        end
+        alt LLM OK
+            N->>N: ajuster score/signal (mix déterministe + LLM)
+        else LLM dégradé
+            N->>N: fallback déterministe + circuit breaker update
+        end
+    else should_call_llm=false
+        N->>N: sortie full déterministe (raison de skip)
+    end
+
+    N-->>O: signal + score + coverage + evidence + prompt_meta
 ```
 
-## 13) Observabilite et traces
+### 6.3 `market-context-analyst`
 
-### 13.1 Ce qui est persiste par run
+Rôle:
 
-`analysis_runs`:
-- `decision` JSON final (trader + risk + execution)
-- `trace` JSON (market/news/analysis/memory/workflow + debug meta)
+- qualifier le régime de marché et la lisibilité contextuelle (pas d'interprétation macro externe).
 
-`agent_steps`:
-- input/output de chaque agent (ordre workflow)
+Entrées:
 
-`llm_call_logs`:
-- provider, model, status, tokens, cout, latence, erreur
+- snapshot marché (trend, ATR, RSI, EMA, MACD, change%).
 
-### 13.2 Debug trace JSON fichier
+Logique déterministe:
 
-Structure racine:
-```json
-{
-  "schema_version": 1,
-  "generated_at": "...",
-  "run": {},
-  "context": {},
-  "workflow": [],
-  "agent_steps": [],
-  "agent_prompt_skills": {},
-  "analysis_bundle": {},
-  "final_decision": {}
-}
-```
+- calcule `regime` (`trending`, `ranging`, `calm`, `unstable`, `volatile`).
+- calcule `volatility_context` (`supportive`, `neutral`, `unsupportive`).
+- construit score contextuel borné, pénalisé si contexte mixte/instable.
+- signal final via seuil 0.12.
 
-### 13.3 Diagramme donnees
+LLM (optionnel):
+
+- produit une note contextuelle concise.
+- la structure directionnelle principale reste déterministe.
+
+Sortie typique:
+
+- `signal`, `score`, `confidence`, `regime`, `momentum_bias`, `volatility_context`, `reason`
+- `llm_note`, `llm_summary`, `prompt_meta`.
+
+### 6.4 `bullish-researcher` et `bearish-researcher`
+
+Rôle:
+
+- formaliser argumentaires contradictoires à partir des signaux compactés.
+
+Entrées:
+
+- `analysis_outputs` compactés
+- `memory_context`
+
+Logique:
+
+- extraction d'arguments déterministes (scores >0 pour bullish, <0 pour bearish).
+- confidence dérivée des scores agrégés.
+- LLM appelé seulement si evidence directionnelle minimale.
+
+Sortie:
+
+- `arguments`, `confidence`, `llm_debate`, `degraded`, `llm_called`, `prompt_meta`.
+
+### 6.5 `trader-agent`
+
+Rôle:
+
+- fusion finale multi-signaux et décision `BUY|SELL|HOLD`.
+
+Entrées:
+
+- `analysis_outputs`
+- sorties débat bullish/bearish
+- `memory_signal`
+- `market_snapshot`
+
+Étapes internes clés:
+
+1. Pondération du news score par couverture.
+2. Calcul `net_score` et `raw_net_score`.
+3. Détection conflit fort (`strong_conflict`) via équilibre bullish/bearish.
+4. Alignement de sources directionnelles (technique + news + market-context).
+5. `debate_score` ajouté au net pour produire `raw_combined_score`.
+6. Pénalité contradiction trend/momentum selon policy de mode.
+7. Application contrôlée de `memory_signal` (sans inversion de direction).
+8. Calcul qualité de preuve (`evidence_quality`) et `confidence`.
+9. Application des gates: score, confidence, sources, contradiction majeure, blocage mémoire.
+10. Décision finale + `execution_allowed` + `decision_gates` + `needs_follow_up`.
+
+Formules structurantes:
+
+- `raw_net_score = somme(scores agents bruts)`
+- `net_score = somme(scores effectifs après pondération news)`
+- `raw_combined_score = net_score + debate_score`
+- `combined_score = raw_combined_score - pénalité_contradiction +/- ajustement_mémoire`
+- `decision_confidence_base = min(edge_strength * 0.7 + evidence_quality * 0.5, 1.0)`
+- `confidence = decision_confidence_base * confidence_multiplier (+/- mémoire, borné [0,1])`
+
+Decision policies (`decision_mode`):
+
+- `conservative`: seuils plus stricts.
+- `balanced`: compromis.
+- `permissive`: autorise plus d'overrides techniques sous contraintes.
+
+Paramètres exacts des policies (valeurs codées):
+
+| Paramètre | Conservative | Balanced | Permissive |
+|---|---:|---:|---:|
+| `min_combined_score` | 0.30 | 0.25 | 0.18 |
+| `min_confidence` | 0.35 | 0.30 | 0.22 |
+| `min_aligned_sources` | 2 | 1 | 1 |
+| `technical_neutral_exception_min_sources` | 2 | 2 | 1 |
+| `technical_neutral_exception_min_strength` | 0.22 | 0.20 | 0.10 |
+| `technical_neutral_exception_min_combined` | 0.30 | 0.25 | 0.20 |
+| `allow_low_edge_technical_override` | false | true | true |
+| `allow_technical_single_source_override` | false | false | true |
+| `technical_single_source_min_score` | 0.00 | 0.00 | 0.18 |
+| `contradiction_weak_penalty` | 0.00 | 0.00 | 0.02 |
+| `contradiction_moderate_penalty` | 0.06 | 0.05 | 0.05 |
+| `contradiction_major_penalty` | 0.12 | 0.10 | 0.10 |
+| `block_major_contradiction` | true | true | true |
+
+Exemples de garde-fous Trader:
+
+- blocage `technical_neutral_gate` sauf exceptions encadrées.
+- blocage `major_contradiction_execution_block`.
+- blocage mémoire `memory_risk_block` si historique adverse.
+
+Paramètres de sortie critiques:
+
+- `decision`, `execution_allowed`
+- `combined_score`, `confidence`
+- `decision_gates`, `needs_follow_up`, `follow_up_reason`, `uncertainty_level`
+- `memory_signal` enrichi (avant/après ajustements)
+- `rationale` détaillée
+- niveaux SL/TP heuristiques (ATR)
+
+LLM Trader:
+
+- sert principalement à produire une `execution_note` compacte.
+- note LLM est validée contre la décision et les niveaux; sinon fallback déterministe.
+
+Diagramme de séquence `trader-agent`:
 
 ```mermaid
-classDiagram
-    class AnalysisRun {
-      id
-      pair
-      timeframe
-      mode
-      status
-      decision JSON
-      trace JSON
-      error
-    }
-    class AgentStep {
-      id
-      run_id
-      agent_name
-      status
-      input_payload JSON
-      output_payload JSON
-      error
-      created_at
-    }
-    class PromptTemplate {
-      id
-      agent_name
-      version
-      is_active
-      system_prompt
-      user_prompt_template
-    }
-    class LlmCallLog {
-      provider
-      model
-      status
-      prompt_tokens
-      completion_tokens
-      cost_usd
-      latency_ms
-      error
-    }
-    class MemoryEntry {
-      pair
-      timeframe
-      source_type
-      summary
-      embedding
-      payload
-      run_id
-    }
-    AnalysisRun "1" --> "many" AgentStep
-    AnalysisRun "0..1" --> "many" MemoryEntry
+sequenceDiagram
+    participant O as Orchestrateur
+    participant TR as trader-agent
+
+    O->>TR: run(analysis_outputs, bullish, bearish, memory_signal)
+    TR->>TR: pondérer score news selon coverage
+    TR->>TR: calculer net_score + debate_score
+    TR->>TR: appliquer policy(decision_mode)
+    TR->>TR: appliquer pénalité contradiction
+    TR->>TR: appliquer ajustement mémoire borné
+    TR->>TR: évaluer gates (score/confidence/sources/risque mémoire)
+    alt gates validées
+        TR-->>O: BUY|SELL + execution_allowed=true
+    else gates non validées
+        TR-->>O: HOLD + decision_gates + follow_up_reason
+    end
 ```
 
-### 13.4 Metriques Prometheus observees
+### 6.6 `risk-manager`
 
-- `analysis_runs_total{status}`
-- `orchestrator_step_duration_seconds{agent}`
-- `llm_calls_total{provider,status}`
-- `llm_prompt_tokens_total{provider,model}`
-- `llm_completion_tokens_total{provider,model}`
-- `llm_cost_usd_total{provider,model}`
-- `llm_latency_seconds{provider,model,status}`
-- `external_provider_failures_total{provider}`
+Rôle:
 
-## 14) Etat observe dans les traces (2026-03-19)
+- valider le risque et proposer volume final.
 
-Population inspectee: 30 runs (`run-45` -> `run-74`, mode execution `live`).
+Entrées:
 
-### 14.1 Distribution modes decision
+- `trader_decision`, `risk_percent`, `mode`, prix, SL.
 
-| decision_mode | count |
-|---|---:|
-| conservative | 2 |
-| balanced | 2 |
-| permissive | 26 |
+Cœur déterministe (RiskEngine):
 
-### 14.2 Distribution decisions trader
+- `HOLD` => accepté, volume 0.
+- SL obligatoire.
+- limites de risque par mode:
+  - `simulation`: 5%
+  - `paper`: 3%
+  - `live`: 2%
+- SL trop tight rejeté.
+- sizing via distance SL et pip value.
 
-| decision | count |
-|---|---:|
-| HOLD | 24 |
-| BUY | 3 |
-| SELL | 3 |
+LLM Risk (optionnel):
 
-### 14.3 Contradictions et overrides
+- contrat JSON strict `APPROVE|REJECT`.
+- en `live`, un rejet déterministe ne peut pas être renversé par LLM.
 
-| champ | count true / repartition |
+Sortie:
+
+- `accepted`, `reasons`, `suggested_volume`
+- `contract_valid`, `llm_summary`, `degraded`, `prompt_meta`.
+
+### 6.7 `execution-manager`
+
+Rôle:
+
+- traduire décision + risque en plan d'exécution final.
+
+Entrées:
+
+- `trader_decision`, `risk_output`, `mode`.
+
+Logique déterministe:
+
+- `deterministic_allowed` si:
+  - décision trader BUY/SELL
+  - `execution_allowed=true`
+  - `risk.accepted=true`
+
+LLM Execution (optionnel):
+
+- contrat JSON strict `BUY|SELL|HOLD`.
+- en `live`, exécution seulement si LLM confirme exactement la décision déterministe.
+- sinon HOLD de sécurité.
+
+Sortie:
+
+- `decision`, `should_execute`, `side`, `volume`, `reason`
+- `contract_valid`, `llm_summary`, `degraded`, `prompt_meta`.
+
+Diagramme de séquence `risk-manager` + `execution-manager`:
+
+```mermaid
+sequenceDiagram
+    participant O as Orchestrateur
+    participant R as risk-manager
+    participant RE as RiskEngine
+    participant EM as execution-manager
+    participant EX as ExecutionService
+    participant L as LLM Provider
+
+    O->>R: run(trader_decision, risk_percent, mode)
+    R->>RE: evaluate(mode, decision, risk_percent, price, stop_loss)
+    RE-->>R: accepted + reasons + suggested_volume
+    alt LLM risk activé
+        R->>L: JSON contract APPROVE|REJECT
+        L-->>R: review risk
+        alt mode=live && moteur déterministe rejette
+            R->>R: garder REJECT (guardrail live)
+        end
+    end
+    R-->>O: risk_output final
+
+    O->>EM: run(trader_decision, risk_output, mode)
+    alt LLM execution activé
+        EM->>L: JSON contract BUY|SELL|HOLD
+        L-->>EM: review execution
+    end
+    EM-->>O: execution_plan (should_execute, side, volume)
+
+    alt should_execute=true
+        O->>EX: execute(run_id, mode, symbol, side, volume, SL/TP)
+        EX->>EX: check idempotency key
+        EX-->>O: submitted|paper-simulated|failed
+    else should_execute=false
+        O->>O: marquer skipped
+    end
+```
+
+## 7. Runtime supervisor (agentique fort)
+
+Le runtime ne s'arrête pas à un simple pipeline: il peut faire des cycles de réévaluation.
+
+Composants:
+
+- `orchestrator_autonomy_enabled`
+- `orchestrator_autonomy_max_cycles`
+- `orchestrator_second_pass_enabled`
+- `orchestrator_second_pass_max_attempts`
+- garde-fou anti-stagnation
+- sélection du meilleur bundle via `_prefer_autonomy_bundle`
+
+Actions possibles par cycle:
+
+- `accept`
+- `rerun_due_to_degraded_outputs`
+- `rerun_with_conflict_focus`
+- `rerun_with_memory_refresh`
+- `rerun_second_pass`
+- `finalize_hold`
+
+Déclencheurs de rerun:
+
+- outputs dégradés.
+- HOLD avec conflit fort ou preuve insuffisante mais edge présent.
+- qualité insuffisante sur décision directionnelle.
+
+Mémoire dans les reruns:
+
+- `rerun_with_memory_refresh` augmente `memory_limit` (pas de boucle infinie).
+- un nouveau `memory_context` est recalculé.
+
+Model boost:
+
+- possibilité de forcer temporairement certains agents vers `default_model` au rerun.
+
+Sorties runtime:
+
+- `decision.runtime_supervisor`
+- `trace.runtime_supervisor`
+- compatibilité legacy conservée via `second_pass`.
+
+Déclenchement du second pass (logique exacte):
+
+- prérequis:
+  - `ORCHESTRATOR_SECOND_PASS_ENABLED=true`
+  - décision trader du cycle courant = `HOLD`
+  - sortie trader non dégradée
+- annulation immédiate si gate `major_contradiction_execution_block`.
+- déclenchement si un de ces cas:
+  - `strong_conflict=true`
+  - gate `insufficient_aligned_sources` et `abs(combined_score) >= ORCHESTRATOR_SECOND_PASS_MIN_COMBINED_SCORE`
+  - `needs_follow_up=true` avec `follow_up_reason in {insufficient_evidence, low_edge}` et edge minimum.
+
+Sélection du bundle final:
+
+- le runtime peut conserver le bundle du cycle 1 même si cycle 2 exécuté.
+- promotion cycle 2 si meilleure qualité (direction HOLD->BUY/SELL valide, moins de dégradations, meilleure evidence/confidence, etc.).
+- garde-fou de stagnation: si deux cycles consécutifs n'apportent pas d'amélioration mesurable, arrêt anticipé.
+
+## 8. Mémoire hybride
+
+## 8.1 VectorMemoryService (déterministe)
+
+Fonctions:
+
+- stocker les outcomes run dans `memory_entries`.
+- rechercher cas similaires (`pair/timeframe` stricts).
+- calculer `memory_signal` directionnel + risque.
+
+Mécanique:
+
+- embedding hash lexical déterministe (pas d'embedding LLM externe).
+- Qdrant prioritaire; fallback SQL cosine si indisponible.
+- reranking par score composite:
+  - `0.45 * vector`
+  - `0.40 * business_similarity`
+  - `0.15 * recency`
+
+`memory_signal`:
+
+- ajustements bornés:
+  - `MAX_SCORE_ADJUSTMENT = 0.08`
+  - `MAX_CONFIDENCE_ADJUSTMENT = 0.05`
+- peut fournir des `risk_blocks` buy/sell selon historique adverse.
+
+## 8.2 MemoriMemoryService (sémantique additionnelle)
+
+Activation:
+
+- `MEMORI_ENABLED=true`
+
+Fonctions:
+
+- `recall`: récupération facts Memori pour enrichir `memory_context`.
+- `store_run_memory`: écrit des facts compactés post-run.
+
+Règles d'intégration runtime:
+
+- `memory_signal` reste calculé sur mémoire vectorielle uniquement.
+- Memori influence le contexte narratif transmis aux agents, pas les garde-fous déterministes de risque.
+- traçabilité explicitée dans `trace.memory_runtime`.
+
+Variables Memori:
+
+- `MEMORI_ENABLED`
+- `MEMORI_PROCESS_ID`
+- `MEMORI_ENTITY_PREFIX`
+- `MEMORI_RECALL_LIMIT`
+- `MEMORI_RECALL_MIN_SIMILARITY`
+- `MEMORI_STORE_RUN_MEMORIES`
+
+## 9. Barrières live et sécurité d'exécution
+
+## 9.1 Aborts live avant exécution
+
+L'orchestrateur peut refuser le run live si outputs LLM critiques sont dégradés.
+
+Nuance:
+
+- si pas de trade candidat réel, certaines dégradations débat/trader/risk ne bloquent pas.
+- pour trade candidat live, les dégradations analytiques critiques bloquent.
+
+Matrice pratique (mode live):
+
+| Condition | Effet |
 |---|---|
-| `contradiction_level=none` | 21 |
-| `contradiction_level=moderate` | 4 |
-| `contradiction_level=major` | 5 |
-| `permissive_technical_override=true` | 6 |
-| `technical_single_source_override=true` | 6 |
-| `execution_manager.should_execute=true` | 6 |
-| `execution_result.status=submitted` | 6 |
+| `decision != BUY/SELL` ou `execution_allowed=false` ou `risk.accepted=false` | pas de blocage live par dégradation amont, run peut finir en HOLD |
+| trade candidat live + `technical/news/market-context` dégradé | abort run (`status=failed`) |
+| trade candidat live + `bullish/bearish/trader/risk` dégradé | non bloquant à ce stade précis |
+| `execution-manager` dégradé en live | abort run systématique |
 
-### 14.4 Gate reasons frequentes (30 runs)
+## 9.2 Exécution ordres (`ExecutionService`)
 
-| gate reason | occurrences |
-|---|---:|
-| `low_edge` | 24 |
-| `insufficient_aligned_sources` | 22 |
-| `confidence_below_minimum` | 21 |
-| `technical_neutral_gate` | 21 |
-| `combined_score_below_minimum` | 11 |
-| `major_contradiction_execution_block` | 5 |
-| `trend_momentum_contradiction_major` | 5 |
-| `trend_momentum_contradiction_moderate` | 4 |
-| `permissive_technical_override` | 6 |
-| `technical_single_source_override` | 6 |
+Fonctions de sécurité:
 
-## 15) API/config points d'entree pour piloter les agents
+- clé d'idempotence par run + symbol + side + volume + SL/TP + account.
+- replay d'ordre existant si même clé.
+- statuts normalisés (`simulated`, `submitted`, `paper-simulated`, `blocked`, `failed`, ...).
+- classification d'erreurs (`transient_network`, `rate_limited`, `auth_or_permission`, ...).
 
-### 15.1 `PUT /api/v1/connectors/ollama`
+Comportement par mode:
 
-Settings cibles:
-```json
-{
-  "enabled": true,
-  "settings": {
-    "provider": "ollama|openai|mistral",
-    "decision_mode": "conservative|balanced|permissive",
-    "default_model": "model-name",
-    "agent_models": {
-      "trader-agent": "deepseek-v3.2"
-    },
-    "agent_llm_enabled": {
-      "trader-agent": true,
-      "risk-manager": false
-    },
-    "agent_skills": {
-      "trader-agent": ["skill 1", "skill 2"]
-    }
-  }
-}
-```
+- `simulation`: jamais d'envoi broker.
+- `paper`: broker si possible, sinon fallback paper simulé.
+- `live`: pas de fallback simulé silencieux; échec explicite si broker fail.
 
-Sanitization/validation:
-- `decision_mode` invalide -> 422 (validation explicite route)
-- `agent_skills` normalisees/bornees
-- cache model selector invalide via `AgentModelSelector.clear_cache()`
+## 10. Prompts, modèles, skills
 
-## 16) Agents satellites
+## 10.1 PromptTemplateService
 
-### 16.1 `schedule-planner-agent`
-- agent dedie planification cron
-- LLM ON par defaut
-- prompt versionne via meme `PromptTemplateService`
-- output principal: `llm_result` JSON/text pour generation de plans actifs
+Capacités:
 
-### 16.2 `order-guardian`
-- supervision des positions ouvertes MetaApi
-- reutilise l'orchestrateur pour evaluer chaque position
-- peut appliquer un `guardian_model` comme override modele pour les agents de trading
-- produit actions (`EXIT`, `UPDATE_SL_TP`, `SKIP`) + rapport LLM synthese
+- seed de prompts par défaut.
+- versionning/activation en base (`prompt_templates`).
+- rendu avec variables + détection variables manquantes.
+- injection skills agent depuis `connector_configs.settings.agent_skills`.
+- normalisation langage (français + labels trading stricts).
 
-## 17) Tests de reference (ce que la suite garantit deja)
+## 10.2 AgentModelSelector
 
-`test_trader_agent.py` couvre notamment:
-- blocage low edge
-- neutral technical gate
-- conflit bullish/bearish fort
-- penalties contradiction moderate/major
-- differences conservative/balanced/permissive
-- overrides permissive + single source
-- exposition des gate fields au root payload
+Capacités:
 
-`test_risk_execution_agents.py` couvre:
-- execution bloquee si risk reject
-- impossibilite de promouvoir HOLD en BUY/SELL par LLM execution
-- respect `execution_allowed` trader
-- application volume multiplier
+- provider global (`ollama|openai|mistral`).
+- modèle global + overrides par agent.
+- switch `agent_llm_enabled` par agent.
+- résolution `decision_mode`.
+- switch `memory_context_enabled`.
 
-`test_orchestrator_debug_trace.py` couvre:
-- generation debug JSON
-- presence execution-manager dans `agent_steps`
-- abort live si `degraded=true` sur agent LLM
+Mapping LLM par défaut (code actuel):
 
-`test_connectors_settings_sanitization.py` couvre:
-- normalisation skills
-- validation/normalisation `decision_mode`
+- ON: `news-analyst`, `bullish-researcher`, `bearish-researcher`, `schedule-planner-agent`
+- OFF: `technical-analyst`, `market-context-analyst`, `trader-agent`, `risk-manager`, `execution-manager`, `order-guardian`
 
-## 18) Limites techniques actuelles (constat architecture)
+## 11. Persistance et observabilité
 
-1. Embedding memoire non semantique:
-- hash SHA256 deterministe, pas d'embedding LLM
-- robuste offline mais rappel contextuel moins fin
+Tables principales:
 
-2. Heterogeneite payloads en early return:
-- certaines sorties agents n'incluent pas toujours `prompt_meta` (ex: no news)
-- complique l'observabilite uniforme
+- `analysis_runs`: état global, `decision`, `trace`, `error`.
+- `agent_steps`: input/output par étape agent.
+- `execution_orders`: historique d'ordres + payload request/response.
+- `memory_entries`: cas mémoire long-terme vectoriels.
+- `prompt_templates`: prompts versionnés.
+- `connector_configs`: settings runtime (models, skills, mode, memory_context_enabled).
 
-3. Double exposition de certains champs trader:
-- root + `rationale` (utile compatibilite, mais verbeux)
+Champs trace utiles pour debug:
 
-4. Dependance forte `connector_configs.settings`:
-- une mauvaise hygiene settings peut changer modeles/modes/skills rapidement
-- sanitization limite ce risque mais n'impose pas de workflow de validation metier
+- `trace.market`
+- `trace.news`
+- `trace.memory_context`
+- `trace.memory_signal`
+- `trace.memory_runtime`
+- `trace.analysis_outputs`
+- `trace.bullish` / `trace.bearish`
+- `trace.second_pass`
+- `trace.runtime_supervisor`
+- `trace.memory_persistence`
+- `trace.debug_trace_file` (si debug JSON actif)
 
-## 19) Resume operationnel
+## 12. Contrat de décision final
 
-Architecture actuelle:
-- pipeline multi-agent deterministe-first avec LLM optionnel
-- gating decisionnel explicite et traceable
-- policies multi-mode parametrees dans le code
-- garde-fous live (degraded abort + risk/execution locks)
-- traces runtime riches (step-level + prompts + skills + gates)
+Le `run.decision` final contient au minimum:
 
-Ce document doit etre maintenu en meme temps que:
-- `agents.py` (rules/gates/policies)
-- `engine.py` (workflow + tracing)
-- `model_selector.py` et `registry.py` (prompts/skills)
+- décision trader enrichie
+- `risk`
+- `execution`
+- `execution_manager`
+- `second_pass`
+- `runtime_supervisor`
+- `memory_runtime`
+- `memory_persistence`
+
+## 13. Config runtime à connaître
+
+Variables orchestration/autonomie:
+
+- `ORCHESTRATOR_PARALLEL_WORKERS`
+- `ORCHESTRATOR_AUTONOMY_ENABLED`
+- `ORCHESTRATOR_AUTONOMY_MAX_CYCLES`
+- `ORCHESTRATOR_AUTONOMY_ACCEPT_MIN_CONFIDENCE`
+- `ORCHESTRATOR_AUTONOMY_ACCEPT_MIN_EVIDENCE`
+- `ORCHESTRATOR_AUTONOMY_MEMORY_LIMIT_STEP`
+- `ORCHESTRATOR_AUTONOMY_MEMORY_LIMIT_MAX`
+- `ORCHESTRATOR_AUTONOMY_MODEL_BOOST_ENABLED`
+- `ORCHESTRATOR_MEMORY_SEARCH_LIMIT`
+- `ORCHESTRATOR_SECOND_PASS_ENABLED`
+- `ORCHESTRATOR_SECOND_PASS_MAX_ATTEMPTS`
+- `ORCHESTRATOR_SECOND_PASS_MIN_COMBINED_SCORE`
+
+Variables debug:
+
+- `DEBUG_TRADE_JSON_ENABLED`
+- `DEBUG_TRADE_JSON_DIR`
+- `DEBUG_TRADE_JSON_INCLUDE_PROMPTS`
+- `DEBUG_TRADE_JSON_INCLUDE_PRICE_HISTORY`
+- `DEBUG_TRADE_JSON_PRICE_HISTORY_LIMIT`
+- `DEBUG_TRADE_JSON_INLINE_IN_RUN_TRACE`
+
+## 14. Frontière LLM vs déterministe (résumé clair)
+
+Composants à dominante déterministe:
+
+- calculs techniques de base.
+- market regime classification de base.
+- gating trader (score/confidence/source/contradiction).
+- risk engine (accept/reject + sizing).
+- exécution effective, idempotence, fallback mode.
+- live guardrails.
+
+Composants à dominante LLM (si activés):
+
+- enrichissement narratif/argumentatif (news, débat, notes d'exécution).
+- arbitrage complémentaire non critique sous contrat JSON strict (risk/execution managers).
+
+Garantie recherchée:
+
+- LLM améliore l'analyse; il ne doit pas court-circuiter les barrières de sécurité live.
+
+## 15. Lire un run comme un audit
+
+Méthode recommandée:
+
+1. Ouvrir `analysis_runs.trace.runtime_supervisor` pour voir cycles et action retenue.
+2. Vérifier `analysis_runs.trace.memory_runtime` (volumes vector/memori, disponibilité).
+3. Contrôler `analysis_runs.decision.decision_gates` et `follow_up_reason`.
+4. Vérifier `analysis_runs.decision.risk.accepted` et raisons.
+5. Vérifier `analysis_runs.decision.execution_manager.should_execute`.
+6. Vérifier `execution_orders` (idempotency key, statut, erreur éventuelle).
+7. En cas d'anomalie, inspecter `agent_steps` étape par étape.
+
+## 16. Extension: ajouter un nouvel agent proprement
+
+Checklist minimale:
+
+1. Créer la classe agent dans `agents.py` avec contrat d'entrée/sortie stable.
+2. Ajouter le prompt par défaut dans `DEFAULT_PROMPTS`.
+3. Brancher l'agent dans `engine.py`:
+   - instanciation
+   - insertion dans `WORKFLOW_STEPS`
+   - wiring dans `analyze_context`
+4. Mettre à jour la compaction des outputs si nécessaire (`_compact_analysis_outputs_for_debate`).
+5. Ajouter tests unitaires ciblés:
+   - sortie nominale
+   - comportement dégradé
+   - impact sur décision finale
+6. Vérifier trace et `agent_steps`.
+
+## 17. Limites connues (techniques)
+
+- Une partie des agents reste orientée pipeline (autonomie locale limitée hors superviseur).
+- Les débats bullish/bearish sont utiles mais encore dépendants de la qualité des signaux amont.
+- Les ajustements mémoire sont bornés volontairement, donc impact parfois modéré.
+- La robustesse dépend fortement de la qualité des providers news externes.
+
+## 18. En une phrase
+
+Le système est un runtime multi-agent supervisé, avec réévaluation autonome et mémoire hybride, mais il conserve volontairement une frontière déterministe stricte sur risque et exécution pour la sécurité de production.
