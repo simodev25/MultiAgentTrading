@@ -254,14 +254,22 @@ export const api = {
     }, token),
 };
 
-export function wsRunUrl(runId: number): string {
+export function wsRunUrl(runId: number, token?: string): string {
   const apiBase = BASE_URL.replace('/api/v1', '');
   const wsBase = apiBase.replace('http://', 'ws://').replace('https://', 'wss://');
-  return `${wsBase}/ws/runs/${runId}`;
+  const url = `${wsBase}/ws/runs/${runId}`;
+  if (token) {
+    return `${url}?token=${encodeURIComponent(token)}`;
+  }
+  return url;
 }
 
-export function wsTradingOrdersUrl(): string {
+export function wsTradingOrdersUrl(token?: string): string {
   const apiBase = BASE_URL.replace('/api/v1', '');
   const wsBase = apiBase.replace('http://', 'ws://').replace('https://', 'wss://');
-  return `${wsBase}/ws/trading/orders`;
+  const url = `${wsBase}/ws/trading/orders`;
+  if (token) {
+    return `${url}?token=${encodeURIComponent(token)}`;
+  }
+  return url;
 }

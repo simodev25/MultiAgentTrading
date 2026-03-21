@@ -320,7 +320,7 @@ export function useMetaTradingData(token: string | null) {
 
     const connect = () => {
       if (cancelled) return;
-      socket = new WebSocket(wsTradingOrdersUrl());
+      socket = new WebSocket(wsTradingOrdersUrl(token));
 
       socket.onmessage = (event: MessageEvent<string>) => {
         let payload: TradingOrdersWsMessage;

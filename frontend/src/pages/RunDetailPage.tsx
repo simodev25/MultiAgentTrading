@@ -124,7 +124,7 @@ export function RunDetailPage() {
 
     const connect = () => {
       if (cancelled) return;
-      socket = new WebSocket(wsRunUrl(parsedRunId));
+        socket = new WebSocket(wsRunUrl(parsedRunId, token));
       socket.onopen = () => {
         socketConnected = true;
       };
