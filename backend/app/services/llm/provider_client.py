@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import inspect
+import json
+import re
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -66,6 +68,71 @@ class LlmClient:
             db=db,
             **kwargs,
         )
+
+    @staticmethod
+    def _extract_json_payload(text: object) -> tuple[Any | None, str | None]:
+        raw = str(text or '').strip()
+        if not raw:
+            return None, 'Empty LLM response.'
+
+        candidates: list[str] = [raw]
+        fenced_blocks = re.findall(r'```(?:json)?\s*(.*?)```', raw, flags=re.IGNORECASE | re.DOTALL)
+        for block in fenced_blocks:
+            normalized = str(block or '').strip()
+            if normalized:
+                candidates.append(normalized)
+
+        first_object = raw.find('{')
+        last_object = raw.rfind('}')
+        if first_object >= 0 and last_object > first_object:
+            candidates.append(raw[first_object : last_object + 1].strip())
+
+        decoder = json.JSONDecoder()
+        seen: set[str] = set()
+        for candidate in candidates:
+            normalized = str(candidate or '').strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            try:
+                parsed, end_index = decoder.raw_decode(normalized)
+                if normalized[end_index:].strip():
+                    continue
+                return parsed, None
+            except json.JSONDecodeError:
+                continue
+
+        return None, 'Unable to parse JSON payload from LLM response.'
+
+    def chat_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        model: str | None = None,
+        db: Session | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        raw = self.chat(
+            system_prompt,
+            user_prompt,
+            model=model,
+            db=db,
+            **kwargs,
+        )
+        parsed, parse_error = self._extract_json_payload(raw.get('text') if isinstance(raw, dict) else None)
+        if not isinstance(raw, dict):
+            return {
+                'provider': 'fallback',
+                'text': '',
+                'json': parsed,
+                'json_error': parse_error or 'Invalid LLM response payload.',
+                'degraded': True,
+            }
+        return {
+            **raw,
+            'json': parsed,
+            'json_error': parse_error,
+        }
 
     def list_models(self, db: Session | None = None) -> dict[str, Any]:
         provider = self._resolve_provider(db)

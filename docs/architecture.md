@@ -1,5 +1,7 @@
 # Architecture technique V1
 
+Pour l'architecture du runtime agentique inspiré OpenClaw, voir `docs/agentic-v2-architecture.md`.
+
 ## Périmètre
 
 - Classe d'actifs: multi-actifs (V1), avec un focus opérationnel actuel sur les paires FX.

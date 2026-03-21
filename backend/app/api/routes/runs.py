@@ -10,12 +10,43 @@ from app.db.models.run import AnalysisRun
 from app.db.models.user import User
 from app.db.session import get_db
 from app.schemas.run import CreateRunRequest, RunDetailOut, RunOut
+from app.services.agent_runtime import normalize_runtime_engine, resolve_run_runtime_engine, run_with_selected_runtime
+from app.services.agent_runtime.constants import AGENTIC_V2_RUNTIME
+from app.services.agent_runtime.session_store import RuntimeSessionStore
 from app.services.market.symbols import canonical_symbol, get_market_symbols_config
-from app.services.orchestrator.engine import ForexOrchestrator
 from app.tasks.run_analysis_task import execute as run_analysis_task
 
 router = APIRouter(prefix='/runs', tags=['runs'])
 logger = logging.getLogger(__name__)
+
+
+def _serialize_run(
+    run: AnalysisRun,
+    *,
+    include_steps: bool = False,
+    hydrate_runtime: bool = False,
+) -> RunOut | RunDetailOut:
+    trace = run.trace if isinstance(run.trace, dict) else {}
+    if hydrate_runtime and resolve_run_runtime_engine(run) == AGENTIC_V2_RUNTIME:
+        trace = RuntimeSessionStore().hydrate_trace(run)
+
+    payload = {
+        'id': run.id,
+        'pair': run.pair,
+        'timeframe': run.timeframe,
+        'mode': run.mode,
+        'status': run.status,
+        'decision': run.decision,
+        'trace': trace,
+        'error': run.error,
+        'created_by_id': run.created_by_id,
+        'created_at': run.created_at,
+        'updated_at': run.updated_at,
+    }
+    if include_steps:
+        payload['steps'] = list(run.steps)
+        return RunDetailOut.model_validate(payload)
+    return RunOut.model_validate(payload)
 
 
 @router.get('', response_model=list[RunOut])
@@ -25,7 +56,7 @@ def list_runs(
     _: User = Depends(get_current_user),
 ) -> list[RunOut]:
     runs = db.query(AnalysisRun).order_by(AnalysisRun.created_at.desc()).limit(limit).all()
-    return [RunOut.model_validate(run) for run in runs]
+    return [_serialize_run(run) for run in runs]
 
 
 @router.post('', response_model=RunOut)
@@ -61,7 +92,10 @@ async def create_run(
         timeframe=timeframe,
         mode=payload.mode,
         status='pending',
-        trace={'requested_metaapi_account_ref': payload.metaapi_account_ref},
+        trace={
+            'requested_metaapi_account_ref': payload.metaapi_account_ref,
+            'runtime_engine': normalize_runtime_engine(payload.runtime),
+        },
         created_by_id=user.id,
     )
     db.add(run)
@@ -78,13 +112,17 @@ async def create_run(
             run.status = 'queued'
             db.commit()
             db.refresh(run)
-            return RunOut.model_validate(run)
+            return _serialize_run(run, hydrate_runtime=True)
         except Exception:
             logger.warning('run enqueue failed; falling back to in-request execution run_id=%s', run.id, exc_info=True)
 
-    orchestrator = ForexOrchestrator()
-    run = await orchestrator.execute(db, run, payload.risk_percent, metaapi_account_ref=payload.metaapi_account_ref)
-    return RunOut.model_validate(run)
+    run = await run_with_selected_runtime(
+        db,
+        run,
+        risk_percent=payload.risk_percent,
+        metaapi_account_ref=payload.metaapi_account_ref,
+    )
+    return _serialize_run(run, hydrate_runtime=True)
 
 
 @router.get('/{run_id}', response_model=RunDetailOut)
@@ -96,4 +134,4 @@ def get_run(
     run = db.get(AnalysisRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail='Run not found')
-    return RunDetailOut.model_validate(run)
+    return _serialize_run(run, include_steps=True, hydrate_runtime=True)

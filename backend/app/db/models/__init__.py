@@ -1,4 +1,6 @@
 from app.db.models.agent_step import AgentStep
+from app.db.models.agent_runtime_message import AgentRuntimeMessage
+from app.db.models.agent_runtime_session import AgentRuntimeSession
 from app.db.models.audit_log import AuditLog
 from app.db.models.backtest_run import BacktestRun
 from app.db.models.backtest_trade import BacktestTrade
@@ -17,6 +19,8 @@ __all__ = [
     'ConnectorConfig',
     'AnalysisRun',
     'AgentStep',
+    'AgentRuntimeMessage',
+    'AgentRuntimeSession',
     'ExecutionOrder',
     'AuditLog',
     'MemoryEntry',

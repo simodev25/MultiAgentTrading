@@ -1,5 +1,6 @@
 export type DecisionType = 'BUY' | 'SELL' | 'HOLD';
 export type ExecutionMode = 'simulation' | 'paper' | 'live';
+export type RuntimeEngine = 'agents_v1' | 'agentic_v2';
 
 export interface User {
   id: number;
@@ -34,6 +35,55 @@ export interface AgentStep {
 
 export interface RunDetail extends Run {
   steps: AgentStep[];
+}
+
+export interface RuntimeEvent {
+  id: number;
+  seq?: number;
+  type: string;
+  stream?: string;
+  name: string;
+  turn: number;
+  payload: Record<string, unknown>;
+  data?: Record<string, unknown>;
+  runId?: string;
+  sessionKey?: string;
+  created_at: string;
+  ts?: number;
+}
+
+export interface RuntimeSessionEntry {
+  session_key: string;
+  parent_session_key?: string | null;
+  label?: string;
+  name?: string;
+  status: string;
+  mode?: string;
+  depth?: number;
+  role?: string;
+  can_spawn?: boolean;
+  control_scope?: string;
+  turn?: number;
+  current_phase?: string;
+  started_at?: string | null;
+  ended_at?: string | null;
+  last_resumed_at?: string | null;
+  resume_count?: number;
+  source_tool?: string;
+  objective?: Record<string, unknown>;
+  summary?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  error?: string | null;
+}
+
+export interface RuntimeSessionMessage {
+  id: number;
+  session_key: string;
+  role: string;
+  content: string;
+  sender_session_key?: string | null;
+  created_at: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface ExecutionOrder {

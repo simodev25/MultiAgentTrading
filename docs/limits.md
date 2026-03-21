@@ -1,5 +1,7 @@
 # Limites connues (V1)
 
+Pour les limites spécifiques au runtime agentique V2, voir `docs/agentic-v2-limits.md`.
+
 ## Sécurité / exploitation
 
 - Le compte seed local (`admin@local.dev` / `admin1234`) est prévu pour dev/test uniquement.

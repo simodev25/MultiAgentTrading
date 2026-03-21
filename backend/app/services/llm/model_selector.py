@@ -16,6 +16,7 @@ DEFAULT_AGENT_LLM_ENABLED: dict[str, bool] = {
     'bullish-researcher': True,
     'bearish-researcher': True,
     'trader-agent': False,
+    'agentic-runtime-planner': True,
     'risk-manager': False,
     'execution-manager': False,
     'schedule-planner-agent': True,

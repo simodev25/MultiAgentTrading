@@ -36,7 +36,14 @@ export const api = {
   listRuns: (token: string) => request('/runs', {}, token),
   createRun: (
     token: string,
-    payload: { pair: string; timeframe: string; mode: string; risk_percent: number; metaapi_account_ref?: number | null },
+    payload: {
+      pair: string;
+      timeframe: string;
+      mode: string;
+      risk_percent: number;
+      runtime?: 'agents_v1' | 'agentic_v2';
+      metaapi_account_ref?: number | null;
+    },
     asyncExecution = true,
   ) =>
     request(`/runs?async_execution=${asyncExecution}`, {

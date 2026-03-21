@@ -75,6 +75,18 @@ DEFAULT_PROMPTS: dict[str, dict[str, str]] = {
             "Bearish: {bearish_args}\nNotes de risque: {risk_notes}"
         ),
     },
+    'agentic-runtime-planner': {
+        'system': (
+            "Tu es le planner du runtime agentique. "
+            "Tu dois choisir exactement un seul outil parmi les candidats autorisés. "
+            "Ta sortie doit être strictement un JSON valide."
+        ),
+        'user': (
+            "Choisis le prochain outil.\n"
+            'Réponds strictement avec ce JSON: {"tool":"<candidate_tool_name>","reason":"<justification courte>"}\n'
+            "Contexte runtime JSON:\n{context_json}"
+        ),
+    },
     'risk-manager': {
         'system': (
             "Tu es un risk manager multi-actifs. "
@@ -165,6 +177,8 @@ class PromptTemplateService:
         if agent_name == 'execution-manager':
             return LANGUAGE_DIRECTIVE_EXECUTION
         if agent_name == 'schedule-planner-agent':
+            return LANGUAGE_DIRECTIVE_JSON
+        if agent_name == 'agentic-runtime-planner':
             return LANGUAGE_DIRECTIVE_JSON
         if agent_name in {
             'technical-analyst',

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { api, wsRunUrl } from '../api/client';
 import { useAuth } from '../hooks/useAuth';
-import type { AgentStep, RunDetail } from '../types';
+import type { AgentStep, RunDetail, RuntimeEvent, RuntimeSessionEntry, RuntimeSessionMessage } from '../types';
 
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed']);
 const WS_RECONNECT_DELAY_MS = 3000;
@@ -18,6 +18,68 @@ function asPrettyJson(value: unknown): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function extractRuntimeEvents(trace: unknown): RuntimeEvent[] {
+  if (!isRecord(trace)) return [];
+  const runtime = trace.agentic_runtime;
+  if (!isRecord(runtime)) return [];
+  const events = runtime.events;
+  if (!Array.isArray(events)) return [];
+  return events
+    .filter((item): item is RuntimeEvent => isRecord(item) && typeof item.id === 'number')
+    .sort((a, b) => a.id - b.id) as RuntimeEvent[];
+}
+
+function extractRuntimeSessions(trace: unknown): RuntimeSessionEntry[] {
+  if (!isRecord(trace)) return [];
+  const runtime = trace.agentic_runtime;
+  if (!isRecord(runtime)) return [];
+  const sessions = runtime.sessions;
+  if (!isRecord(sessions)) return [];
+  return Object.values(sessions)
+    .filter((item): item is RuntimeSessionEntry => isRecord(item) && typeof item.session_key === 'string')
+    .sort((a, b) => {
+      const depthA = typeof a.depth === 'number' ? a.depth : 0;
+      const depthB = typeof b.depth === 'number' ? b.depth : 0;
+      if (depthA !== depthB) return depthA - depthB;
+      return a.session_key.localeCompare(b.session_key);
+    });
+}
+
+function extractRuntimeSessionHistory(trace: unknown): Record<string, RuntimeSessionMessage[]> {
+  if (!isRecord(trace)) return {};
+  const runtime = trace.agentic_runtime;
+  if (!isRecord(runtime)) return {};
+  const sessionHistory = runtime.session_history;
+  if (!isRecord(sessionHistory)) return {};
+
+  const entries: Record<string, RuntimeSessionMessage[]> = {};
+  for (const [sessionKey, messages] of Object.entries(sessionHistory)) {
+    if (!Array.isArray(messages)) continue;
+    entries[sessionKey] = messages
+      .filter((item): item is RuntimeSessionMessage => isRecord(item) && typeof item.id === 'number')
+      .sort((a, b) => a.id - b.id);
+  }
+  return entries;
+}
+
+function getRuntimeEventStream(event: RuntimeEvent): string {
+  return event.stream ?? event.type;
+}
+
+function getRuntimeEventData(event: RuntimeEvent): Record<string, unknown> {
+  return event.data ?? event.payload;
+}
+
+function getRuntimeEventPhase(event: RuntimeEvent): string | null {
+  const data = getRuntimeEventData(event);
+  const phase = data.phase;
+  return typeof phase === 'string' && phase.trim() ? phase : null;
+}
+
+function getRuntimeEventSessionKey(event: RuntimeEvent): string | null {
+  return typeof event.sessionKey === 'string' && event.sessionKey.trim() ? event.sessionKey : null;
 }
 
 function collectLlmFields(value: unknown, path = 'output_payload'): Array<{ path: string; value: unknown }> {
@@ -75,6 +137,7 @@ export function RunDetailPage() {
   const { runId = '' } = useParams();
   const { token } = useAuth();
   const [run, setRun] = useState<RunDetail | null>(null);
+  const [runtimeEvents, setRuntimeEvents] = useState<RuntimeEvent[]>([]);
   const [error, setError] = useState<string | null>(null);
   const inFlightRef = useRef(false);
   const runStatusRef = useRef<string | null>(null);
@@ -82,6 +145,8 @@ export function RunDetailPage() {
     () => (run ? run.steps.map((step) => buildLlmStepExport(step)).filter((step) => step !== null) : []),
     [run],
   );
+  const runtimeSessions = useMemo(() => extractRuntimeSessions(run?.trace), [run?.trace]);
+  const runtimeSessionHistory = useMemo(() => extractRuntimeSessionHistory(run?.trace), [run?.trace]);
 
   useEffect(() => {
     runStatusRef.current = run?.status ?? null;
@@ -103,6 +168,7 @@ export function RunDetailPage() {
         const data = (await api.getRun(token, runId)) as RunDetail;
         if (cancelled) return;
         setRun(data);
+        setRuntimeEvents(extractRuntimeEvents(data.trace));
         setError(null);
       } catch (err) {
         if (cancelled) return;
@@ -129,15 +195,44 @@ export function RunDetailPage() {
         socketConnected = true;
       };
       socket.onmessage = (event: MessageEvent<string>) => {
-        let payload: { error?: string; status?: string; decision?: unknown; updated_at?: string } | null = null;
+        let payload:
+          | {
+              type?: string;
+              error?: string;
+              status?: string;
+              decision?: unknown;
+              updated_at?: string;
+              event?: RuntimeEvent;
+            }
+          | null = null;
         try {
-          payload = JSON.parse(event.data) as { error?: string; status?: string; decision?: unknown; updated_at?: string };
+          payload = JSON.parse(event.data) as {
+            type?: string;
+            error?: string;
+            status?: string;
+            decision?: unknown;
+            updated_at?: string;
+            event?: RuntimeEvent;
+          };
         } catch {
           return;
         }
         if (!payload) return;
         if (payload.error) {
           setError(payload.error);
+          return;
+        }
+        if (payload.type === 'event' && payload.event) {
+          setRuntimeEvents((current) => {
+            const nextEvent = payload.event;
+            if (!nextEvent) {
+              return current;
+            }
+            if (current.some((item) => item.id === nextEvent.id)) {
+              return current;
+            }
+            return [...current, nextEvent].sort((a, b) => a.id - b.id);
+          });
           return;
         }
         setRun((current) => {
@@ -268,6 +363,56 @@ export function RunDetailPage() {
                 <span className={`badge ${step.status}`}>{step.status}</span>
               </header>
               <pre className="json-view">{asPrettyJson(step.output_payload)}</pre>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="card">
+        <h3>Sessions runtime</h3>
+        <div className="steps-list">
+          {runtimeSessions.length === 0 ? <p>Aucune session runtime.</p> : null}
+          {runtimeSessions.map((session) => (
+            <article key={session.session_key} className="step-card">
+              <header className="step-header">
+                <strong>{session.label ?? session.name ?? session.session_key}</strong>
+                <span className={`badge ${session.status}`}>{session.status}</span>
+              </header>
+              <pre className="json-view">{asPrettyJson(session)}</pre>
+              {runtimeSessionHistory[session.session_key]?.length ? (
+                <div className="steps-list">
+                  {runtimeSessionHistory[session.session_key].map((message) => (
+                    <article key={message.id} className="step-card">
+                      <header className="step-header">
+                        <strong>{message.role}</strong>
+                        <span className="badge completed">msg {message.id}</span>
+                      </header>
+                      {message.sender_session_key ? <p><code>{message.sender_session_key}</code></p> : null}
+                      <pre className="json-view">{asPrettyJson(message)}</pre>
+                    </article>
+                  ))}
+                </div>
+              ) : null}
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section className="card">
+        <h3>Événements runtime</h3>
+        <div className="steps-list">
+          {runtimeEvents.length === 0 ? <p>Aucun événement runtime.</p> : null}
+          {runtimeEvents.map((event) => (
+            <article key={event.id} className="step-card">
+              <header className="step-header">
+                <strong>
+                  {getRuntimeEventStream(event)} / {event.name}
+                  {getRuntimeEventPhase(event) ? ` / ${getRuntimeEventPhase(event)}` : ''}
+                </strong>
+                <span className="badge completed">seq {event.seq ?? event.id}</span>
+              </header>
+              {getRuntimeEventSessionKey(event) ? <p><code>{getRuntimeEventSessionKey(event)}</code></p> : null}
+              <pre className="json-view">{asPrettyJson(getRuntimeEventData(event))}</pre>
             </article>
           ))}
         </div>

@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 DecisionType = Literal['BUY', 'SELL', 'HOLD']
 ExecutionMode = Literal['simulation', 'paper', 'live']
+RuntimeEngine = Literal['agents_v1', 'agentic_v2']
 
 
 class CreateRunRequest(BaseModel):
@@ -14,6 +15,7 @@ class CreateRunRequest(BaseModel):
     mode: ExecutionMode = 'simulation'
     risk_percent: float = Field(default=1.0, ge=0.1, le=5.0)
     metaapi_account_ref: int | None = None
+    runtime: RuntimeEngine = 'agents_v1'
 
 
 class AgentStepOut(BaseModel):

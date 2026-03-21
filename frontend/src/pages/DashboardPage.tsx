@@ -4,7 +4,7 @@ import { api } from '../api/client';
 import { DEFAULT_PAIR, DEFAULT_TIMEFRAMES } from '../constants/markets';
 import { useAuth } from '../hooks/useAuth';
 import { useMarketSymbols } from '../hooks/useMarketSymbols';
-import type { ExecutionMode, MetaApiAccount, RegenerateSchedulesResult, RiskProfile, Run, ScheduledRun } from '../types';
+import type { ExecutionMode, MetaApiAccount, RegenerateSchedulesResult, RiskProfile, Run, RuntimeEngine, ScheduledRun } from '../types';
 
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'pending']);
 const EXECUTION_DATE_FORMATTER = new Intl.DateTimeFormat('fr-FR', {
@@ -101,6 +101,7 @@ export function DashboardPage() {
   const [timeframe, setTimeframe] = useState('H1');
   const [mode, setMode] = useState<ExecutionMode>('simulation');
   const [riskPercent, setRiskPercent] = useState(1);
+  const [runtime, setRuntime] = useState<RuntimeEngine>('agents_v1');
   const [metaapiAccountRef, setMetaapiAccountRef] = useState<number | null>(null);
   const [scheduleName, setScheduleName] = useState(DEFAULT_PAIR);
   const [scheduleNameTouched, setScheduleNameTouched] = useState(false);
@@ -251,6 +252,7 @@ export function DashboardPage() {
         timeframe,
         mode,
         risk_percent: riskPercent,
+        runtime,
         metaapi_account_ref: metaapiAccountRef,
       });
       await loadRuns();
@@ -414,6 +416,13 @@ export function DashboardPage() {
           <label>
             Risk %
             <input type="number" min={0.1} max={5} step={0.1} value={riskPercent} onChange={(e) => setRiskPercent(Number(e.target.value))} />
+          </label>
+          <label>
+            Runtime
+            <select value={runtime} onChange={(e) => setRuntime(e.target.value as RuntimeEngine)}>
+              <option value="agents_v1">Agents V1</option>
+              <option value="agentic_v2">Agentic V2</option>
+            </select>
           </label>
           <label>
             MetaApi compte

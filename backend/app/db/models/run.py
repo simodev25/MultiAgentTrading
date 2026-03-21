@@ -24,3 +24,5 @@ class AnalysisRun(Base):
 
     steps = relationship('AgentStep', back_populates='run', cascade='all, delete-orphan')
     orders = relationship('ExecutionOrder', back_populates='run', cascade='all, delete-orphan')
+    runtime_sessions = relationship('AgentRuntimeSession', back_populates='run', cascade='all, delete-orphan')
+    runtime_messages = relationship('AgentRuntimeMessage', back_populates='run', cascade='all, delete-orphan')
