@@ -97,3 +97,37 @@ def test_prompt_registry_render_marks_missing_variables() -> None:
         assert rendered['missing_variables'] == ['trend']
         assert '<MISSING:trend>' in rendered['user_prompt']
         assert '[WARN_PROMPT_MISSING_VARS] trend' in rendered['user_prompt']
+
+
+def test_prompt_registry_market_context_no_missing_macd_when_provided() -> None:
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(bind=engine)
+
+    service = PromptTemplateService()
+    with Session(engine) as db:
+        rendered = service.render(
+            db=db,
+            agent_name='market-context-analyst',
+            fallback_system='system',
+            fallback_user=(
+                'Pair: {pair}\nTimeframe: {timeframe}\nTrend: {trend}\nLast price: {last_price}\n'
+                'Change pct: {change_pct}\nATR: {atr}\nATR ratio: {atr_ratio}\nRSI: {rsi}\n'
+                'EMA fast: {ema_fast}\nEMA slow: {ema_slow}\nMACD diff: {macd_diff}\n'
+            ),
+            variables={
+                'pair': 'EURUSD',
+                'timeframe': 'M5',
+                'trend': 'neutral',
+                'last_price': 1.1,
+                'change_pct': 0.0,
+                'atr': 0.001,
+                'atr_ratio': 0.0009,
+                'rsi': 50.0,
+                'ema_fast': 1.1001,
+                'ema_slow': 1.1,
+                'macd_diff': 0.0002,
+            },
+        )
+
+        assert rendered['missing_variables'] == []
+        assert '[WARN_PROMPT_MISSING_VARS]' not in rendered['user_prompt']

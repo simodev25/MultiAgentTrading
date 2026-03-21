@@ -159,6 +159,16 @@ Formats supportés:
 - Run `/runs`: workflow complet jusqu'à `execution-manager`.
 - Backtest `agents_v1`: réutilise `analyze_context` jusqu'à `risk-manager`; execution broker désactivée par design.
 
+## Second pass conditionnel
+
+- L'orchestrateur peut relancer un `second pass` d'analyse (`ORCHESTRATOR_SECOND_PASS_ENABLED=true`).
+- Déclenchement typique: décision initiale `HOLD` avec conflit fort ou manque d'alignement des preuves alors qu'un edge existe encore.
+- Paramètres:
+  - `ORCHESTRATOR_SECOND_PASS_ENABLED` (bool)
+  - `ORCHESTRATOR_SECOND_PASS_MAX_ATTEMPTS` (0-3)
+  - `ORCHESTRATOR_SECOND_PASS_MIN_COMBINED_SCORE` (0.0-1.0)
+- La trace finale expose l'objet `second_pass` (tentative, raison, pass sélectionné).
+
 ## Contrat de sortie (résumé)
 
 ```json

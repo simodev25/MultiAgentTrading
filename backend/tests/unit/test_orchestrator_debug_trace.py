@@ -386,3 +386,112 @@ def test_orchestrator_skips_memory_context_search_when_disabled(monkeypatch) -> 
         assert completed_run.trace.get('memory_context') == []
         assert completed_run.trace.get('memory_context_enabled') is False
         assert completed_run.trace.get('memory_signal', {}).get('used') is False
+
+
+def test_orchestrator_second_pass_can_promote_hold_to_directional_trade(monkeypatch) -> None:
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(bind=engine)
+
+    with Session(engine) as db:
+        run = _seed_run(db, mode='simulation')
+        orchestrator = ForexOrchestrator()
+        orchestrator.settings.orchestrator_second_pass_enabled = True
+        orchestrator.settings.orchestrator_second_pass_max_attempts = 1
+        orchestrator.settings.orchestrator_second_pass_min_combined_score = 0.18
+
+        monkeypatch.setattr(orchestrator.prompt_service, 'seed_defaults', lambda _db: None)
+        monkeypatch.setattr(orchestrator.market_provider, 'get_market_snapshot', lambda *_args, **_kwargs: {
+            'degraded': False,
+            'pair': 'EURUSD',
+            'timeframe': 'H1',
+            'last_price': 1.102,
+            'atr': 0.001,
+            'trend': 'bullish',
+        })
+        monkeypatch.setattr(orchestrator.market_provider, 'get_news_context', lambda *_args, **_kwargs: {
+            'degraded': False,
+            'pair': 'EURUSD',
+            'news': [],
+        })
+        monkeypatch.setattr(orchestrator.memory_service, 'search', lambda **_kwargs: [])
+        monkeypatch.setattr(orchestrator.memory_service, 'add_run_memory', lambda *_args, **_kwargs: None)
+
+        calls = {'count': 0}
+
+        def fake_analyze_context(*_args, **_kwargs):
+            calls['count'] += 1
+            if calls['count'] == 1:
+                return {
+                    'analysis_outputs': {'technical-analyst': {'signal': 'bullish', 'score': 0.25}},
+                    'bullish': {'arguments': ['trend aligns'], 'confidence': 0.7},
+                    'bearish': {'arguments': ['minor headwind'], 'confidence': 0.3},
+                    'trader_decision': {
+                        'decision': 'HOLD',
+                        'confidence': 0.42,
+                        'combined_score': 0.22,
+                        'strong_conflict': False,
+                        'needs_follow_up': True,
+                        'follow_up_reason': 'insufficient_evidence',
+                        'decision_gates': ['insufficient_aligned_sources', 'low_edge'],
+                        'execution_allowed': False,
+                        'entry': 1.102,
+                        'stop_loss': None,
+                        'take_profit': None,
+                    },
+                    'risk': {
+                        'accepted': True,
+                        'suggested_volume': 0.0,
+                        'reasons': ['No trade requested (HOLD).'],
+                    },
+                }
+            return {
+                'analysis_outputs': {'technical-analyst': {'signal': 'bullish', 'score': 0.33}},
+                'bullish': {'arguments': ['trend aligns strongly'], 'confidence': 0.8},
+                'bearish': {'arguments': ['weak bearish case'], 'confidence': 0.1},
+                'trader_decision': {
+                    'decision': 'BUY',
+                    'confidence': 0.67,
+                    'combined_score': 0.31,
+                    'strong_conflict': False,
+                    'needs_follow_up': False,
+                    'follow_up_reason': None,
+                    'decision_gates': ['technical_neutral_exception'],
+                    'execution_allowed': True,
+                    'entry': 1.102,
+                    'stop_loss': 1.1,
+                    'take_profit': 1.106,
+                },
+                'risk': {
+                    'accepted': True,
+                    'suggested_volume': 0.2,
+                    'reasons': ['Risk checks passed.'],
+                },
+            }
+
+        monkeypatch.setattr(orchestrator, 'analyze_context', fake_analyze_context)
+        monkeypatch.setattr(
+            orchestrator.execution_manager_agent,
+            'run',
+            lambda *_args, **_kwargs: {
+                'decision': 'BUY',
+                'should_execute': True,
+                'side': 'BUY',
+                'volume': 0.2,
+                'reason': 'Trade eligible based on trader decision + risk checks.',
+                'degraded': False,
+            },
+        )
+
+        async def fake_execute_order(**_kwargs):
+            return {'status': 'simulated', 'executed': False, 'reason': 'Simulation mode: order not sent to broker.'}
+
+        monkeypatch.setattr(orchestrator.execution_service, 'execute', fake_execute_order)
+
+        completed_run = asyncio.run(orchestrator.execute(db, run, risk_percent=1.0))
+
+        assert completed_run.status == 'completed'
+        assert calls['count'] == 2
+        assert completed_run.decision.get('decision') == 'BUY'
+        assert completed_run.decision.get('second_pass', {}).get('attempted') is True
+        assert completed_run.decision.get('second_pass', {}).get('selected_pass') == 'second'
+        assert completed_run.trace.get('second_pass', {}).get('selected_pass') == 'second'

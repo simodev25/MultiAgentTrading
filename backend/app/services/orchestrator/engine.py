@@ -319,6 +319,66 @@ class ForexOrchestrator:
 
         return [agent for agent in degraded_agents if agent not in non_blocking_when_no_trade]
 
+    @staticmethod
+    def _decision_gate_list(trader_decision: dict[str, Any]) -> list[str]:
+        gates = trader_decision.get('decision_gates')
+        if not isinstance(gates, list):
+            rationale = trader_decision.get('rationale')
+            if isinstance(rationale, dict):
+                gates = rationale.get('decision_gates')
+        if not isinstance(gates, list):
+            return []
+        return [str(item) for item in gates if str(item).strip()]
+
+    def _should_trigger_second_pass(self, trader_decision: dict[str, Any]) -> tuple[bool, str]:
+        if not self.settings.orchestrator_second_pass_enabled:
+            return False, 'feature_disabled'
+
+        decision = str(trader_decision.get('decision', 'HOLD') or '').strip().upper() or 'HOLD'
+        if decision in {'BUY', 'SELL'}:
+            return False, 'already_directional_decision'
+        if bool(trader_decision.get('degraded', False)):
+            return False, 'trader_output_degraded'
+
+        gates = self._decision_gate_list(trader_decision)
+        strong_conflict = bool(trader_decision.get('strong_conflict', False))
+        needs_follow_up = bool(trader_decision.get('needs_follow_up', False))
+        follow_up_reason = str(trader_decision.get('follow_up_reason') or '').strip().lower()
+        combined_score = abs(float(trader_decision.get('combined_score', 0.0) or 0.0))
+        min_second_pass_score = float(self.settings.orchestrator_second_pass_min_combined_score)
+
+        if 'major_contradiction_execution_block' in gates:
+            return False, 'major_contradiction_guardrail'
+        if strong_conflict:
+            return True, 'strong_conflict'
+        if 'insufficient_aligned_sources' in gates and combined_score >= min_second_pass_score:
+            return True, 'insufficient_aligned_sources_with_edge'
+        if needs_follow_up and follow_up_reason in {'insufficient_evidence', 'low_edge'} and combined_score >= min_second_pass_score:
+            return True, f'follow_up_{follow_up_reason}'
+
+        return False, 'no_second_pass_condition'
+
+    @staticmethod
+    def _prefer_second_pass_result(
+        primary: dict[str, Any],
+        secondary: dict[str, Any],
+    ) -> bool:
+        primary_decision = str(primary.get('decision', 'HOLD') or '').strip().upper() or 'HOLD'
+        secondary_decision = str(secondary.get('decision', 'HOLD') or '').strip().upper() or 'HOLD'
+        primary_confidence = float(primary.get('confidence', 0.0) or 0.0)
+        secondary_confidence = float(secondary.get('confidence', 0.0) or 0.0)
+
+        if primary_decision == 'HOLD' and secondary_decision in {'BUY', 'SELL'} and bool(secondary.get('execution_allowed', False)):
+            return True
+        if primary_decision == 'HOLD' and secondary_decision == 'HOLD':
+            primary_follow_up = bool(primary.get('needs_follow_up', False))
+            secondary_follow_up = bool(secondary.get('needs_follow_up', False))
+            if primary_follow_up and not secondary_follow_up and secondary_confidence >= primary_confidence:
+                return True
+            if secondary_confidence >= primary_confidence + 0.15:
+                return True
+        return False
+
     def analyze_context(
         self,
         context: AgentContext,
@@ -562,6 +622,50 @@ class ForexOrchestrator:
             bearish = analysis_bundle['bearish']
             trader_decision = analysis_bundle['trader_decision']
             risk_output = analysis_bundle['risk']
+            second_pass_meta: dict[str, Any] = {
+                'enabled': bool(self.settings.orchestrator_second_pass_enabled),
+                'attempted': False,
+                'attempt_count': 0,
+                'trigger_reason': None,
+                'selected_pass': 'first',
+                'first_decision': str(trader_decision.get('decision', 'HOLD') or 'HOLD'),
+                'first_confidence': float(trader_decision.get('confidence', 0.0) or 0.0),
+            }
+            max_second_pass_attempts = max(int(self.settings.orchestrator_second_pass_max_attempts), 0)
+
+            for _ in range(max_second_pass_attempts):
+                should_second_pass, trigger_reason = self._should_trigger_second_pass(trader_decision)
+                if not should_second_pass:
+                    second_pass_meta['skip_reason'] = trigger_reason
+                    break
+
+                second_pass_meta['attempted'] = True
+                second_pass_meta['attempt_count'] = int(second_pass_meta.get('attempt_count', 0)) + 1
+                second_pass_meta['trigger_reason'] = trigger_reason
+
+                candidate_bundle = self.analyze_context(
+                    context=context,
+                    db=db,
+                    run=run,
+                    record_steps=True,
+                    emit_step_logs=True,
+                )
+                candidate_trader_decision = candidate_bundle['trader_decision']
+                second_pass_meta['second_decision'] = str(candidate_trader_decision.get('decision', 'HOLD') or 'HOLD')
+                second_pass_meta['second_confidence'] = float(candidate_trader_decision.get('confidence', 0.0) or 0.0)
+
+                if self._prefer_second_pass_result(trader_decision, candidate_trader_decision):
+                    analysis_bundle = candidate_bundle
+                    analysis_outputs = analysis_bundle['analysis_outputs']
+                    bullish = analysis_bundle['bullish']
+                    bearish = analysis_bundle['bearish']
+                    trader_decision = analysis_bundle['trader_decision']
+                    risk_output = analysis_bundle['risk']
+                    second_pass_meta['selected_pass'] = 'second'
+                    second_pass_meta['used_second_pass_result'] = True
+                    break
+
+                second_pass_meta['used_second_pass_result'] = False
 
             if str(run.mode or '').strip().lower() == 'live':
                 candidate_outputs = {
@@ -650,6 +754,7 @@ class ForexOrchestrator:
                 'risk': risk_output,
                 'execution': execution_result,
                 'execution_manager': execution_output,
+                'second_pass': second_pass_meta,
             }
             run.status = 'completed'
             trace_payload = {
@@ -664,6 +769,7 @@ class ForexOrchestrator:
                 'memory_retrieval_context': memory_retrieval_context,
                 'requested_metaapi_account_ref': metaapi_account_ref,
                 'workflow': list(self.WORKFLOW_STEPS),
+                'second_pass': second_pass_meta,
             }
             if self.settings.debug_trade_json_enabled:
                 debug_payload = self._build_debug_trade_payload(

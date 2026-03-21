@@ -8,7 +8,7 @@
 
 ## Observations de revue code (2026-03-16)
 
-- `Critique` `WebSockets non authentifiés`: les endpoints `/ws/runs/{run_id}` et `/ws/trading/orders` n'appliquent pas de JWT/RBAC natif. Impact: fuite potentielle d'informations de runs/ordres si exposés publiquement. Contournement V1: exposition réseau interne uniquement ou protection stricte en reverse proxy.
+- `Moyen` `Mauvaise configuration WS`: l'auth WebSocket est activée par défaut (`WS_REQUIRE_AUTH=true`) mais peut être désactivée (`WS_REQUIRE_AUTH=false`). Impact: fuite potentielle d'informations de runs/ordres si l'instance est exposée avec auth désactivée. Contournement: conserver `WS_REQUIRE_AUTH=true` en production et limiter `WS_ALLOW_QUERY_TOKEN`.
 - `Élevé` `Risque de fuite de clé API`: `GET /api/v1/connectors/ollama/models` tente aussi `https://ollama.com/api/tags` avec header `Authorization` lorsqu'une clé est configurée. Impact: envoi possible d'un bearer token vers un domaine de fallback. Contournement V1: restreindre l'usage de cet endpoint en interne/admin et privilégier un `OLLAMA_BASE_URL` explicite.
 - `Élevé` `Bootstrap admin prédictible`: compte seed local par défaut + endpoint `POST /api/v1/auth/bootstrap-admin`. Impact: prise de contrôle facilitée en environnement mal exposé/initialisé. Contournement V1: désactiver/filtrer cet endpoint hors dev et imposer rotation immédiate des secrets/mots de passe.
 - `Moyen` `Endpoint /metrics exposé`: métriques Prometheus accessibles sans authentification applicative. Impact: fuite de métadonnées techniques. Contournement V1: endpoint interne uniquement (réseau privé ou auth en amont).
@@ -25,7 +25,7 @@
 
 - Qdrant est prioritaire; repli SQL cosine activé si Qdrant indisponible.
 - Le filtrage mémoire est borné au couple `pair` + `timeframe`.
-- Les embeddings V1 sont déterministes (hash), pas des embeddings sémantiques LLM.
+- Les embeddings V1 utilisent un hashing lexical-sémantique déterministe (tokens/bigrams) avec composante globale; ce n'est pas un embedding sémantique LLM.
 
 ## Performance
 

@@ -315,3 +315,14 @@ def test_compute_memory_signal_is_directional_and_bounded() -> None:
     assert abs(float(signal['score_adjustment'])) <= 0.08
     assert abs(float(signal['confidence_adjustment'])) <= 0.05
     assert len(signal['top_case_refs']) <= 3
+
+
+def test_embedding_prefers_semantically_aligned_phrases() -> None:
+    service = VectorMemoryService()
+    bullish_a = service._embed('EURUSD bullish trend buy setup with momentum confirmation')
+    bullish_b = service._embed('EURUSD long bullish momentum and trend continuation')
+    bearish = service._embed('EURUSD bearish sell pressure and downside continuation')
+
+    aligned = service._cosine(bullish_a, bullish_b)
+    opposite = service._cosine(bullish_a, bearish)
+    assert aligned > opposite

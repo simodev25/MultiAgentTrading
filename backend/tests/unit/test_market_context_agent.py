@@ -160,6 +160,32 @@ def test_llm_summary_matches_structured_context_output() -> None:
     assert out['reason'] in summary
 
 
+def test_market_context_llm_mode_uses_decision_mode_without_runtime_error(monkeypatch) -> None:
+    agent = MarketContextAnalystAgent()
+    monkeypatch.setattr(agent.model_selector, 'is_enabled', lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(agent.model_selector, 'resolve', lambda *_args, **_kwargs: 'dummy-model')
+    monkeypatch.setattr(agent.model_selector, 'resolve_decision_mode', lambda *_args, **_kwargs: 'conservative')
+    monkeypatch.setattr(agent.llm, 'chat', lambda *_args, **_kwargs: {'text': 'neutral note', 'degraded': False})
+
+    out = agent.run(
+        _ctx(
+            {
+                'last_price': 1.1,
+                'atr': 0.001,
+                'trend': 'bullish',
+                'change_pct': 0.1,
+                'rsi': 55,
+                'macd_diff': 0.03,
+                'ema_fast': 1.101,
+                'ema_slow': 1.099,
+            }
+        )
+    )
+
+    assert out['llm_call_attempted'] is True
+    assert out['llm_fallback_used'] is False
+
+
 def test_permissive_mode_can_still_trade_after_context_patch() -> None:
     trader = TraderAgent()
     previous_mode = trader.model_selector.settings.decision_mode

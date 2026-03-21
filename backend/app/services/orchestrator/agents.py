@@ -1,5 +1,6 @@
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -946,6 +947,21 @@ class NewsAnalystAgent:
         self.llm = LlmClient()
         self.model_selector = AgentModelSelector()
         self.prompt_service = prompt_service
+        self._llm_consecutive_failures = 0
+        self._llm_circuit_open_until = 0.0
+
+    def _is_llm_circuit_open(self) -> bool:
+        return time.monotonic() < self._llm_circuit_open_until
+
+    def _record_llm_success(self) -> None:
+        self._llm_consecutive_failures = 0
+        self._llm_circuit_open_until = 0.0
+
+    def _record_llm_failure(self, *, threshold: int, open_seconds: float) -> None:
+        self._llm_consecutive_failures += 1
+        if self._llm_consecutive_failures >= max(int(threshold), 1):
+            self._llm_circuit_open_until = time.monotonic() + max(float(open_seconds), 15.0)
+            self._llm_consecutive_failures = 0
 
     def run(self, ctx: AgentContext, db: Session | None = None) -> dict[str, Any]:
         raw_news = ctx.news_context.get('news', [])
@@ -987,6 +1003,9 @@ class NewsAnalystAgent:
         settings = get_settings()
         analysis_cfg = settings.news_analysis if isinstance(settings.news_analysis, dict) else {}
         min_relevance = _clamp(_safe_float(analysis_cfg.get('minimum_relevance_score'), 0.35), 0.0, 1.0)
+        llm_min_evidence_strength = _clamp(_safe_float(analysis_cfg.get('llm_min_evidence_strength'), 0.12), 0.0, 1.0)
+        llm_circuit_failure_threshold = max(int(_safe_float(analysis_cfg.get('llm_circuit_failure_threshold'), 3.0)), 1)
+        llm_circuit_open_seconds = max(_safe_float(analysis_cfg.get('llm_circuit_open_seconds'), 180.0), 15.0)
 
         symbol_for_pair = _normalize_symbol_for_news(provider_symbol or ctx.pair)
         fx_like_symbol = bool(re.fullmatch(r'[A-Z]{6}', symbol_for_pair))
@@ -1273,6 +1292,17 @@ class NewsAnalystAgent:
             reason = 'Relevant news and macro evidence produced a directional edge'
             summary = 'News evidence produced a directional edge with controlled confidence.'
 
+        evidence_strength = round(
+            _clamp(
+                abs(score) * _clamp(relevant_total / 6.0, 0.0, 1.0),
+                0.0,
+                1.0,
+            ),
+            3,
+        )
+        if mixed_signals:
+            evidence_strength = round(_clamp(evidence_strength * 0.7, 0.0, 1.0), 3)
+
         llm_summary = ''
         llm_fallback_used = False
         llm_retry_used = False
@@ -1291,12 +1321,18 @@ class NewsAnalystAgent:
             and not degraded
             and decision_mode in {'directional', 'neutral_from_mixed_news'}
             and coverage in {'medium', 'high'}
+            and evidence_strength >= llm_min_evidence_strength
+            and not self._is_llm_circuit_open()
         )
         if llm_enabled and not should_call_llm and llm_skipped_reason is None:
             if degraded:
                 llm_skipped_reason = 'source_degraded'
             elif coverage not in {'medium', 'high'}:
                 llm_skipped_reason = f'coverage_{coverage}'
+            elif self._is_llm_circuit_open():
+                llm_skipped_reason = 'llm_circuit_open'
+            elif evidence_strength < llm_min_evidence_strength:
+                llm_skipped_reason = 'evidence_strength_below_threshold'
             else:
                 llm_skipped_reason = f'decision_mode_{decision_mode}'
         if should_call_llm:
@@ -1408,11 +1444,16 @@ class NewsAnalystAgent:
                     score = round(-max(abs(score), 0.01), 3)
                 llm_fallback_used = False
                 summary = llm_text
+                self._record_llm_success()
             else:
                 llm_fallback_used = True
                 if not llm_summary.strip():
                     llm_summary = _build_empty_llm_summary(llm_res, retried=llm_retry_used)
                 summary = 'LLM degraded for news-analyst. Deterministic skill-aware fallback used.'
+                self._record_llm_failure(
+                    threshold=llm_circuit_failure_threshold,
+                    open_seconds=llm_circuit_open_seconds,
+                )
         elif not llm_summary.strip() and llm_skipped_reason:
             llm_summary = f'LLM not called ({llm_skipped_reason})'
 
@@ -1454,6 +1495,7 @@ class NewsAnalystAgent:
             'score': round(_clamp(score, -1.0, 1.0), 3),
             'confidence': confidence,
             'coverage': coverage,
+            'evidence_strength': evidence_strength,
             'information_state': information_state,
             'decision_mode': decision_mode,
             'reason': reason,
@@ -1470,6 +1512,7 @@ class NewsAnalystAgent:
             'llm_call_attempted': llm_call_attempted,
             'llm_skipped_reason': llm_skipped_reason,
             'llm_summary': llm_summary,
+            'llm_circuit_open': self._is_llm_circuit_open(),
             'degraded': degraded,
             'fetch_status': fetch_status,
             'prompt_meta': {
@@ -1757,6 +1800,7 @@ class MarketContextAnalystAgent:
         llm_enabled = self.model_selector.is_enabled(db, self.name)
         runtime_skills = _resolve_runtime_skills(self.model_selector, db, self.name)
         llm_model = _resolve_llm_model(ctx, self.model_selector, db, self.name)
+        trading_decision_mode = self.model_selector.resolve_decision_mode(db)
 
         adjusted_score, adjusted_signal, changed = _apply_deterministic_skill_guardrail(
             float(output.get('score', 0.0)),
@@ -1821,6 +1865,7 @@ class MarketContextAnalystAgent:
                 'rsi': ctx.market_snapshot.get('rsi'),
                 'ema_fast': ctx.market_snapshot.get('ema_fast'),
                 'ema_slow': ctx.market_snapshot.get('ema_slow'),
+                'macd_diff': ctx.market_snapshot.get('macd_diff'),
             }
 
             if db is not None:
@@ -2527,6 +2572,35 @@ class TraderAgent:
             'confidence_before_memory': confidence_before_memory,
             'confidence_after_memory': confidence,
         }
+        follow_up_reason: str | None = None
+        if decision == 'HOLD':
+            if strong_conflict:
+                follow_up_reason = 'strong_conflict'
+            elif not minimum_evidence_ok:
+                follow_up_reason = 'insufficient_evidence'
+            elif low_edge:
+                follow_up_reason = 'low_edge'
+            elif technical_neutral_block:
+                follow_up_reason = 'technical_neutral_gate'
+        needs_follow_up = decision == 'HOLD' and follow_up_reason is not None
+
+        if confidence >= 0.75:
+            uncertainty_level = 'low'
+        elif confidence >= 0.45:
+            uncertainty_level = 'moderate'
+        else:
+            uncertainty_level = 'high'
+
+        invalidation_conditions: list[str] = []
+        if decision in {'BUY', 'SELL'}:
+            invalidation_conditions = [
+                'combined_score_below_minimum',
+                'confidence_below_minimum',
+                'insufficient_aligned_sources',
+                'major_contradiction_execution_block',
+            ]
+            if memory_signal_used:
+                invalidation_conditions.append('memory_risk_block')
 
         output = {
             'decision': decision,
@@ -2568,6 +2642,11 @@ class TraderAgent:
             'memory_confidence_adjustment_applied': round(memory_confidence_adjustment_applied, 4),
             'memory_signal': memory_signal_output,
             'decision_gates': gate_reasons,
+            'uncertainty_level': uncertainty_level,
+            'needs_follow_up': needs_follow_up,
+            'follow_up_reason': follow_up_reason,
+            'evidence_strength': round(evidence_quality, 3),
+            'invalidation_conditions': invalidation_conditions,
             'contradiction_level': contradiction_level,
             'contradiction_penalty': round(contradiction_penalty, 3),
             'volume_multiplier': round(volume_multiplier, 3),
@@ -2594,6 +2673,7 @@ class TraderAgent:
                 'evidence_quality': evidence_quality,
                 'confidence_before_memory': confidence_before_memory,
                 'decision_confidence': confidence,
+                'uncertainty_level': uncertainty_level,
                 'decision_mode': decision_mode,
                 'policy': {
                     'mode': policy.mode,
@@ -2658,6 +2738,9 @@ class TraderAgent:
                 'major_contradiction_block': major_contradiction_block,
                 'execution_allowed': execution_allowed,
                 'decision_gates': gate_reasons,
+                'needs_follow_up': needs_follow_up,
+                'follow_up_reason': follow_up_reason,
+                'invalidation_conditions': invalidation_conditions,
                 'memory_signal': memory_signal_output,
                 'bullish_llm_debate': bullish.get('llm_debate', ''),
                 'bearish_llm_debate': bearish.get('llm_debate', ''),

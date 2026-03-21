@@ -18,8 +18,9 @@ Ce fichier résume chaque agent de l’orchestrateur (workflow de trading multi-
   - normalisation + filtrage pertinence + agrégation directionnelle,
   - séparation claire `no_evidence` vs `mixed_signals` vs `source_degraded`.
 - LLM (on par défaut): affinement borné sur preuves pertinentes (coverage medium/high), fallback déterministe si timeout/erreur.
+- Garde-fou LLM: circuit breaker local sur échecs LLM consécutifs + policy "value-of-call" (pas d'appel LLM si force de preuve trop faible).
 - Sorties legacy conservées: `signal`, `score`, `reason`, `summary`, `news_count`, `degraded`, `prompt_meta`.
-- Sorties ajoutées: `confidence`, `coverage`, `information_state`, `decision_mode`, `macro_event_count`, `provider_status`, `evidence`, `fetch_status`, `llm_fallback_used`, `llm_summary`.
+- Sorties ajoutées: `confidence`, `coverage`, `evidence_strength`, `information_state`, `decision_mode`, `macro_event_count`, `provider_status`, `evidence`, `fetch_status`, `llm_fallback_used`, `llm_summary`, `llm_circuit_open`.
 - Détails complets: `docs/news-analyst-multi-provider.md`.
 
 ## market-context-analyst
@@ -55,7 +56,7 @@ Ce fichier résume chaque agent de l’orchestrateur (workflow de trading multi-
 - Mode par défaut: `conservative` (strict). Le mode actif est résolu via `connector_configs.settings.decision_mode` (fallback `.env DECISION_MODE`).
 - SL/TP: si prix dispo, SL = ATR*1.5 (sinon 0.3%) / TP = ATR*2.5 (sinon 0.6%), adaptés au side.
 - LLM (off par défaut): prompt seed `trader-agent`, produit execution_note.
-- Sorties: decision, confidence, `raw_net_score`, `net_score`, `news_coverage`, `news_weight_multiplier`, `news_score_raw`, `news_score_effective`, debate_score, combined_score, decision_mode, execution_allowed, `minimum_evidence_ok`, `score_gate_ok`, `source_gate_ok`, `quality_gate_ok`, `decision_gates`, stop_loss, take_profit, rationale détaillée, execution_note, prompt_meta.
+- Sorties: decision, confidence, `raw_net_score`, `net_score`, `news_coverage`, `news_weight_multiplier`, `news_score_raw`, `news_score_effective`, debate_score, combined_score, decision_mode, execution_allowed, `minimum_evidence_ok`, `score_gate_ok`, `source_gate_ok`, `quality_gate_ok`, `decision_gates`, `uncertainty_level`, `needs_follow_up`, `follow_up_reason`, `invalidation_conditions`, stop_loss, take_profit, rationale détaillée, execution_note, prompt_meta.
 
 ## risk-manager
 - Objectif: valider ou rejeter la proposition (exposition) en priorité via règles de risque.

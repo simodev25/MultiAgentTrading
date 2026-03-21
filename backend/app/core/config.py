@@ -164,6 +164,8 @@ class Settings(BaseSettings):
 
     prometheus_enabled: bool = Field(default=True, alias='PROMETHEUS_ENABLED')
     open_telemetry_enabled: bool = Field(default=False, alias='OPEN_TELEMETRY_ENABLED')
+    ws_require_auth: bool = Field(default=True, alias='WS_REQUIRE_AUTH')
+    ws_allow_query_token: bool = Field(default=True, alias='WS_ALLOW_QUERY_TOKEN')
     ws_run_poll_seconds: float = Field(default=2.0, alias='WS_RUN_POLL_SECONDS')
     ws_trading_orders_poll_seconds: float = Field(default=2.0, alias='WS_TRADING_ORDERS_POLL_SECONDS')
     log_agent_steps: bool = Field(default=True, alias='LOG_AGENT_STEPS')
@@ -173,6 +175,14 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = Field(default=True, alias='SCHEDULER_ENABLED')
     scheduler_batch_size: int = Field(default=20, ge=1, le=500, alias='SCHEDULER_BATCH_SIZE')
     orchestrator_parallel_workers: int = Field(default=4, ge=1, le=16, alias='ORCHESTRATOR_PARALLEL_WORKERS')
+    orchestrator_second_pass_enabled: bool = Field(default=True, alias='ORCHESTRATOR_SECOND_PASS_ENABLED')
+    orchestrator_second_pass_max_attempts: int = Field(default=1, ge=0, le=3, alias='ORCHESTRATOR_SECOND_PASS_MAX_ATTEMPTS')
+    orchestrator_second_pass_min_combined_score: float = Field(
+        default=0.18,
+        ge=0.0,
+        le=1.0,
+        alias='ORCHESTRATOR_SECOND_PASS_MIN_COMBINED_SCORE',
+    )
     debug_trade_json_enabled: bool = Field(default=False, alias='DEBUG_TRADE_JSON_ENABLED')
     debug_trade_json_dir: str = Field(default='./debug-traces', alias='DEBUG_TRADE_JSON_DIR')
     debug_trade_json_include_prompts: bool = Field(default=True, alias='DEBUG_TRADE_JSON_INCLUDE_PROMPTS')

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -51,12 +52,45 @@ class VectorMemoryService:
         except Exception as exc:  # pragma: no cover
             logger.warning('qdrant collection init failed: %s', exc)
 
+    @staticmethod
+    def _embedding_tokens(text: str) -> list[str]:
+        raw_tokens = re.findall(r'[a-z0-9]+', str(text or '').lower())
+        if not raw_tokens:
+            return []
+        alias_map = {
+            'buy': 'bullish',
+            'long': 'bullish',
+            'sell': 'bearish',
+            'short': 'bearish',
+            'no': 'neutral',
+            'hold': 'neutral',
+            'ranging': 'range',
+            'sideways': 'range',
+        }
+        return [alias_map.get(token, token) for token in raw_tokens]
+
     def _embed(self, text: str) -> list[float]:
+        # Deterministic lexical-semantic hashing:
+        # token and bigram features improve retrieval coherence versus plain whole-text hash.
+        values: list[float] = [0.0] * self.vector_size
+        tokens = self._embedding_tokens(text)
+        for idx, token in enumerate(tokens):
+            features = [(token, 1.0)]
+            if idx > 0:
+                features.append((f'{tokens[idx - 1]}_{token}', 0.65))
+            if idx + 1 < len(tokens):
+                features.append((f'{token}_{tokens[idx + 1]}', 0.45))
+            for feature, weight in features:
+                digest = hashlib.sha256(feature.encode('utf-8')).digest()
+                dim = int.from_bytes(digest[:2], byteorder='big', signed=False) % self.vector_size
+                sign = 1.0 if (digest[2] % 2 == 0) else -1.0
+                values[dim] += sign * weight
+
+        # Small global-text component keeps a stable fingerprint for identical full strings.
         digest = hashlib.sha256(text.encode('utf-8')).digest()
-        values: list[float] = []
         for i in range(self.vector_size):
             byte = digest[i % len(digest)]
-            values.append((byte / 255.0) * 2 - 1)
+            values[i] += ((byte / 255.0) * 2 - 1) * 0.15
 
         norm = math.sqrt(sum(v * v for v in values)) or 1.0
         return [v / norm for v in values]

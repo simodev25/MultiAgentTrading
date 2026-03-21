@@ -8,6 +8,7 @@ from time import perf_counter
 from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
+from jose import JWTError, jwt
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import text
@@ -181,6 +182,47 @@ def _request_route_template(request: Request) -> str:
     return request.url.path or 'unknown'
 
 
+def _resolve_websocket_token(websocket: WebSocket) -> str | None:
+    auth_header = str(websocket.headers.get('authorization') or '').strip()
+    if auth_header.lower().startswith('bearer '):
+        token = auth_header.split(' ', 1)[1].strip()
+        if token:
+            return token
+    if settings.ws_allow_query_token:
+        query_token = str(websocket.query_params.get('token') or '').strip()
+        if query_token:
+            return query_token
+    return None
+
+
+async def _authorize_websocket(websocket: WebSocket) -> bool:
+    if not settings.ws_require_auth:
+        return True
+
+    token = _resolve_websocket_token(websocket)
+    if not token:
+        await websocket.close(code=1008)
+        return False
+
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=['HS256'])
+        user_id = int(payload.get('sub'))
+    except (JWTError, ValueError, TypeError):
+        await websocket.close(code=1008)
+        return False
+
+    db: Session = SessionLocal()
+    try:
+        user = db.get(User, user_id)
+        if not user or not user.is_active:
+            await websocket.close(code=1008)
+            return False
+    finally:
+        db.close()
+
+    return True
+
+
 @app.middleware('http')
 async def prometheus_request_metrics(request: Request, call_next):
     started = perf_counter()
@@ -204,6 +246,8 @@ def metrics() -> PlainTextResponse:
 
 @app.websocket('/ws/runs/{run_id}')
 async def run_updates_socket(websocket: WebSocket, run_id: int) -> None:
+    if not await _authorize_websocket(websocket):
+        return
     await websocket.accept()
     poll_interval = max(float(settings.ws_run_poll_seconds), 0.5)
     last_signature: tuple[str, str] | None = None
@@ -253,6 +297,8 @@ async def run_updates_socket(websocket: WebSocket, run_id: int) -> None:
 
 @app.websocket('/ws/trading/orders')
 async def trading_orders_socket(websocket: WebSocket) -> None:
+    if not await _authorize_websocket(websocket):
+        return
     await websocket.accept()
     poll_interval = max(float(settings.ws_trading_orders_poll_seconds), 0.5)
     last_order_id: int | None = None

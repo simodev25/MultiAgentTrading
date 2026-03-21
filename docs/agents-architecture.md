@@ -4,6 +4,10 @@ Date: 2026-03-19
 Scope: backend trading orchestration + agents satellites (`schedule-planner-agent`, `order-guardian`)  
 Source of truth: code Python + tests unitaires + traces JSON (`backend/debug-traces/run-*.json`)
 
+Note de mise à jour runtime:
+- Le workflow actif remplace désormais `macro-analyst` et `sentiment-agent` par `market-context-analyst`.
+- Les mentions `macro-analyst` / `sentiment-agent` restantes dans ce document correspondent à des alias legacy conservés pour compatibilité.
+
 ## 1) Objectif
 
 Ce document explique l'architecture complete des agents:
@@ -132,16 +136,15 @@ graph LR
 `ForexOrchestrator.WORKFLOW_STEPS`:
 1. `technical-analyst`
 2. `news-analyst`
-3. `macro-analyst`
-4. `sentiment-agent`
-5. `bullish-researcher`
-6. `bearish-researcher`
-7. `trader-agent`
-8. `risk-manager`
-9. `execution-manager`
+3. `market-context-analyst`
+4. `bullish-researcher`
+5. `bearish-researcher`
+6. `trader-agent`
+7. `risk-manager`
+8. `execution-manager`
 
 Execution:
-- etape 1 en parallele (4 agents)
+- etape 1 en parallele (3 agents)
 - etape 2 en parallele (debat bullish/bearish)
 - etape 3/4/5 en serie (decision -> risque -> execution)
 

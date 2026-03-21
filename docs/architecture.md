@@ -51,9 +51,9 @@ flowchart LR
 
 - Les endpoints REST `/api/v1/...` utilisent JWT + RBAC.
 - Les WebSockets `/ws/runs/{run_id}` et `/ws/trading/orders` sont des endpoints FastAPI séparés (hors préfixe `/api/v1`).
-- En V1, l'authentification WebSocket n'est pas encore implémentée nativement dans l'application:
-  - exposition recommandée uniquement en réseau interne;
-  - ou protection via gateway/reverse proxy (ACL/IP allowlist, auth en amont).
+- Auth WebSocket native disponible:
+  - par défaut (`WS_REQUIRE_AUTH=true`), un JWT valide est requis (header `Authorization: Bearer <token>` ou query `?token=` si `WS_ALLOW_QUERY_TOKEN=true`);
+  - en environnement interne uniquement, vous pouvez désactiver ce contrôle via `WS_REQUIRE_AUTH=false`.
 - L'endpoint `/metrics` est prévu pour Prometheus/Grafana et doit être traité comme endpoint interne.
 - Les détails d'exploitation/sécurité sont suivis dans `docs/limits.md`.
 
