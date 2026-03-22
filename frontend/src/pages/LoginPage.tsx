@@ -28,7 +28,7 @@ export function LoginPage() {
   return (
     <div className="login-page">
       <div className="login-card">
-        <h1>Forex Multi-Agent Platform</h1>
+        <h1>Multi-Asset Trading Platform</h1>
         <p>Authentification requise</p>
         <form onSubmit={onSubmit} className="form-grid">
           <label>

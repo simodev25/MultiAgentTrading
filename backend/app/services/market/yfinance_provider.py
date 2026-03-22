@@ -18,6 +18,9 @@ from ta.volatility import AverageTrueRange
 from app.core.config import get_settings
 from app.observability.metrics import yfinance_cache_hits_total, yfinance_cache_misses_total
 from app.services.connectors.runtime_settings import RuntimeConnectorSettings
+from app.services.market.instrument import normalize_instrument
+from app.services.market.symbol_providers import get_news_candidates_for_instrument, resolve_symbol_for_provider
+from app.services.news.fx_pair_bias import infer_fx_pair_bias, map_fx_effects_to_pair_bias
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +115,7 @@ class YFinanceMarketProvider:
         'treat_no_news_as_no_evidence': True,
     }
     currency_aliases: dict[str, tuple[str, ...]] = {
-        'USD': ('usd', 'dollar', 'federal reserve', 'fed'),
+        'USD': ('usd', 'dollar', 'federal reserve', 'fed', 'treasury', 'us yields', 'us inflation', 'us cpi', 'us payrolls', 'u.s. yields'),
         'EUR': ('eur', 'euro', 'ecb'),
         'GBP': ('gbp', 'sterling', 'pound', 'boe'),
         'JPY': ('jpy', 'yen', 'boj'),
@@ -121,6 +124,51 @@ class YFinanceMarketProvider:
         'AUD': ('aud', 'aussie', 'rba'),
         'NZD': ('nzd', 'kiwi', 'rbnz'),
     }
+    crypto_aliases: dict[str, tuple[str, ...]] = {
+        'ADA': ('ada', 'cardano'),
+        'AVAX': ('avax', 'avalanche'),
+        'BCH': ('bch', 'bitcoin cash'),
+        'BNB': ('bnb', 'binance coin', 'binance'),
+        'BTC': ('btc', 'bitcoin'),
+        'DOGE': ('doge', 'dogecoin'),
+        'DOT': ('dot', 'polkadot'),
+        'ETH': ('eth', 'ethereum', 'ether'),
+        'LINK': ('link', 'chainlink'),
+        'LTC': ('ltc', 'litecoin'),
+        'MATIC': ('matic', 'polygon'),
+        'SOL': ('sol', 'solana'),
+        'UNI': ('uni', 'uniswap'),
+        'XRP': ('xrp', 'ripple'),
+    }
+    commodity_aliases: dict[str, tuple[str, ...]] = {
+        'XAU': ('xau', 'gold'),
+        'XAG': ('xag', 'silver'),
+    }
+    crypto_quote_assets: tuple[str, ...] = ('USDT', 'USDC', 'USD', 'BTC', 'ETH')
+    crypto_market_fallback_symbols: list[str] = ['BTC-USD', 'ETH-USD']
+    crypto_news_keywords: tuple[str, ...] = (
+        'crypto',
+        'cryptocurrency',
+        'digital asset',
+        'token',
+        'exchange',
+        'etf',
+        'regulation',
+        'sec',
+        'protocol',
+        'network',
+        'staking',
+        'validator',
+        'listing',
+        'delisting',
+        'unlock',
+        'hack',
+        'exploit',
+        'stablecoin',
+        'wallet',
+        'on-chain',
+        'onchain',
+    )
     macro_keywords: tuple[str, ...] = (
         'inflation',
         'cpi',
@@ -332,11 +380,22 @@ class YFinanceMarketProvider:
         return match.group(0) if match else without_suffix
 
     @classmethod
+    def _symbol_resolution_trace(cls, pair: str) -> dict[str, Any]:
+        instrument = normalize_instrument(pair)
+        resolution = resolve_symbol_for_provider(pair, 'yfinance', instrument)
+        return {
+            'instrument': instrument.to_dict(),
+            'provider_resolution': resolution.to_dict(),
+        }
+
+    @classmethod
     def _ticker_candidates(cls, pair: str) -> list[str]:
         cleaned = (pair or '').strip()
         if not cleaned:
             return []
 
+        instrument = normalize_instrument(cleaned)
+        resolution = resolve_symbol_for_provider(cleaned, 'yfinance', instrument)
         candidates: list[str] = []
 
         def add_candidate(value: str) -> None:
@@ -344,36 +403,20 @@ class YFinanceMarketProvider:
             if item and item not in candidates:
                 candidates.append(item)
 
-        upper_pair = cleaned.upper()
-        without_suffix = re.sub(r'\.[A-Z0-9_]+$', '', upper_pair)
-        base_pair = without_suffix or upper_pair
-        # Strip broker suffixes for Yahoo lookups as well.
-        add_candidate(base_pair)
+        if resolution.success and resolution.provider_symbol:
+            add_candidate(resolution.provider_symbol)
+        add_candidate(instrument.provider_symbols.get('yfinance', ''))
+        add_candidate(instrument.canonical_symbol)
 
-        forex_match = re.search(r'[A-Z]{6}', base_pair)
-        if forex_match:
-            add_candidate(forex_match.group(0))
+        normalized_raw = cls._normalize_pair(cleaned)
+        if instrument.asset_class.value != 'forex':
+            add_candidate(normalized_raw)
 
-        index_alias = cls.index_alias_map.get(base_pair)
+        index_alias = cls.index_alias_map.get(normalized_raw)
         if index_alias:
             add_candidate(index_alias)
 
-        yfinance_symbols: list[str] = []
-        for symbol in candidates:
-            if symbol.startswith('^') or '=' in symbol:
-                add_to = symbol
-                if add_to not in yfinance_symbols:
-                    yfinance_symbols.append(add_to)
-                continue
-            fx_like = re.fullmatch(r'[A-Z]{6}', symbol) is not None
-            if fx_like:
-                with_suffix = f'{symbol}=X'
-                if with_suffix not in yfinance_symbols:
-                    yfinance_symbols.append(with_suffix)
-            if symbol not in yfinance_symbols:
-                yfinance_symbols.append(symbol)
-
-        return yfinance_symbols
+        return candidates
 
     def _resample_if_needed(self, frame: pd.DataFrame, timeframe: str) -> pd.DataFrame:
         if timeframe.upper() == 'H4' and not frame.empty:
@@ -441,28 +484,94 @@ class YFinanceMarketProvider:
     def _split_fx_pair(pair: str) -> tuple[str | None, str | None]:
         normalized = YFinanceMarketProvider._normalize_pair(pair)
         if len(normalized) == 6 and normalized.isalpha():
-            return normalized[:3], normalized[3:]
+            base = normalized[:3]
+            quote = normalized[3:]
+            if base in YFinanceMarketProvider.currency_aliases and quote in YFinanceMarketProvider.currency_aliases:
+                return base, quote
         return None, None
+
+    @classmethod
+    def _split_crypto_pair(cls, pair: str) -> tuple[str | None, str | None]:
+        normalized = cls._normalize_pair(pair)
+        for quote in sorted(cls.crypto_quote_assets, key=len, reverse=True):
+            if not normalized.endswith(quote):
+                continue
+            base = normalized[: -len(quote)]
+            if base in cls.crypto_aliases:
+                return base, quote
+        return None, None
+
+    @classmethod
+    def _split_commodity_pair(cls, pair: str) -> tuple[str | None, str | None]:
+        normalized = cls._normalize_pair(pair)
+        for base in cls.commodity_aliases:
+            if not normalized.startswith(base):
+                continue
+            quote = normalized[len(base) :]
+            if quote in cls.currency_aliases:
+                return base, quote
+        return None, None
+
+    @classmethod
+    def _asset_class_for_pair(cls, pair: str) -> str:
+        asset_class = normalize_instrument(pair).asset_class.value
+        if asset_class == 'forex':
+            return 'fx'
+        if asset_class == 'crypto':
+            return 'crypto'
+        if asset_class in {'metal', 'energy', 'commodity', 'future'}:
+            return 'commodity'
+        if asset_class in {'index', 'equity', 'etf'}:
+            return asset_class
+        return 'other'
+
+    @classmethod
+    def _asset_aliases(cls, asset: str | None) -> tuple[str, ...]:
+        normalized = str(asset or '').strip().upper()
+        if not normalized:
+            return tuple()
+        if normalized in cls.currency_aliases:
+            return cls.currency_aliases[normalized]
+        if normalized in cls.crypto_aliases:
+            return cls.crypto_aliases[normalized]
+        if normalized in cls.commodity_aliases:
+            return cls.commodity_aliases[normalized]
+        return (normalized.lower(),)
 
     @classmethod
     def _news_symbol_candidates(cls, pair: str) -> list[str]:
         candidates: list[str] = []
+        instrument = normalize_instrument(pair)
+        asset_class = instrument.asset_class.value
 
         def add(symbol: str | None) -> None:
             value = str(symbol or '').strip()
             if value and value not in candidates:
                 candidates.append(value)
 
+        for entry in get_news_candidates_for_instrument(instrument, provider='yfinance'):
+            if isinstance(entry, dict):
+                add(entry.get('symbol'))
         for symbol in cls._ticker_candidates(pair):
             add(symbol)
 
-        base_ccy, quote_ccy = cls._split_fx_pair(pair)
-        for ccy in (base_ccy, quote_ccy):
-            for symbol in cls.fx_news_fallback_by_currency.get(str(ccy or ''), []):
+        if asset_class == 'forex':
+            base_ccy = instrument.base_asset
+            quote_ccy = instrument.quote_asset
+            for ccy in (base_ccy, quote_ccy):
+                for symbol in cls.fx_news_fallback_by_currency.get(str(ccy or ''), []):
+                    add(symbol)
+            for symbol in cls.macro_news_fallback_symbols:
                 add(symbol)
-
-        for symbol in cls.macro_news_fallback_symbols:
-            add(symbol)
+        elif asset_class == 'crypto':
+            base_asset = instrument.base_asset
+            add(base_asset)
+            if base_asset not in {'BTC', 'ETH'}:
+                for symbol in cls.crypto_market_fallback_symbols:
+                    add(symbol)
+        else:
+            for symbol in cls.macro_news_fallback_symbols:
+                add(symbol)
 
         return candidates
 
@@ -587,6 +696,7 @@ class YFinanceMarketProvider:
         title: str,
         summary: str | None = None,
     ) -> tuple[float, float, float, float]:
+        asset_class = cls._asset_class_for_pair(pair)
         base, quote, pair_terms = cls._pair_terms(pair)
         text = f"{title or ''} {summary or ''}".lower()
 
@@ -598,31 +708,84 @@ class YFinanceMarketProvider:
         pair_rel = 0.0
         macro_rel = 0.0
 
-        if base:
-            aliases = cls.currency_aliases.get(base, tuple())
-            base_hits = sum(1 for alias in aliases if alias in text)
-            if base_hits:
-                base_rel = cls._clamp(0.35 + base_hits * 0.2, 0.0, 1.0)
-        if quote:
-            aliases = cls.currency_aliases.get(quote, tuple())
-            quote_hits = sum(1 for alias in aliases if alias in text)
-            if quote_hits:
-                quote_rel = cls._clamp(0.35 + quote_hits * 0.2, 0.0, 1.0)
-
         compact_pair = cls._normalize_pair(pair).lower()
-        if compact_pair and compact_pair in text:
-            pair_rel = 1.0
-        elif compact_pair and '/' in compact_pair and compact_pair.replace('/', '') in text:
-            pair_rel = 1.0
-        elif pair_terms and sum(1 for term in pair_terms if term in text) >= 2:
-            pair_rel = 0.65
-        elif base_rel > 0.0 or quote_rel > 0.0:
-            pair_rel = cls._clamp(max(base_rel, quote_rel) * 0.8, 0.0, 1.0)
+        if asset_class == 'fx':
+            if base:
+                aliases = cls._asset_aliases(base)
+                base_hits = sum(1 for alias in aliases if alias in text)
+                if base_hits:
+                    base_rel = cls._clamp(0.35 + base_hits * 0.2, 0.0, 1.0)
+            if quote:
+                aliases = cls._asset_aliases(quote)
+                quote_hits = sum(1 for alias in aliases if alias in text)
+                if quote_hits:
+                    quote_rel = cls._clamp(0.35 + quote_hits * 0.2, 0.0, 1.0)
 
-        if contains_any(cls.macro_keywords):
-            macro_rel = 0.7
-        elif any(item in text for item in ('central bank', 'rates', 'inflation', 'employment', 'gdp')):
-            macro_rel = 0.6
+            if compact_pair and compact_pair in text:
+                pair_rel = 1.0
+            elif pair_terms and sum(1 for term in pair_terms if term in text) >= 2:
+                pair_rel = 0.65
+            elif base_rel > 0.0 or quote_rel > 0.0:
+                pair_rel = cls._clamp(max(base_rel, quote_rel) * 0.8, 0.0, 1.0)
+
+            if contains_any(cls.macro_keywords):
+                macro_rel = 0.7
+            elif any(item in text for item in ('central bank', 'rates', 'inflation', 'employment', 'gdp', 'pmi')):
+                macro_rel = 0.6
+        elif asset_class == 'crypto':
+            base_asset, quote_asset = cls._split_crypto_pair(pair)
+            base_aliases = cls._asset_aliases(base_asset)
+            quote_aliases = cls._asset_aliases(quote_asset)
+            base_hits = sum(1 for alias in base_aliases if alias in text)
+            quote_hits = sum(1 for alias in quote_aliases if alias in text)
+            crypto_hits = sum(1 for keyword in cls.crypto_news_keywords if keyword in text)
+            pair_symbol = f'{str(base_asset or "").lower()}-{str(quote_asset or "").lower()}'
+            direct_pair_hit = bool(compact_pair and compact_pair in text) or bool(pair_symbol and pair_symbol in text)
+
+            if base_hits:
+                base_rel = cls._clamp(0.45 + base_hits * 0.18, 0.0, 1.0)
+            if quote_hits:
+                quote_rel = cls._clamp(0.12 + quote_hits * 0.06, 0.0, 0.35)
+
+            if direct_pair_hit:
+                pair_rel = 1.0
+            elif base_hits:
+                pair_rel = cls._clamp(0.62 + base_hits * 0.12, 0.0, 0.92)
+            elif crypto_hits:
+                pair_rel = cls._clamp(0.16 + min(crypto_hits, 3) * 0.06, 0.0, 0.4)
+            elif quote_hits:
+                pair_rel = 0.06
+
+            if base_hits and crypto_hits:
+                macro_rel = 0.6
+            elif crypto_hits:
+                macro_rel = 0.42
+            elif quote_hits and any(item in text for item in ('dollar', 'fed', 'rates', 'yield', 'liquidity', 'risk-off', 'risk on')):
+                macro_rel = 0.22
+        elif asset_class == 'commodity':
+            base_asset, quote_asset = cls._split_commodity_pair(pair)
+            base_aliases = cls._asset_aliases(base_asset)
+            quote_aliases = cls._asset_aliases(quote_asset)
+            base_hits = sum(1 for alias in base_aliases if alias in text)
+            quote_hits = sum(1 for alias in quote_aliases if alias in text)
+
+            if base_hits:
+                base_rel = cls._clamp(0.48 + base_hits * 0.18, 0.0, 1.0)
+            if quote_hits:
+                quote_rel = cls._clamp(0.22 + quote_hits * 0.12, 0.0, 0.65)
+            if compact_pair and compact_pair in text:
+                pair_rel = 1.0
+            elif base_hits:
+                pair_rel = cls._clamp(0.62 + base_hits * 0.12, 0.0, 0.92)
+            if contains_any(cls.macro_keywords) or any(item in text for item in ('yield', 'real yields', 'metals', 'bullion')):
+                macro_rel = 0.58
+        else:
+            if compact_pair and compact_pair in text:
+                pair_rel = 1.0
+            elif pair_terms and any(term in text for term in pair_terms):
+                pair_rel = 0.45
+            if contains_any(cls.macro_keywords):
+                macro_rel = 0.45
 
         return (
             round(base_rel, 3),
@@ -654,11 +817,34 @@ class YFinanceMarketProvider:
         base_rel, quote_rel, pair_rel, macro_rel = cls._compute_pair_relevance(pair, clean_title, clean_summary)
         freshness = round(cls._freshness_score(published_iso), 3)
         credibility = round(cls._credibility_score(provider, source_name), 3)
+        asset_class = cls._asset_class_for_pair(pair)
+        fx_effects = {
+            'impacted_currencies': [],
+            'impact_on_base': 'unknown',
+            'impact_on_quote': 'unknown',
+            'base_currency_effect': 'unknown',
+            'quote_currency_effect': 'unknown',
+            'pair_directional_effect': 'neutral',
+            'pair_bias_score': 0.0,
+        }
         hint = cls._headline_sentiment_hint(f"{clean_title} {clean_summary or ''}")
+        if asset_class == 'fx':
+            base_ccy, quote_ccy = cls._split_fx_pair(pair)
+            fx_effects = infer_fx_pair_bias(
+                f'{clean_title} {clean_summary or ""}',
+                base_currency=base_ccy,
+                quote_currency=quote_ccy,
+                base_aliases=cls._asset_aliases(base_ccy),
+                quote_aliases=cls._asset_aliases(quote_ccy),
+                base_relevance=base_rel,
+                quote_relevance=quote_rel,
+            )
+            hint = str(fx_effects.get('pair_directional_effect') or hint).strip().lower() or hint
 
         return {
             'provider': provider,
             'type': 'article',
+            'asset_class': asset_class,
             'title': clean_title,
             'summary': clean_summary,
             'url': clean_url,
@@ -672,6 +858,13 @@ class YFinanceMarketProvider:
             'freshness_score': freshness,
             'credibility_score': credibility,
             'sentiment_hint': hint,
+            'impacted_currencies': fx_effects.get('impacted_currencies', []),
+            'impact_on_base': fx_effects.get('impact_on_base'),
+            'impact_on_quote': fx_effects.get('impact_on_quote'),
+            'base_currency_effect': fx_effects.get('base_currency_effect'),
+            'quote_currency_effect': fx_effects.get('quote_currency_effect'),
+            'pair_directional_effect': fx_effects.get('pair_directional_effect'),
+            'pair_bias_score': fx_effects.get('pair_bias_score'),
             # Backward-compatible aliases consumed by existing payloads.
             'publisher': str(source_name or '').strip() or None,
             'link': clean_url,
@@ -718,10 +911,37 @@ class YFinanceMarketProvider:
         normalized_hint = str(directional_hint or 'unknown').strip().lower()
         if normalized_hint not in {'bullish', 'bearish', 'neutral', 'unknown'}:
             normalized_hint = 'unknown'
+        impact_on_base = 'unknown'
+        impact_on_quote = 'unknown'
+        pair_directional_effect = 'neutral'
+        pair_bias_score = 0.0
+        base_ccy, quote_ccy = cls._split_fx_pair(pair)
+        event_ccy = str(currency or '').strip().upper()
+        if base_ccy and quote_ccy and event_ccy in {base_ccy, quote_ccy}:
+            if normalized_hint == 'bullish':
+                effect = 'strengthening'
+            elif normalized_hint == 'bearish':
+                effect = 'weakening'
+            else:
+                effect = 'unknown'
+            if event_ccy == base_ccy:
+                impact_on_base = effect
+            elif event_ccy == quote_ccy:
+                impact_on_quote = effect
+            if effect != 'unknown':
+                pair_mapping = map_fx_effects_to_pair_bias(
+                    base_effect=impact_on_base,
+                    quote_effect=impact_on_quote,
+                    base_weight=base_rel if impact_on_base != 'unknown' else 0.0,
+                    quote_weight=quote_rel if impact_on_quote != 'unknown' else 0.0,
+                )
+                pair_directional_effect = str(pair_mapping.get('pair_directional_effect') or 'neutral')
+                pair_bias_score = float(pair_mapping.get('pair_bias_score') or 0.0)
 
         return {
             'provider': provider,
             'type': 'macro_event',
+            'asset_class': cls._asset_class_for_pair(pair),
             'event_name': name,
             'country': str(country or '').strip() or None,
             'currency': str(currency or '').strip() or None,
@@ -737,6 +957,13 @@ class YFinanceMarketProvider:
             'freshness_score': freshness,
             'credibility_score': credibility,
             'directional_hint': normalized_hint,
+            'impacted_currencies': [ccy for ccy, effect in ((base_ccy, impact_on_base), (quote_ccy, impact_on_quote)) if ccy and effect != 'unknown'],
+            'impact_on_base': impact_on_base,
+            'impact_on_quote': impact_on_quote,
+            'base_currency_effect': impact_on_base,
+            'quote_currency_effect': impact_on_quote,
+            'pair_directional_effect': pair_directional_effect,
+            'pair_bias_score': pair_bias_score,
         }
 
     @staticmethod
@@ -947,16 +1174,34 @@ class YFinanceMarketProvider:
         }
 
     def _keywords_for_pair(self, pair: str) -> list[str]:
-        base, quote = self._split_fx_pair(pair)
+        asset_class = self._asset_class_for_pair(pair)
         keywords: list[str] = []
         compact = self._normalize_pair(pair)
         if compact:
             keywords.append(compact)
-        if base:
-            keywords.extend([base, *self.currency_aliases.get(base, tuple())[:2]])
-        if quote:
-            keywords.extend([quote, *self.currency_aliases.get(quote, tuple())[:2]])
-        keywords.extend(['central bank', 'inflation', 'rates'])
+        if asset_class == 'fx':
+            base, quote = self._split_fx_pair(pair)
+            if base:
+                keywords.extend([base, *self.currency_aliases.get(base, tuple())[:2]])
+            if quote:
+                keywords.extend([quote, *self.currency_aliases.get(quote, tuple())[:2]])
+            keywords.extend(['central bank', 'inflation', 'rates', 'employment', 'pmi'])
+        elif asset_class == 'crypto':
+            base, quote = self._split_crypto_pair(pair)
+            if base:
+                keywords.extend([base, *self._asset_aliases(base)])
+            if base and quote:
+                keywords.append(f'{base}-{quote}')
+            keywords.extend(['crypto', 'cryptocurrency', 'digital asset', 'exchange', 'regulation', 'protocol'])
+        elif asset_class == 'commodity':
+            base, quote = self._split_commodity_pair(pair)
+            if base:
+                keywords.extend([base, *self._asset_aliases(base)])
+            if quote:
+                keywords.extend([quote, *self._asset_aliases(quote)[:1]])
+            keywords.extend(['inflation', 'rates', 'energy', 'geopolitics'])
+        else:
+            keywords.extend(['markets', 'macro', 'sentiment'])
         deduped: list[str] = []
         for item in keywords:
             value = str(item or '').strip()
@@ -1258,7 +1503,9 @@ class YFinanceMarketProvider:
             )
             if normalized is None:
                 continue
-            normalized['sentiment_hint'] = sentiment_hint
+            normalized['provider_sentiment_hint'] = sentiment_hint
+            if normalized.get('asset_class') != 'fx':
+                normalized['sentiment_hint'] = sentiment_hint
             output.append(normalized)
             if len(output) >= max_items:
                 break
@@ -1346,6 +1593,7 @@ class YFinanceMarketProvider:
                     'pair': pair,
                     'timeframe': timeframe,
                     'symbol': used_symbol,
+                    **self._symbol_resolution_trace(pair),
                     'last_price': latest,
                     'change_pct': round(float(pct_change), 5),
                     'rsi': round(float(rsi), 3),
@@ -1630,6 +1878,8 @@ class YFinanceMarketProvider:
                     'pair': pair,
                     'symbol': primary_symbol,
                     'symbols_scanned': symbols_scanned,
+                    **self._symbol_resolution_trace(pair),
+                    'news_candidates': get_news_candidates_for_instrument(normalize_instrument(pair), provider='yfinance'),
                     'news': aggregated_articles,
                     'macro_events': aggregated_events,
                     'provider_status': provider_status,

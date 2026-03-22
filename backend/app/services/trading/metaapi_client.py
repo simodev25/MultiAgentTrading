@@ -19,6 +19,8 @@ from app.observability.metrics import (
     metaapi_sdk_circuit_open_total,
 )
 from app.services.connectors.runtime_settings import RuntimeConnectorSettings
+from app.services.market.instrument import normalize_instrument
+from app.services.market.symbol_providers import resolve_symbol_for_provider
 
 logger = logging.getLogger(__name__)
 
@@ -385,6 +387,44 @@ class MetaApiClient:
         # Some brokers expose symbols with one or several trailing ".PRO" suffixes.
         return re.sub(r'(?:\.PRO)+$', '', cleaned)
 
+    @classmethod
+    def _symbol_resolution_trace(cls, symbol: str) -> dict[str, Any]:
+        instrument = normalize_instrument(symbol)
+        resolution = resolve_symbol_for_provider(symbol, 'metaapi', instrument)
+        return {
+            'instrument': instrument.to_dict(),
+            'provider_resolution': resolution.to_dict(),
+        }
+
+    @classmethod
+    def _append_symbol_variants(cls, candidates: list[str], value: str, *, include_base: bool = True) -> None:
+        item = (value or '').strip()
+        if not item:
+            return
+
+        def add_candidate(symbol_value: str) -> None:
+            candidate = (symbol_value or '').strip()
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+
+        upper_symbol = item.upper()
+        if '.' in upper_symbol:
+            base, suffix = upper_symbol.rsplit('.', 1)
+            if base and suffix:
+                add_candidate(f'{base}.{suffix.lower()}')
+                add_candidate(item)
+                add_candidate(f'{base}.{suffix}')
+                if include_base:
+                    add_candidate(base)
+                return
+
+        add_candidate(item)
+        add_candidate(upper_symbol)
+        if include_base:
+            stripped = cls._strip_trailing_pro_suffix(upper_symbol)
+            if stripped and stripped != upper_symbol:
+                add_candidate(stripped)
+
     def _resolve_trade_symbol(self, symbol: str) -> str:
         return (symbol or '').strip().upper()
 
@@ -394,39 +434,22 @@ class MetaApiClient:
         if not cleaned:
             return []
 
+        instrument = normalize_instrument(cleaned)
+        resolution = resolve_symbol_for_provider(cleaned, 'metaapi', instrument)
         candidates: list[str] = []
 
-        def add_candidate(value: str) -> None:
-            item = (value or '').strip()
-            if item and item not in candidates:
-                candidates.append(item)
+        primary_symbol = (
+            (resolution.provider_symbol if resolution.success else None)
+            or instrument.provider_symbols.get('metaapi')
+            or cleaned
+        )
+        cls._append_symbol_variants(candidates, primary_symbol, include_base=True)
+        if cleaned.upper() != str(primary_symbol).upper():
+            cls._append_symbol_variants(candidates, cleaned, include_base=True)
 
-        upper_symbol = cleaned.upper()
-        if '.' in upper_symbol:
-            base, suffix = upper_symbol.rsplit('.', 1)
-            if base and suffix:
-                # Prefer broker suffix variant with lowercase (e.g. EURUSD.pro).
-                add_candidate(f'{base}.{suffix.lower()}')
-                add_candidate(cleaned)
-                add_candidate(f'{base}.{suffix}')
-                add_candidate(base)
-            else:
-                add_candidate(cleaned)
-                add_candidate(upper_symbol)
-        else:
-            add_candidate(cleaned)
-            add_candidate(upper_symbol)
-
-        stripped = cls._strip_trailing_pro_suffix(upper_symbol)
-        if stripped and stripped != upper_symbol:
-            add_candidate(stripped)
-
-        forex_match = re.search(r'[A-Z]{6}', upper_symbol)
+        forex_match = re.search(r'[A-Z]{6}', cleaned.upper())
         if forex_match:
-            base_symbol = forex_match.group(0)
-            add_candidate(base_symbol)
-            add_candidate(f'{base_symbol}.pro')
-            add_candidate(f'{base_symbol}.PRO')
+            cls._append_symbol_variants(candidates, forex_match.group(0), include_base=False)
 
         return candidates
 
@@ -436,30 +459,17 @@ class MetaApiClient:
         if not cleaned:
             return []
 
+        instrument = normalize_instrument(cleaned)
+        resolution = resolve_symbol_for_provider(cleaned, 'metaapi', instrument)
         candidates: list[str] = []
-
-        def add_candidate(value: str) -> None:
-            item = (value or '').strip()
-            if item and item not in candidates:
-                candidates.append(item)
-
-        upper_symbol = cleaned.upper()
-        base_symbol = upper_symbol
-        if '.' in upper_symbol:
-            base_part, suffix = upper_symbol.rsplit('.', 1)
-            if base_part and suffix:
-                # Prefer broker suffix in lower-case first (e.g. EURUSD.pro).
-                add_candidate(f'{base_part}.{suffix.lower()}')
-                add_candidate(cleaned)
-                add_candidate(f'{base_part}.{suffix}')
-                base_symbol = base_part
-
-        add_candidate(base_symbol)
-
-        forex_match = re.search(r'[A-Z]{6}', base_symbol)
-        if forex_match:
-            add_candidate(forex_match.group(0))
-
+        primary_symbol = (
+            (resolution.provider_symbol if resolution.success else None)
+            or instrument.provider_symbols.get('metaapi')
+            or cleaned
+        )
+        MetaApiClient._append_symbol_variants(candidates, primary_symbol, include_base=True)
+        if cleaned.upper() != str(primary_symbol).upper():
+            MetaApiClient._append_symbol_variants(candidates, cleaned, include_base=True)
         return candidates
 
     @classmethod
@@ -1505,6 +1515,7 @@ class MetaApiClient:
             }
 
         symbol = self._resolve_trade_symbol(pair)
+        symbol_trace = self._symbol_resolution_trace(symbol)
         normalized_timeframe = self._normalize_market_timeframe(timeframe)
         safe_limit = min(max(int(limit or 1), 1), 1000)
         resolved_region = (region or self.settings.metaapi_region or '').strip().lower() or 'default'
@@ -1534,6 +1545,7 @@ class MetaApiClient:
                     'pair': pair,
                     'timeframe': timeframe,
                     'candles': [],
+                    **symbol_trace,
                     'reason': 'Invalid symbol',
                 }
 
@@ -1587,6 +1599,7 @@ class MetaApiClient:
                                     'symbol': candidate,
                                     'timeframe': timeframe,
                                     'candles': normalized_candles,
+                                    **symbol_trace,
                                     'provider': 'sdk',
                                     'account_id': resolved_account_id,
                                     'requested_symbol': symbol,
@@ -1636,6 +1649,7 @@ class MetaApiClient:
                     'pair': pair,
                     'timeframe': timeframe,
                     'candles': [],
+                    **symbol_trace,
                     'reason': 'MetaApi token not configured',
                 }
 
@@ -1675,6 +1689,7 @@ class MetaApiClient:
                                 'symbol': candidate,
                                 'timeframe': timeframe,
                                 'candles': normalized_candles,
+                                **symbol_trace,
                                 'provider': 'rest',
                                 'account_id': resolved_account_id,
                                 'endpoint': url,
@@ -1694,6 +1709,7 @@ class MetaApiClient:
                             'symbol': symbol,
                             'timeframe': timeframe,
                             'candles': [],
+                            **symbol_trace,
                             'provider': 'rest',
                             'reason': 'No symbol candidate available',
                         }
@@ -1704,6 +1720,7 @@ class MetaApiClient:
                             'symbol': symbol,
                             'timeframe': timeframe,
                             'candles': [],
+                            **symbol_trace,
                             'provider': 'rest',
                             'reason': 'No market candles returned for symbol candidates',
                             'endpoint': last_url,
@@ -1715,6 +1732,7 @@ class MetaApiClient:
                         'symbol': symbol,
                         'timeframe': timeframe,
                         'candles': [],
+                        **symbol_trace,
                         'provider': 'rest',
                         'reason': f'HTTP {last_response.status_code}',
                         'endpoint': last_url,
@@ -1728,6 +1746,7 @@ class MetaApiClient:
                     'symbol': symbol,
                     'timeframe': timeframe,
                     'candles': [],
+                    **symbol_trace,
                     'provider': 'rest',
                     'reason': str(exc),
                     'tried_symbols': symbol_candidates,

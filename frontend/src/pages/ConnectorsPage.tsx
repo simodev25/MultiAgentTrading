@@ -42,46 +42,51 @@ const DEFAULT_AGENT_LLM_ENABLED: Record<string, boolean> = {
 };
 const AGENT_PROMPT_FALLBACKS: Record<string, { system: string; user: string }> = {
   'technical-analyst': {
-    system: 'Tu es un analyste technique Forex.',
-    user: 'Pair: {pair}\nTimeframe: {timeframe}\nTrend: {trend}\nRSI: {rsi}\nMACD diff: {macd_diff}\nPrix: {last_price}',
+    system: "Tu es un analyste technique multi-actifs. Tu analyses tout type d'instrument avec uniquement les indicateurs fournis.",
+    user: 'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nTrend: {trend}\nRSI: {rsi}\nMACD diff: {macd_diff}\nPrix: {last_price}',
   },
   'news-analyst': {
-    system: 'Tu es un analyste news Forex.',
-    user: 'Pair: {pair}\nTimeframe: {timeframe}\nMémoires pertinentes:\n{memory_context}\nTitres:\n{headlines}',
+    system: "Tu es un analyste news multi-actifs. Adapte ton raisonnement à la classe d'actif et n'invente jamais de causalité.",
+    user: (
+      'Instrument: {pair}\nAsset class: {asset_class}\nDisplay symbol: {display_symbol}\nTimeframe: {timeframe}\n'
+      + 'Instrument type: {instrument_type}\nPrimary asset: {primary_asset}\nSecondary asset: {secondary_asset}\n'
+      + 'FX base asset: {base_asset}\nFX quote asset: {quote_asset}\nMémoires pertinentes:\n{memory_context}\n'
+      + 'Evidences retenues:\n{headlines}'
+    ),
   },
   'market-context-analyst': {
-    system: 'Tu es un analyste de contexte de marché Forex.',
+    system: "Tu es un analyste de contexte de marché multi-actifs. Tu évalues le régime, la lisibilité et la volatilité sans hypothèses externes.",
     user: (
-      'Pair: {pair}\nTimeframe: {timeframe}\nTrend: {trend}\nLast price: {last_price}\n'
+      'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nTrend: {trend}\nLast price: {last_price}\n'
       + 'Change pct: {change_pct}\nATR: {atr}\nATR ratio: {atr_ratio}\nRSI: {rsi}\n'
       + 'EMA fast: {ema_fast}\nEMA slow: {ema_slow}\nMACD diff: {macd_diff}'
     ),
   },
   'bullish-researcher': {
-    system: 'Tu es un chercheur Forex haussier.',
-    user: 'Pair: {pair}\nTimeframe: {timeframe}\nSignals: {signals_json}\nMémoire:\n{memory_context}',
+    system: "Tu es un chercheur de marché haussier multi-actifs. N'utilise que les signaux fournis et n'invente aucune donnée externe.",
+    user: 'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nSignals: {signals_json}\nMémoire:\n{memory_context}',
   },
   'bearish-researcher': {
-    system: 'Tu es un chercheur Forex baissier.',
-    user: 'Pair: {pair}\nTimeframe: {timeframe}\nSignals: {signals_json}\nMémoire:\n{memory_context}',
+    system: "Tu es un chercheur de marché baissier multi-actifs. N'utilise que les signaux fournis et n'invente aucune donnée externe.",
+    user: 'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nSignals: {signals_json}\nMémoire:\n{memory_context}',
   },
   'trader-agent': {
-    system: "Tu es un assistant trader Forex. Résume la note d'exécution.",
-    user: 'Pair: {pair}\nTimeframe: {timeframe}\nDecision: {decision}\nBullish: {bullish_args}\nBearish: {bearish_args}\nNotes: {risk_notes}',
+    system: "Tu es un assistant trader multi-actifs. Résume la note d'exécution finale sans inventer de signaux.",
+    user: 'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nDecision: {decision}\nBullish: {bullish_args}\nBearish: {bearish_args}\nNotes: {risk_notes}',
   },
   'risk-manager': {
-    system: 'Tu es un risk manager Forex.',
+    system: 'Tu es un risk manager multi-actifs.',
     user: (
-      'Pair: {pair}\nTimeframe: {timeframe}\nMode: {mode}\nDecision: {decision}\n'
+      'Instrument: {pair}\nTimeframe: {timeframe}\nMode: {mode}\nDecision: {decision}\n'
       + 'Entry: {entry}\nStop loss: {stop_loss}\nTake profit: {take_profit}\nRisk %: {risk_percent}\n'
       + 'Sortie déterministe: accepted={accepted}, suggested_volume={suggested_volume}, reasons={reasons}\n'
       + 'Retour attendu: APPROVE ou REJECT puis justification concise.'
     ),
   },
   'execution-manager': {
-    system: 'Tu es un execution manager Forex.',
+    system: 'Tu es un execution manager multi-actifs.',
     user: (
-      'Pair: {pair}\nTimeframe: {timeframe}\nMode: {mode}\nDecision trader: {decision}\n'
+      'Instrument: {pair}\nTimeframe: {timeframe}\nMode: {mode}\nDecision trader: {decision}\n'
       + 'Risk accepted: {risk_accepted}\nSuggested volume: {suggested_volume}\n'
       + 'Stop loss: {stop_loss}\nTake profit: {take_profit}\n'
       + 'Retour attendu: BUY, SELL ou HOLD puis justification concise.'
@@ -96,10 +101,10 @@ const AGENT_PROMPT_FALLBACKS: Record<string, { system: string; user: string }> =
     ),
   },
   'schedule-planner-agent': {
-    system: 'Tu es un agent dédié à l’automatisation intelligente des plans cron Forex.',
+    system: 'Tu es un agent dédié à l’automatisation intelligente des plans cron multi-actifs.',
     user: (
       'Construit un plan de scheduling.\n'
-      + 'Contraintes: target_count plans, pairs/timeframes autorisés, mode demandé, risk_percent borné, cron cohérent.\n'
+      + 'Contraintes: target_count plans, instruments/timeframes autorisés, mode demandé, risk_percent borné, cron cohérent.\n'
       + 'Retour: JSON strict avec keys plans et note.\n'
       + 'Contexte JSON:\n{context_json}'
     ),
@@ -561,7 +566,7 @@ export function ConnectorsPage() {
     const active = activePromptByAgent.get(promptAgent);
     const fallback = AGENT_PROMPT_FALLBACKS[promptAgent] ?? {
       system: `Tu es l'agent ${promptAgent}.`,
-      user: 'Pair: {pair}\nTimeframe: {timeframe}\nContexte: {context}',
+      user: 'Instrument: {pair}\nTimeframe: {timeframe}\nContexte: {context}',
     };
     setPromptSystem(active?.system_prompt ?? fallback.system);
     setPromptUser(active?.user_prompt_template ?? fallback.user);
@@ -1264,7 +1269,7 @@ export function ConnectorsPage() {
                       setAgentSkills((prev) => ({ ...prev, [promptAgent]: parsedSkills }));
                     }}
                     rows={10}
-                    placeholder={'ex:\nPrioriser les événements macro à fort impact Forex\nSignaler explicitement les incertitudes'}
+                    placeholder={'ex:\nPrioriser les événements à fort impact pour l’instrument analysé\nSignaler explicitement les incertitudes'}
                   />
                 </label>
                 <div className="form-grid inline">
@@ -1553,7 +1558,7 @@ export function ConnectorsPage() {
               <h3>Mémoire long-terme</h3>
               <form className="form-grid inline" onSubmit={searchMemory}>
                 <label>
-                  Pair
+                  Instrument
                   <select value={memoryPair} onChange={(e) => setMemoryPair(e.target.value)}>
                     {memoryPairOptions.map((item) => (
                       <option key={item}>{item}</option>

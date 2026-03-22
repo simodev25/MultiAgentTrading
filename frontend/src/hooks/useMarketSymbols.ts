@@ -63,6 +63,7 @@ export function useMarketSymbols(token: string | null) {
 
   return {
     symbols,
+    instruments: symbols.tradeable_pairs,
     pairs: symbols.tradeable_pairs,
     loading,
     error,

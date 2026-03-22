@@ -312,6 +312,66 @@ a:hover {
   flex-wrap: wrap;
 }
 
+.run-detail-header h2 {
+  margin: 0;
+}
+
+.run-header-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-top: 8px;
+  color: #a9bddc;
+  font-size: 0.84rem;
+}
+
+.instrument-summary-card {
+  grid-column: span 12;
+}
+
+.instrument-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+}
+
+.instrument-meta-item {
+  border: 1px solid rgba(58, 80, 115, 0.72);
+  border-radius: 12px;
+  padding: 12px;
+  background: linear-gradient(180deg, rgba(10, 16, 30, 0.9), rgba(8, 14, 25, 0.96));
+}
+
+.instrument-meta-item span {
+  display: block;
+  color: #8fa5c9;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.instrument-meta-item strong {
+  display: block;
+  margin-top: 6px;
+  color: #edf5ff;
+  font-size: 0.95rem;
+  word-break: break-word;
+}
+
+.trace-details {
+  margin-top: 12px;
+}
+
+.trace-details summary {
+  cursor: pointer;
+  color: #d7e9ff;
+  font-weight: 700;
+}
+
+.trace-details .json-view {
+  margin-top: 8px;
+}
+
 .dashboard-page .launch-card {
   grid-column: span 8;
 }

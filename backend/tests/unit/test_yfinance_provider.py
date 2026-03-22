@@ -69,6 +69,12 @@ def test_ticker_candidates_include_suffixless_fx_variant() -> None:
     assert 'EURUSD=X' in candidates
 
 
+def test_ticker_candidates_map_crypto_pairs_to_spot_symbols() -> None:
+    candidates = YFinanceMarketProvider._ticker_candidates('LTCUSD')
+    assert candidates[0] == 'LTC-USD'
+    assert 'LTCUSD=X' not in candidates
+
+
 def test_normalize_pair_strips_broker_suffix_for_non_fx_symbols() -> None:
     assert YFinanceMarketProvider._normalize_pair('AAPL.PRO') == 'AAPL'
 
@@ -76,6 +82,69 @@ def test_normalize_pair_strips_broker_suffix_for_non_fx_symbols() -> None:
 def test_ticker_candidates_include_index_alias() -> None:
     candidates = YFinanceMarketProvider._ticker_candidates('SPX500')
     assert '^GSPC' in candidates
+
+
+def test_news_symbol_candidates_for_crypto_avoid_fx_dollar_fallbacks() -> None:
+    candidates = YFinanceMarketProvider._news_symbol_candidates('DOTUSD')
+    assert candidates[0] == 'DOT-USD'
+    assert 'DX-Y.NYB' not in candidates
+    assert '^DXY' not in candidates
+
+
+def test_normalize_article_item_maps_same_usd_story_by_base_quote_role() -> None:
+    eurusd = YFinanceMarketProvider._normalize_article_item(
+        provider='newsapi',
+        pair='EURUSD',
+        title='Dollar falls after soft US CPI as Fed turns dovish',
+        summary='USD weakens as lower Treasury yields weigh on the greenback.',
+        url='https://example.com/eurusd-story',
+        published_at=_iso_hours_ago(1),
+        source_name='Reuters',
+    )
+    usdjpy = YFinanceMarketProvider._normalize_article_item(
+        provider='newsapi',
+        pair='USDJPY',
+        title='Dollar falls after soft US CPI as Fed turns dovish',
+        summary='USD weakens as lower Treasury yields weigh on the greenback.',
+        url='https://example.com/usdjpy-story',
+        published_at=_iso_hours_ago(1),
+        source_name='Reuters',
+    )
+
+    assert eurusd is not None
+    assert usdjpy is not None
+    assert eurusd['impact_on_quote'] == 'weakening'
+    assert eurusd['pair_directional_effect'] == 'bullish'
+    assert usdjpy['impact_on_base'] == 'weakening'
+    assert usdjpy['pair_directional_effect'] == 'bearish'
+
+
+def test_normalize_article_item_handles_cross_pairs_generically() -> None:
+    eurgbp = YFinanceMarketProvider._normalize_article_item(
+        provider='newsapi',
+        pair='EURGBP',
+        title='Sterling rises after hawkish Bank of England remarks',
+        summary='GBP strengthens as markets price tighter UK policy.',
+        url='https://example.com/eurgbp-story',
+        published_at=_iso_hours_ago(2),
+        source_name='Bloomberg',
+    )
+    audnzd = YFinanceMarketProvider._normalize_article_item(
+        provider='newsapi',
+        pair='AUDNZD',
+        title='Aussie rallies after hawkish RBA surprise',
+        summary='AUD strengthens as traders price a higher rates path.',
+        url='https://example.com/audnzd-story',
+        published_at=_iso_hours_ago(2),
+        source_name='Bloomberg',
+    )
+
+    assert eurgbp is not None
+    assert audnzd is not None
+    assert eurgbp['impact_on_quote'] == 'strengthening'
+    assert eurgbp['pair_directional_effect'] == 'bearish'
+    assert audnzd['impact_on_base'] == 'strengthening'
+    assert audnzd['pair_directional_effect'] == 'bullish'
 
 
 def test_get_historical_candles_tries_fallback_candidates(monkeypatch) -> None:
@@ -99,6 +168,29 @@ def test_get_historical_candles_tries_fallback_candidates(monkeypatch) -> None:
     frame = provider.get_historical_candles('EURUSD.PRO', 'H1', '2026-01-01', '2026-01-02')
     assert not frame.empty
     assert 'EURUSD=X' in calls
+
+
+def test_get_market_snapshot_exposes_instrument_resolution_trace(monkeypatch) -> None:
+    provider = YFinanceMarketProvider()
+    provider.settings.yfinance_cache_enabled = False
+    provider._redis = None
+
+    class _FakeTicker:
+        def __init__(self, symbol: str) -> None:
+            self.symbol = symbol
+
+        def history(self, **kwargs):
+            return _frame(rows=60)
+
+    monkeypatch.setattr('app.services.market.yfinance_provider.yf.Ticker', _FakeTicker)
+
+    snapshot = provider.get_market_snapshot('EURUSD.PRO', 'H1')
+
+    assert snapshot['degraded'] is False
+    assert snapshot['symbol'] == 'EURUSD=X'
+    assert snapshot['instrument']['canonical_symbol'] == 'EURUSD'
+    assert snapshot['instrument']['asset_class'] == 'forex'
+    assert snapshot['provider_resolution']['provider_symbol'] == 'EURUSD=X'
 
 
 def test_get_news_context_tries_fallback_candidates(monkeypatch) -> None:
@@ -130,6 +222,9 @@ def test_get_news_context_tries_fallback_candidates(monkeypatch) -> None:
     payload = provider.get_news_context('EURUSD.PRO', limit=5)
     assert payload['degraded'] is False
     assert payload['symbol'] == 'EURUSD=X'
+    assert payload['instrument']['canonical_symbol'] == 'EURUSD'
+    assert payload['provider_resolution']['provider_symbol'] == 'EURUSD=X'
+    assert any(item.get('symbol') == 'EURUSD=X' for item in payload['news_candidates'])
     assert len(payload['news']) == 1
     assert 'EURUSD=X' in calls
 

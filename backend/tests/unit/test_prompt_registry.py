@@ -5,7 +5,7 @@ from app.db.base import Base
 from app.db.models.connector_config import ConnectorConfig
 from app.db.models.prompt_template import PromptTemplate
 from app.db.models.user import User  # noqa: F401
-from app.services.prompts.registry import PromptTemplateService
+from app.services.prompts.registry import DEFAULT_PROMPTS, PromptTemplateService
 
 
 def test_prompt_registry_version_activation() -> None:
@@ -166,3 +166,13 @@ def test_prompt_registry_render_handles_literal_json_braces_in_prompt_template()
         assert rendered['missing_variables'] == []
         assert '{"tool":"<candidate_tool_name>","reason":"<justification courte>"}' in rendered['user_prompt']
         assert '{"candidate_tools":[{"name":"run_news_analyst"}]}' in rendered['user_prompt']
+
+
+def test_news_analyst_default_prompt_stays_pair_aware_for_fx() -> None:
+    system = DEFAULT_PROMPTS['news-analyst']['system']
+    user = DEFAULT_PROMPTS['news-analyst']['user']
+
+    assert 'devise de base' in system
+    assert 'devise de cotation' in system
+    assert '{base_asset}' in user
+    assert '{quote_asset}' in user

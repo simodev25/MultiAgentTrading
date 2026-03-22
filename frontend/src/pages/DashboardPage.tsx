@@ -93,7 +93,7 @@ function formatRunDecisionSummary(run: Run): string {
 
 export function DashboardPage() {
   const { token } = useAuth();
-  const { pairs } = useMarketSymbols(token);
+  const { instruments } = useMarketSymbols(token);
   const [runs, setRuns] = useState<Run[]>([]);
   const [schedules, setSchedules] = useState<ScheduledRun[]>([]);
   const [accounts, setAccounts] = useState<MetaApiAccount[]>([]);
@@ -205,14 +205,14 @@ export function DashboardPage() {
   }, []);
 
   useEffect(() => {
-    if (pairs.length === 0) return;
-    if (!pairs.includes(pair)) {
-      setPair(pairs[0]);
+    if (instruments.length === 0) return;
+    if (!instruments.includes(pair)) {
+      setPair(instruments[0]);
     }
-    if (!pairs.includes(schedulePair)) {
-      setSchedulePair(pairs[0]);
+    if (!instruments.includes(schedulePair)) {
+      setSchedulePair(instruments[0]);
     }
-  }, [pairs, pair, schedulePair]);
+  }, [instruments, pair, schedulePair]);
 
   useEffect(() => {
     if (!scheduleNameTouched) {
@@ -385,12 +385,12 @@ export function DashboardPage() {
   return (
     <div className="dashboard-grid dashboard-page">
       <section className="card primary launch-card">
-        <h2>Lancer une analyse Forex</h2>
+        <h2>Lancer une analyse multi-actifs</h2>
         <form onSubmit={onSubmit} className="form-grid inline">
           <label>
-            Pair
+            Instrument
             <select value={pair} onChange={(e) => setPair(e.target.value)}>
-              {pairs.map((item) => (
+              {instruments.map((item) => (
                 <option key={item}>{item}</option>
               ))}
             </select>
@@ -426,7 +426,7 @@ export function DashboardPage() {
               ))}
             </select>
           </label>
-          <button className="btn-primary" disabled={loading}>{loading ? 'En cours...' : 'Démarrer run'}</button>
+          <button className="btn-primary" disabled={loading}>{loading ? 'En cours...' : 'Démarrer analyse'}</button>
         </form>
         {error && <p className="alert">{error}</p>}
       </section>
@@ -469,9 +469,9 @@ export function DashboardPage() {
             />
           </label>
           <label>
-            Pair
+            Instrument
             <select value={schedulePair} onChange={(e) => setSchedulePair(e.target.value)}>
-              {pairs.map((item) => (
+              {instruments.map((item) => (
                 <option key={item}>{item}</option>
               ))}
             </select>
@@ -530,7 +530,7 @@ export function DashboardPage() {
             />
           </label>
           <button type="button" className="btn-ghost" onClick={applySmartCronPreset}>Preset timeframe</button>
-          <button className="btn-primary" disabled={scheduleLoading}>{scheduleLoading ? 'Création...' : 'Créer auto-run'}</button>
+          <button className="btn-primary" disabled={scheduleLoading}>{scheduleLoading ? 'Création...' : 'Créer plan auto'}</button>
         </form>
         <p className="model-source">
           Exemple cron: <code>*/5 * * * *</code>, <code>0 * * * *</code>, <code>0 8-20 * * 1-5</code>.
@@ -627,7 +627,7 @@ export function DashboardPage() {
             <tr>
               <th>ID</th>
               <th>Nom</th>
-              <th>Pair</th>
+              <th>Instrument</th>
               <th>TF</th>
               <th>Mode</th>
               <th>Risque</th>
@@ -680,7 +680,7 @@ export function DashboardPage() {
           <thead>
             <tr>
               <th>ID</th>
-              <th>Pair</th>
+              <th>Instrument</th>
               <th>TF</th>
               <th>Mode</th>
               <th>Status</th>

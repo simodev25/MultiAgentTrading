@@ -9,6 +9,15 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.services.llm.provider_client import LlmClient
 from app.services.llm.model_selector import AgentModelSelector, normalize_decision_mode
+from app.services.orchestrator.instrument_helpers import (
+    build_instrument_context,
+    build_instrument_prompt_variables,
+    instrument_aware_asset_class,
+    instrument_aware_components,
+    instrument_aware_effects_for_item,
+    instrument_aware_evidence_profile,
+    instrument_aware_headline_sentiment,
+)
 from app.services.prompts.registry import PromptTemplateService
 from app.services.risk.rules import RiskEngine
 
@@ -417,6 +426,13 @@ def _clamp(value: float, low: float, high: float) -> float:
     return min(max(float(value), low), high)
 
 
+def _merge_prompt_variables(*parts: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for part in parts:
+        merged.update(part)
+    return merged
+
+
 def _apply_deterministic_skill_guardrail(
     score: float,
     *,
@@ -535,7 +551,7 @@ DECISION_POLICIES: dict[str, DecisionGatingPolicy] = {
     ),
     'permissive': DecisionGatingPolicy(
         mode='permissive',
-        min_combined_score=0.18,
+        min_combined_score=0.12,
         min_confidence=0.22,
         min_aligned_sources=1,
         technical_neutral_exception_min_sources=1,
@@ -563,6 +579,75 @@ def _resolve_decision_policy(mode: object) -> DecisionGatingPolicy:
     return DECISION_POLICIES.get(resolved, DECISION_POLICIES['conservative'])
 
 
+FIAT_NEWS_ASSETS = {'USD', 'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'NZD'}
+CRYPTO_NEWS_ASSETS = {
+    'ADA',
+    'AVAX',
+    'BCH',
+    'BNB',
+    'BTC',
+    'DOGE',
+    'DOT',
+    'ETH',
+    'LINK',
+    'LTC',
+    'MATIC',
+    'SOL',
+    'UNI',
+    'XRP',
+}
+CRYPTO_NEWS_QUOTES = ('USDT', 'USDC', 'USD', 'BTC', 'ETH')
+COMMODITY_NEWS_ASSETS = {'XAU', 'XAG'}
+CRYPTO_SECTOR_KEYWORDS = (
+    'crypto',
+    'cryptocurrency',
+    'digital asset',
+    'token',
+    'altcoin',
+    'exchange',
+    'wallet',
+    'stablecoin',
+)
+CRYPTO_CATALYST_KEYWORDS = (
+    'etf',
+    'regulation',
+    'sec',
+    'protocol',
+    'network',
+    'staking',
+    'validator',
+    'listing',
+    'delisting',
+    'unlock',
+    'hack',
+    'exploit',
+    'airdrop',
+    'fork',
+    'on-chain',
+    'onchain',
+)
+MACRO_THEME_KEYWORDS = (
+    'inflation',
+    'cpi',
+    'ppi',
+    'rates',
+    'rate',
+    'central bank',
+    'employment',
+    'payroll',
+    'growth',
+    'gdp',
+    'energy',
+    'oil',
+    'geopolitics',
+    'war',
+    'yield',
+    'liquidity',
+    'risk-off',
+    'risk on',
+)
+
+
 def _normalize_symbol_for_news(pair: str | None) -> str:
     raw = str(pair or '').strip().upper()
     if not raw:
@@ -575,10 +660,52 @@ def _normalize_symbol_for_news(pair: str | None) -> str:
     return without_suffix
 
 
+def _split_fx_pair_for_news(pair: str | None) -> tuple[str | None, str | None]:
+    symbol = _normalize_symbol_for_news(pair)
+    if len(symbol) == 6 and symbol.isalpha():
+        base = symbol[:3]
+        quote = symbol[3:]
+        if base in FIAT_NEWS_ASSETS and quote in FIAT_NEWS_ASSETS:
+            return base, quote
+    return None, None
+
+
+def _split_crypto_pair_for_news(pair: str | None) -> tuple[str | None, str | None]:
+    symbol = _normalize_symbol_for_news(pair)
+    for quote in sorted(CRYPTO_NEWS_QUOTES, key=len, reverse=True):
+        if not symbol.endswith(quote):
+            continue
+        base = symbol[: -len(quote)]
+        if base in CRYPTO_NEWS_ASSETS:
+            return base, quote
+    return None, None
+
+
+def _split_commodity_pair_for_news(pair: str | None) -> tuple[str | None, str | None]:
+    symbol = _normalize_symbol_for_news(pair)
+    for base in COMMODITY_NEWS_ASSETS:
+        if not symbol.startswith(base):
+            continue
+        quote = symbol[len(base) :]
+        if quote in FIAT_NEWS_ASSETS:
+            return base, quote
+    return None, None
+
+
+def _news_asset_class(pair: str | None) -> str:
+    if any(_split_fx_pair_for_news(pair)):
+        return 'fx'
+    if any(_split_crypto_pair_for_news(pair)):
+        return 'crypto'
+    if any(_split_commodity_pair_for_news(pair)):
+        return 'commodity'
+    return 'other'
+
+
 def _asset_aliases(asset: str) -> tuple[str, ...]:
     key = str(asset or '').strip().upper()
     mapping: dict[str, tuple[str, ...]] = {
-        'USD': ('usd', 'dollar', 'greenback', 'fed', 'treasury'),
+        'USD': ('usd', 'dollar', 'greenback', 'fed', 'treasury', 'us yields', 'us inflation', 'us cpi', 'us payrolls', 'u.s. yields'),
         'EUR': ('eur', 'euro', 'ecb'),
         'GBP': ('gbp', 'sterling', 'pound', 'boe'),
         'JPY': ('jpy', 'yen', 'boj'),
@@ -586,8 +713,20 @@ def _asset_aliases(asset: str) -> tuple[str, ...]:
         'CAD': ('cad', 'canadian dollar', 'loonie', 'boc'),
         'AUD': ('aud', 'aussie', 'rba'),
         'NZD': ('nzd', 'kiwi', 'rbnz'),
+        'ADA': ('ada', 'cardano'),
+        'AVAX': ('avax', 'avalanche'),
+        'BCH': ('bch', 'bitcoin cash'),
+        'BNB': ('bnb', 'binance coin', 'binance'),
         'BTC': ('btc', 'bitcoin'),
+        'DOGE': ('doge', 'dogecoin'),
+        'DOT': ('dot', 'polkadot'),
         'ETH': ('eth', 'ethereum'),
+        'LINK': ('link', 'chainlink'),
+        'LTC': ('ltc', 'litecoin'),
+        'MATIC': ('matic', 'polygon'),
+        'SOL': ('sol', 'solana'),
+        'UNI': ('uni', 'uniswap'),
+        'XRP': ('xrp', 'ripple'),
         'XAU': ('xau', 'gold'),
         'XAG': ('xag', 'silver'),
     }
@@ -751,53 +890,180 @@ def _apply_mode_prompt_guidance(system_prompt: str, user_prompt: str, *, decisio
 
 
 def _deterministic_headline_sentiment(headlines: str, *, pair: str | None = None) -> tuple[str, float]:
-    lines = [
-        str(line).strip().lstrip('-').strip()
-        for line in str(headlines or '').splitlines()
-        if str(line).strip()
-    ]
-    if not lines:
-        return 'neutral', 0.0
+    return instrument_aware_headline_sentiment(headlines, pair=pair)
 
-    symbol = _normalize_symbol_for_news(pair)
-    fx_like = bool(re.fullmatch(r'[A-Z]{6}', symbol))
-    base = symbol[:3] if fx_like else ''
-    quote = symbol[3:] if fx_like else ''
-    base_aliases = _asset_aliases(base)
-    quote_aliases = _asset_aliases(quote)
-    symbol_aliases = _asset_aliases(symbol)
 
-    weighted_total = 0.0
-    weight_sum = 0.0
-
-    for headline in lines:
-        polarity = _headline_keyword_score(headline)
-        if polarity == 0.0:
+def _keyword_hit_count(text: str, keywords: tuple[str, ...]) -> int:
+    lowered = str(text or '').lower()
+    hits = 0
+    for keyword in keywords:
+        token = str(keyword or '').strip().lower()
+        if not token:
             continue
+        pattern = rf'(?<![a-z0-9]){re.escape(token)}(?![a-z0-9])'
+        if re.search(pattern, lowered):
+            hits += 1
+    return hits
 
-        weight = 0.35
-        if fx_like:
-            base_hit = _mentions_any_alias(headline, base_aliases)
-            quote_hit = _mentions_any_alias(headline, quote_aliases)
-            if base_hit and not quote_hit:
-                weight = 1.0
-            elif quote_hit and not base_hit:
-                weight = -1.0
-            elif base_hit and quote_hit:
-                weight = 0.15
-        elif _mentions_any_alias(headline, symbol_aliases):
-            weight = 0.8
 
-        weighted_total += polarity * weight
-        weight_sum += abs(weight)
+def _fx_effects_for_item(item: dict[str, Any], *, pair: str) -> dict[str, Any]:
+    return instrument_aware_effects_for_item(item, pair=pair)
 
-    if weight_sum == 0.0:
-        return 'neutral', 0.0
 
-    normalized = weighted_total / weight_sum
-    score = round(_clamp(normalized * 0.18, -0.2, 0.2), 3)
-    signal = _score_to_signal(score, threshold=0.03)
-    return signal, score
+def _format_news_summary(signal: str, message: str) -> str:
+    normalized_signal = signal if signal in {'bullish', 'bearish', 'neutral'} else 'neutral'
+    return f'{normalized_signal}\n{str(message or "").strip()}'.strip()
+
+
+def _news_summary_implies_no_signal(text: str) -> bool:
+    lowered = str(text or '').strip().lower()
+    if not lowered:
+        return False
+    phrases = (
+        'aucune news pertinente',
+        'no relevant news',
+        'no fresh relevant news',
+        'pas d impact direct',
+        'pas d\'impact direct',
+        'too weak',
+        'corrélations indirectes',
+        'correlations indirectes',
+        'no directional bias',
+        'no directional edge',
+        'insufficient relevant evidence',
+    )
+    return any(phrase in lowered for phrase in phrases)
+
+
+def _news_evidence_profile(
+    item: dict[str, Any],
+    *,
+    pair: str,
+    provider_symbol: str | None = None,
+    macro: bool = False,
+) -> dict[str, Any]:
+    return instrument_aware_evidence_profile(
+        item,
+        pair=pair,
+        provider_symbol=provider_symbol,
+        macro=macro,
+    )
+
+
+def _validate_news_output(
+    output: dict[str, Any],
+    *,
+    selected_evidence: list[dict[str, Any]],
+    rejected_evidence: list[dict[str, Any]],
+    min_directional_relevance: float,
+    signal_threshold: float = 0.10,
+) -> dict[str, Any]:
+    actions: list[str] = []
+    summary = str(output.get('summary') or '')
+    llm_summary = str(output.get('llm_summary') or '')
+    parsed_summary_signal = _parse_signal_from_text(summary)
+    strongest_relevance = max((_safe_float(item.get('final_pair_relevance'), 0.0) for item in selected_evidence), default=0.0)
+
+    def _directional_effect(item: dict[str, Any]) -> str:
+        return str(
+            item.get('instrument_directional_effect')
+            or item.get('pair_directional_effect')
+            or 'neutral'
+        ).strip().lower()
+
+    def _has_directional_instrument_effect(item: dict[str, Any]) -> bool:
+        if not bool(item.get('directional_eligible')):
+            return False
+        if _safe_float(item.get('final_pair_relevance'), 0.0) < min_directional_relevance:
+            return False
+        asset_class = str(item.get('asset_class') or '').strip().lower()
+        directional_effect = _directional_effect(item)
+        impact_on_base = str(item.get('impact_on_base') or item.get('base_currency_effect') or 'unknown').strip().lower()
+        impact_on_quote = str(item.get('impact_on_quote') or item.get('quote_currency_effect') or 'unknown').strip().lower()
+        if asset_class in {'fx', 'forex'}:
+            return directional_effect in {'bullish', 'bearish'} and (
+                impact_on_base != 'unknown' or impact_on_quote != 'unknown'
+            )
+        return directional_effect in {'bullish', 'bearish'}
+
+    fx_neutral_only = bool(selected_evidence) and all(
+        str(item.get('asset_class') or '').strip().lower() not in {'fx', 'forex'}
+        or (
+            _directional_effect(item) == 'neutral'
+            and str(item.get('impact_on_base') or item.get('base_currency_effect') or 'unknown').strip().lower() == 'unknown'
+            and str(item.get('impact_on_quote') or item.get('quote_currency_effect') or 'unknown').strip().lower() == 'unknown'
+        )
+        for item in selected_evidence
+    )
+    directional_evidence_count = sum(1 for item in selected_evidence if _has_directional_instrument_effect(item))
+    no_signal_summary = _news_summary_implies_no_signal(summary) or _news_summary_implies_no_signal(llm_summary)
+    score = float(output.get('score', 0.0) or 0.0)
+
+    if no_signal_summary and output.get('signal') != 'neutral':
+        actions.append('summary_forced_neutral')
+    if no_signal_summary or not selected_evidence or directional_evidence_count == 0 or strongest_relevance < min_directional_relevance:
+        output['signal'] = 'neutral'
+        output['score'] = 0.0 if (no_signal_summary or not selected_evidence) else round(_clamp(score * 0.20, -0.05, 0.05), 3)
+        output['confidence'] = round(min(float(output.get('confidence', 0.08) or 0.08), 0.18 if not selected_evidence else 0.22), 3)
+        output['coverage'] = 'none' if not selected_evidence else 'low'
+        output['decision_mode'] = 'no_evidence' if not selected_evidence else 'neutral_from_low_relevance'
+        output['information_state'] = 'no_recent_news' if not selected_evidence else 'insufficient_relevance'
+        output['summary'] = _format_news_summary(
+            'neutral',
+            'Aucune news pertinente exploitable n’a été retenue pour cet instrument.'
+            if not selected_evidence or no_signal_summary
+            else 'Les évidences retenues restent trop indirectes pour confirmer un biais directionnel fiable sur cet instrument.',
+        )
+        actions.append('directional_signal_blocked')
+    elif output.get('decision_mode') == 'neutral_from_mixed_news' and abs(score) < signal_threshold:
+        output['signal'] = 'neutral'
+        output['summary'] = _format_news_summary('neutral', 'Les évidences news sont mixtes; aucun biais directionnel fiable n’est retenu pour cet instrument.')
+        actions.append('mixed_news_neutralized')
+    elif parsed_summary_signal == 'neutral' and output.get('signal') != 'neutral' and abs(score) < max(signal_threshold, 0.12):
+        output['signal'] = 'neutral'
+        output['score'] = round(_clamp(score * 0.25, -0.05, 0.05), 3)
+        actions.append('summary_signal_aligned_to_neutral')
+
+    if output.get('signal') == 'neutral':
+        if fx_neutral_only:
+            output['score'] = 0.0
+            output['confidence'] = round(min(float(output.get('confidence', 0.08) or 0.08), 0.18 if selected_evidence else 0.08), 3)
+            output['decision_mode'] = 'neutral_from_low_relevance' if selected_evidence else 'no_evidence'
+            output['information_state'] = 'insufficient_relevance' if selected_evidence else 'no_recent_news'
+            output['reason'] = 'Retained FX evidence did not produce any directional pair effect.'
+            actions.append('fx_neutral_evidence_alignment')
+        else:
+            if abs(float(output.get('score', 0.0) or 0.0)) > max(signal_threshold, 0.12):
+                output['score'] = round(_clamp(float(output.get('score', 0.0) or 0.0) * 0.20, -0.05, 0.05), 3)
+                actions.append('neutral_score_compressed')
+            output['confidence'] = round(min(float(output.get('confidence', 0.08) or 0.08), 0.45 if directional_evidence_count > 0 else 0.22), 3)
+            if output.get('decision_mode') == 'directional' or 'directional edge' in str(output.get('reason') or '').lower():
+                output['decision_mode'] = 'neutral_from_mixed_news' if directional_evidence_count > 0 else 'neutral_from_low_relevance'
+                output['information_state'] = 'mixed_signals' if directional_evidence_count > 0 else 'insufficient_relevance'
+                output['reason'] = (
+                    'Retained evidence remains mixed; no reliable directional effect is confirmed on the instrument.'
+                    if directional_evidence_count > 0
+                    else 'Retained evidence did not confirm a reliable directional effect on the instrument.'
+                )
+                actions.append('neutral_reason_aligned')
+
+    if output.get('signal') == 'bullish' and float(output.get('score', 0.0) or 0.0) <= 0.0:
+        output['score'] = round(max(abs(float(output.get('score', 0.0) or 0.0)), 0.01), 3)
+        actions.append('score_sign_corrected_bullish')
+    elif output.get('signal') == 'bearish' and float(output.get('score', 0.0) or 0.0) >= 0.0:
+        output['score'] = round(-max(abs(float(output.get('score', 0.0) or 0.0)), 0.01), 3)
+        actions.append('score_sign_corrected_bearish')
+
+    if output.get('signal') == 'neutral':
+        output['signal_contract_case'] = 'no_signal' if (not selected_evidence or no_signal_summary) else 'weak_signal'
+    else:
+        output['signal_contract_case'] = 'directional_signal'
+    output['validation_actions'] = actions
+    output['selected_evidence_count'] = len(selected_evidence)
+    output['rejected_evidence_count'] = len(rejected_evidence)
+    output['directional_evidence_count'] = directional_evidence_count
+    output['strongest_pair_relevance'] = round(strongest_relevance, 3)
+    return output
 
 
 class TechnicalAnalystAgent:
@@ -812,6 +1078,7 @@ class TechnicalAnalystAgent:
         m = ctx.market_snapshot
         if m.get('degraded'):
             return {'signal': 'neutral', 'score': 0.0, 'reason': 'Market data unavailable'}
+        instrument_vars = build_instrument_prompt_variables(ctx.pair)
 
         score = 0.0
         if m['trend'] == 'bullish':
@@ -862,7 +1129,7 @@ class TechnicalAnalystAgent:
 
         fallback_system = 'Tu es un analyste technique multi-actifs. Réponds en français.'
         fallback_user = (
-            'Pair: {pair}\nTimeframe: {timeframe}\nTrend: {trend}\nRSI: {rsi}\nMACD diff: {macd_diff}\n'
+            'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nTrend: {trend}\nRSI: {rsi}\nMACD diff: {macd_diff}\n'
             'Prix: {last_price}\nDonne uniquement: bullish, bearish ou neutral puis une courte justification.'
         )
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
@@ -873,6 +1140,7 @@ class TechnicalAnalystAgent:
                 fallback_system=fallback_system,
                 fallback_user=fallback_user,
                 variables={
+                    **instrument_vars,
                     'pair': ctx.pair,
                     'timeframe': ctx.timeframe,
                     'trend': m.get('trend'),
@@ -885,14 +1153,16 @@ class TechnicalAnalystAgent:
             user_prompt = prompt_info['user_prompt']
         else:
             system_prompt = fallback_system
-            user_prompt = fallback_user.format(
-                pair=ctx.pair,
-                timeframe=ctx.timeframe,
-                trend=m.get('trend'),
-                rsi=m.get('rsi'),
-                macd_diff=m.get('macd_diff'),
-                last_price=m.get('last_price'),
-            )
+            user_prompt = fallback_user.format(**_merge_prompt_variables(
+                instrument_vars,
+                {
+                    'timeframe': ctx.timeframe,
+                    'trend': m.get('trend'),
+                    'rsi': m.get('rsi'),
+                    'macd_diff': m.get('macd_diff'),
+                    'last_price': m.get('last_price'),
+                },
+            ))
         decision_mode = self.model_selector.resolve_decision_mode(db)
         system_prompt, user_prompt = _apply_mode_prompt_guidance(
             system_prompt,
@@ -1007,109 +1277,37 @@ class NewsAnalystAgent:
         llm_circuit_failure_threshold = max(int(_safe_float(analysis_cfg.get('llm_circuit_failure_threshold'), 3.0)), 1)
         llm_circuit_open_seconds = max(_safe_float(analysis_cfg.get('llm_circuit_open_seconds'), 180.0), 15.0)
 
-        symbol_for_pair = _normalize_symbol_for_news(provider_symbol or ctx.pair)
-        fx_like_symbol = bool(re.fullmatch(r'[A-Z]{6}', symbol_for_pair))
-        base_asset = symbol_for_pair[:3] if fx_like_symbol else ''
-        quote_asset = symbol_for_pair[3:] if fx_like_symbol else ''
+        min_directional_relevance = _clamp(
+            _safe_float(analysis_cfg.get('minimum_directional_relevance'), max(min_relevance, 0.55)),
+            0.0,
+            1.0,
+        )
+        max_llm_news_items = max(int(_safe_float(analysis_cfg.get('max_llm_news_items'), 6.0)), 1)
+        max_debug_rejected_items = max(int(_safe_float(analysis_cfg.get('max_debug_rejected_items'), 12.0)), 1)
+
+        instrument_context = build_instrument_context(ctx.pair, provider_symbol=provider_symbol)
+        instrument_vars = build_instrument_prompt_variables(ctx.pair, provider_symbol=provider_symbol)
+        symbol_for_pair = str(instrument_context.get('canonical_symbol') or _normalize_symbol_for_news(ctx.pair))
+        asset_class = str(instrument_context.get('asset_class') or 'unknown').strip().lower()
+        base_asset = instrument_context.get('primary_asset') or symbol_for_pair
+        quote_asset = instrument_context.get('secondary_asset') or ''
         base_aliases = _asset_aliases(base_asset)
         quote_aliases = _asset_aliases(quote_asset)
         symbol_aliases = _asset_aliases(symbol_for_pair)
-        macro_keywords = (
-            'inflation',
-            'cpi',
-            'ppi',
-            'rates',
-            'rate',
-            'central bank',
-            'employment',
-            'payroll',
-            'growth',
-            'gdp',
-            'energy',
-            'oil',
-            'geopolitics',
-            'war',
-        )
-
-        def alias_hits(text: str, aliases: tuple[str, ...]) -> int:
-            lowered = str(text or '').lower()
-            return sum(1 for alias in aliases if str(alias or '').strip() and str(alias).lower() in lowered)
-
-        def infer_relevance_fields(item: dict[str, Any], *, macro: bool = False) -> dict[str, float]:
-            title = str(item.get('title') or item.get('event_name') or '')
-            summary = str(item.get('summary') or '')
-            text = f'{title} {summary}'.lower()
-
-            base_rel = _safe_float(item.get('base_currency_relevance'), -1.0)
-            quote_rel = _safe_float(item.get('quote_currency_relevance'), -1.0)
-            pair_rel = _safe_float(item.get('pair_relevance'), -1.0)
-            macro_rel = _safe_float(item.get('macro_relevance'), -1.0)
-            freshness = _safe_float(item.get('freshness_score'), -1.0)
-            credibility = _safe_float(item.get('credibility_score'), -1.0)
-
-            base_hit_count = alias_hits(text, base_aliases)
-            quote_hit_count = alias_hits(text, quote_aliases)
-            symbol_hit = alias_hits(text, symbol_aliases) > 0
-            macro_hit = any(keyword in text for keyword in macro_keywords)
-
-            if base_rel < 0.0:
-                base_rel = _clamp(0.35 + base_hit_count * 0.20, 0.0, 1.0) if base_hit_count else 0.0
-            if quote_rel < 0.0:
-                quote_rel = _clamp(0.35 + quote_hit_count * 0.20, 0.0, 1.0) if quote_hit_count else 0.0
-            if pair_rel < 0.0:
-                if symbol_hit:
-                    pair_rel = 1.0
-                elif base_hit_count and quote_hit_count:
-                    pair_rel = 0.75
-                elif base_hit_count or quote_hit_count:
-                    pair_rel = 0.55
-                elif macro_hit:
-                    pair_rel = 0.38
-                else:
-                    pair_rel = 0.20
-            if macro_rel < 0.0:
-                macro_rel = 0.72 if macro_hit else 0.25
-            if freshness < 0.0:
-                freshness = 0.55
-            if credibility < 0.0:
-                provider_name = str(item.get('provider') or '').lower()
-                source_name = str(item.get('publisher') or item.get('source_name') or '').lower()
-                if 'reuters' in source_name or 'wall street journal' in source_name or 'bloomberg' in source_name:
-                    credibility = 0.86
-                elif provider_name == 'tradingeconomics':
-                    credibility = 0.9
-                elif provider_name:
-                    credibility = 0.7
-                else:
-                    credibility = 0.65
-
-            return {
-                'base_currency_relevance': round(_clamp(base_rel, 0.0, 1.0), 3),
-                'quote_currency_relevance': round(_clamp(quote_rel, 0.0, 1.0), 3),
-                'pair_relevance': round(_clamp(pair_rel, 0.0, 1.0), 3),
-                'macro_relevance': round(_clamp(macro_rel, 0.0, 1.0), 3),
-                'freshness_score': round(_clamp(freshness, 0.0, 1.0), 3),
-                'credibility_score': round(_clamp(credibility, 0.0, 1.0), 3),
-            }
 
         def evidence_weight(item: dict[str, Any], *, macro: bool = False) -> float:
-            inferred = infer_relevance_fields(item, macro=macro)
-            pair_rel = inferred['pair_relevance']
-            base_rel = inferred['base_currency_relevance']
-            quote_rel = inferred['quote_currency_relevance']
-            macro_rel = inferred['macro_relevance']
-            freshness = inferred['freshness_score']
-            credibility = inferred['credibility_score']
-            relevance = max(pair_rel, base_rel, quote_rel, macro_rel)
-            base_weight = (
-                relevance * 0.45
-                + freshness * 0.25
-                + credibility * 0.20
-                + macro_rel * 0.10
-            )
+            relevance = _safe_float(item.get('final_pair_relevance'), 0.0)
+            freshness = _safe_float(item.get('freshness_score'), 0.0)
+            credibility = _safe_float(item.get('credibility_score'), 0.0)
+            category = str(item.get('relevance_category') or 'irrelevant')
+            base_weight = relevance * 0.62 + freshness * 0.20 + credibility * 0.18
             if macro:
                 importance = _safe_float(item.get('importance'), 0.0) / 3.0
                 base_weight = base_weight * 0.75 + importance * 0.25
+            if category == 'sector_related':
+                base_weight *= 0.72
+            elif category == 'weakly_indirect':
+                base_weight *= 0.45
             return _clamp(base_weight, 0.0, 1.0)
 
         def _raw_polarity(item: dict[str, Any], *, macro: bool = False) -> float:
@@ -1131,28 +1329,52 @@ class NewsAnalystAgent:
 
         def evidence_sign(item: dict[str, Any], *, macro: bool = False) -> float:
             polarity = _raw_polarity(item, macro=macro)
-            if polarity == 0.0:
-                return 0.0
-
-            inferred = infer_relevance_fields(item, macro=macro)
-            base_rel = inferred['base_currency_relevance']
-            quote_rel = inferred['quote_currency_relevance']
+            directional_effect = str(
+                item.get('instrument_directional_effect')
+                or item.get('pair_directional_effect')
+                or 'neutral'
+            ).strip().lower()
 
             title = str(item.get('title') or item.get('event_name') or '')
             summary = str(item.get('summary') or '')
             text = f'{title} {summary}'.lower()
-            base_hits = alias_hits(text, base_aliases)
-            quote_hits = alias_hits(text, quote_aliases)
+            base_hits = _keyword_hit_count(text, base_aliases)
+            quote_hits = _keyword_hit_count(text, quote_aliases)
+            category = str(item.get('relevance_category') or 'irrelevant')
+            base_rel = _safe_float(item.get('base_currency_relevance'), 0.0)
+            quote_rel = _safe_float(item.get('quote_currency_relevance'), 0.0)
+
+            if asset_class in {'fx', 'forex'}:
+                if directional_effect == 'bullish':
+                    return 1.0
+                if directional_effect == 'bearish':
+                    return -1.0
+                if (
+                    str(item.get('impact_on_base') or item.get('base_currency_effect') or 'unknown') != 'unknown'
+                    or str(item.get('impact_on_quote') or item.get('quote_currency_effect') or 'unknown') != 'unknown'
+                ):
+                    return 0.0
+            elif directional_effect == 'bullish':
+                return 1.0
+            elif directional_effect == 'bearish':
+                return -1.0
+
+            if polarity == 0.0:
+                return 0.0
 
             if macro:
                 event_currency = str(item.get('currency') or '').strip().upper()
-                if fx_like_symbol and event_currency == base_asset:
+                if asset_class in {'fx', 'forex'} and event_currency == base_asset:
                     return polarity
-                if fx_like_symbol and event_currency == quote_asset:
+                if asset_class in {'fx', 'forex'} and event_currency == quote_asset:
                     return -polarity
+                if asset_class == 'crypto':
+                    return polarity * (0.12 if category in {'weakly_indirect', 'sector_related'} else 0.22)
+                if asset_class in {'index', 'metal', 'energy', 'commodity', 'future'}:
+                    return polarity * (0.30 if category == 'relevant_macro' else 0.18)
                 return polarity * 0.2
 
-            if fx_like_symbol:
+            if asset_class in {'fx', 'forex'}:
                 if base_rel > 0.0 and quote_rel > 0.0:
                     side_delta = base_rel - quote_rel
                     if abs(side_delta) >= 0.08:
@@ -1163,33 +1385,53 @@ class NewsAnalystAgent:
                     return -polarity
                 if base_hits > 0 and quote_hits > 0:
                     return polarity * 0.15
+                if category == 'weakly_indirect':
+                    return polarity * 0.15
 
-            text = str(item.get('title') or item.get('event_name') or '')
-            if alias_hits(text, symbol_aliases) > 0:
+            if asset_class == 'crypto':
+                if category in {'direct_pair', 'direct_instrument'}:
+                    return polarity
+                if category == 'sector_related':
+                    return polarity * 0.2
+                return 0.0
+
+            if category in {'direct_instrument', 'relevant_macro'}:
                 return polarity * 0.85
 
-            heuristic_signal, _ = _deterministic_headline_sentiment(f'- {text}', pair=provider_symbol or ctx.pair)
+            if _keyword_hit_count(title, symbol_aliases) > 0:
+                return polarity * 0.85
+
+            heuristic_signal, _ = _deterministic_headline_sentiment(f'- {title}', pair=ctx.pair)
             if heuristic_signal == 'bullish':
                 return 1.0
             if heuristic_signal == 'bearish':
                 return -1.0
             return polarity * 0.2
 
-        relevant_news: list[dict[str, Any]] = []
-        relevant_macro: list[dict[str, Any]] = []
+        retained_news: list[dict[str, Any]] = []
+        retained_macro: list[dict[str, Any]] = []
+        rejected_evidence: list[dict[str, Any]] = []
         directional_sum = 0.0
         weight_sum = 0.0
         bullish_weight = 0.0
         bearish_weight = 0.0
 
         for item in valid_news:
-            enriched = dict(item)
-            inferred = infer_relevance_fields(enriched, macro=False)
-            enriched.update(inferred)
+            enriched = {**dict(item), **_news_evidence_profile(item, pair=ctx.pair, provider_symbol=provider_symbol, macro=False)}
             enriched.setdefault('type', 'article')
-            weight = evidence_weight(enriched, macro=False)
-            if weight < min_relevance:
+            if _safe_float(enriched.get('final_pair_relevance'), 0.0) < min_relevance:
+                rejected_evidence.append(
+                    {
+                        'provider': enriched.get('provider'),
+                        'type': 'article',
+                        'title': enriched.get('title'),
+                        'relevance_category': enriched.get('relevance_category'),
+                        'final_pair_relevance': enriched.get('final_pair_relevance'),
+                        'reason': 'below_pair_relevance_threshold',
+                    }
+                )
                 continue
+            weight = evidence_weight(enriched, macro=False)
             sign = evidence_sign(enriched, macro=False)
             contribution = sign * weight
             directional_sum += contribution
@@ -1198,16 +1440,24 @@ class NewsAnalystAgent:
                 bullish_weight += contribution
             elif contribution < 0:
                 bearish_weight += abs(contribution)
-            relevant_news.append(enriched)
+            retained_news.append(enriched)
 
         for item in valid_macro_events:
-            enriched = dict(item)
-            inferred = infer_relevance_fields(enriched, macro=True)
-            enriched.update(inferred)
+            enriched = {**dict(item), **_news_evidence_profile(item, pair=ctx.pair, provider_symbol=provider_symbol, macro=True)}
             enriched.setdefault('type', 'macro_event')
-            weight = evidence_weight(enriched, macro=True)
-            if weight < min_relevance:
+            if _safe_float(enriched.get('final_pair_relevance'), 0.0) < min_relevance:
+                rejected_evidence.append(
+                    {
+                        'provider': enriched.get('provider'),
+                        'type': 'macro_event',
+                        'event_name': enriched.get('event_name'),
+                        'relevance_category': enriched.get('relevance_category'),
+                        'final_pair_relevance': enriched.get('final_pair_relevance'),
+                        'reason': 'below_pair_relevance_threshold',
+                    }
+                )
                 continue
+            weight = evidence_weight(enriched, macro=True)
             sign = evidence_sign(enriched, macro=True)
             contribution = sign * weight
             directional_sum += contribution
@@ -1216,9 +1466,48 @@ class NewsAnalystAgent:
                 bullish_weight += contribution
             elif contribution < 0:
                 bearish_weight += abs(contribution)
-            relevant_macro.append(enriched)
+            retained_macro.append(enriched)
 
+        retained_news.sort(
+            key=lambda item: (
+                _safe_float(item.get('final_pair_relevance'), 0.0),
+                _safe_float(item.get('freshness_score'), 0.0),
+                _safe_float(item.get('credibility_score'), 0.0),
+            ),
+            reverse=True,
+        )
+        retained_macro.sort(
+            key=lambda item: (
+                _safe_float(item.get('final_pair_relevance'), 0.0),
+                _safe_float(item.get('freshness_score'), 0.0),
+                _safe_float(item.get('credibility_score'), 0.0),
+            ),
+            reverse=True,
+        )
+
+        relevant_news = retained_news
+        relevant_macro = retained_macro
         relevant_total = len(relevant_news) + len(relevant_macro)
+        directional_evidence_count = sum(
+            1
+            for item in (relevant_news + relevant_macro)
+            if bool(item.get('directional_eligible')) and _safe_float(item.get('final_pair_relevance'), 0.0) >= min_directional_relevance
+        )
+        has_compelling_single_evidence = any(
+            str(item.get('relevance_category') or '') in {
+                'direct_pair',
+                'direct_primary_asset',
+                'direct_secondary_asset',
+                'direct_instrument',
+            }
+            and bool(item.get('directional_eligible'))
+            and _safe_float(item.get('final_pair_relevance'), 0.0) >= max(min_directional_relevance, 0.60)
+            for item in (relevant_news + relevant_macro)
+        )
+        strongest_relevance = max(
+            (_safe_float(item.get('final_pair_relevance'), 0.0) for item in (relevant_news + relevant_macro)),
+            default=0.0,
+        )
         mixed_signals = bullish_weight > 0.15 and bearish_weight > 0.15 and abs(directional_sum) <= max(weight_sum * 0.2, 0.08)
         directional_edge = directional_sum / weight_sum if weight_sum > 0.0 else 0.0
         score = round(_clamp(directional_edge, -1.0, 1.0), 3)
@@ -1244,11 +1533,15 @@ class NewsAnalystAgent:
         if relevant_total == 0:
             confidence = 0.08
         else:
-            coverage_component = {'low': 0.28, 'medium': 0.45, 'high': 0.62}.get(coverage, 0.28)
-            edge_component = min(abs(score), 1.0) * 0.30
-            confidence = _clamp(coverage_component + edge_component, 0.08, 0.95)
+            average_relevance = sum(_safe_float(item.get('final_pair_relevance'), 0.0) for item in (relevant_news + relevant_macro)) / max(relevant_total, 1)
+            coverage_component = {'low': 0.14, 'medium': 0.22, 'high': 0.30}.get(coverage, 0.14)
+            quality_component = average_relevance * 0.35 + strongest_relevance * 0.20
+            edge_component = min(abs(score), 1.0) * 0.20
+            confidence = _clamp(0.08 + coverage_component + quality_component + edge_component, 0.08, 0.92)
             if mixed_signals:
-                confidence = _clamp(confidence * 0.7, 0.08, 0.95)
+                confidence = _clamp(confidence * 0.75, 0.08, 0.92)
+            if directional_evidence_count == 0:
+                confidence = min(confidence, 0.22)
         confidence = round(confidence, 3)
 
         if fetch_status == 'error' and relevant_total == 0:
@@ -1256,30 +1549,35 @@ class NewsAnalystAgent:
             information_state = 'provider_failure'
             decision_mode = 'source_degraded'
             reason = 'All enabled news providers failed to return usable evidence'
-            summary = 'News providers failed during collection; the news analyst contributes no directional edge.'
+            summary = _format_news_summary('neutral', 'Les providers news ont échoué; aucun signal directionnel exploitable n’est retenu pour cet instrument.')
         elif relevant_total == 0:
             degraded = False
             information_state = 'no_recent_news'
             decision_mode = 'no_evidence'
             reason = 'No recent relevant news or macro events were available from enabled providers'
-            summary = 'No fresh relevant news evidence was found; the news analyst contributes no directional bias.'
+            summary = _format_news_summary('neutral', 'Aucune news pertinente exploitable n’a été retenue pour cet instrument.')
             score = 0.0
             signal = 'neutral'
         elif mixed_signals:
             degraded = False
             information_state = 'mixed_signals'
             decision_mode = 'neutral_from_mixed_news'
-            reason = 'Enabled providers returned mixed base-vs-quote directional catalysts with no dominant edge'
-            summary = 'News and macro evidence were mixed; no clean directional bias was retained.'
+            reason = 'Enabled providers returned mixed directional catalysts with no dominant instrument effect'
+            summary = _format_news_summary('neutral', 'Les évidences news sont mixtes; aucun biais directionnel fiable n’est retenu pour cet instrument.')
             signal = 'neutral'
             score = round(score * 0.35, 3)
-        elif coverage == 'low':
+        elif (
+            directional_evidence_count == 0
+            or strongest_relevance < min_directional_relevance
+            or (coverage == 'low' and not has_compelling_single_evidence)
+        ):
             degraded = False
             information_state = 'insufficient_relevance'
-            decision_mode = 'neutral_from_low_relevance' if signal == 'neutral' else 'directional'
-            reason = 'Evidence relevance remained low after filtering by pair proximity and freshness'
-            summary = 'Only low-coverage relevant evidence was available; directional conviction is reduced.'
-            score = round(score * 0.55, 3)
+            decision_mode = 'neutral_from_low_relevance'
+            reason = 'Evidence relevance remained low after filtering by instrument proximity and freshness'
+            summary = _format_news_summary('neutral', 'Les évidences retenues restent trop indirectes pour confirmer un biais directionnel fiable sur cet instrument.')
+            signal = 'neutral'
+            score = round(score * 0.20, 3)
         else:
             degraded = False
             if relevant_macro and not relevant_news:
@@ -1289,12 +1587,21 @@ class NewsAnalystAgent:
             else:
                 information_state = 'clear_directional_bias'
             decision_mode = 'directional'
-            reason = 'Relevant news and macro evidence produced a directional edge'
-            summary = 'News evidence produced a directional edge with controlled confidence.'
+            reason = 'Relevant news and macro evidence produced a directional effect on the instrument'
+            summary = _format_news_summary(signal, 'Les évidences news retenues produisent un biais directionnel exploitable sur cet instrument.')
+            if coverage == 'low':
+                confidence = min(confidence, 0.55)
 
         evidence_strength = round(
             _clamp(
-                abs(score) * _clamp(relevant_total / 6.0, 0.0, 1.0),
+                (
+                    min(abs(score), 1.0) * 0.25
+                    + strongest_relevance * 0.40
+                    + (
+                        sum(_safe_float(item.get('final_pair_relevance'), 0.0) for item in (relevant_news + relevant_macro))
+                        / max(relevant_total, 1)
+                    ) * 0.35
+                ),
                 0.0,
                 1.0,
             ),
@@ -1313,26 +1620,32 @@ class NewsAnalystAgent:
         user = ''
 
         if not llm_enabled and relevant_total > 0:
-            summary = 'LLM disabled for news-analyst. Deterministic skill-aware fallback used.'
             llm_skipped_reason = 'llm_disabled'
 
         llm_tie_breaker_mode = bool(
             decision_mode == 'neutral_from_mixed_news'
             and coverage in {'medium', 'high'}
-            and relevant_total >= 4
+            and directional_evidence_count >= 2
+        )
+        llm_low_coverage_mode = bool(
+            coverage == 'low'
+            and decision_mode == 'directional'
+            and (has_compelling_single_evidence or directional_evidence_count >= 2)
+            and abs(score) >= 0.25
         )
         should_call_llm = (
             llm_enabled
             and not degraded
             and decision_mode in {'directional', 'neutral_from_mixed_news'}
-            and coverage in {'medium', 'high'}
+            and (coverage in {'medium', 'high'} or llm_low_coverage_mode)
             and (evidence_strength >= llm_min_evidence_strength or llm_tie_breaker_mode)
+            and directional_evidence_count > 0
             and not self._is_llm_circuit_open()
         )
         if llm_enabled and not should_call_llm and llm_skipped_reason is None:
             if degraded:
                 llm_skipped_reason = 'source_degraded'
-            elif coverage not in {'medium', 'high'}:
+            elif coverage not in {'medium', 'high'} and not llm_low_coverage_mode:
                 llm_skipped_reason = f'coverage_{coverage}'
             elif self._is_llm_circuit_open():
                 llm_skipped_reason = 'llm_circuit_open'
@@ -1343,35 +1656,52 @@ class NewsAnalystAgent:
         if should_call_llm:
             llm_call_attempted = True
             evidence_lines: list[str] = []
-            for item in (relevant_news[:4] + relevant_macro[:2]):
+            for item in (relevant_news[:max_llm_news_items] + relevant_macro[:2]):
                 if item.get('type') == 'macro_event':
                     evidence_lines.append(
-                        f"- [macro] {item.get('event_name')} ({item.get('currency')}) importance={item.get('importance')}"
+                        f"- [macro] {item.get('event_name')} ({item.get('currency')})"
+                        f" cat={item.get('relevance_category')} rel={item.get('final_pair_relevance')}"
+                        f" importance={item.get('importance')}"
+                        f" pair_effect={item.get('pair_directional_effect') or 'neutral'}"
                     )
                 else:
                     title = _compact_prompt_text(item.get('title'), max_chars=170)
-                    summary = _compact_prompt_text(
+                    item_summary = _compact_prompt_text(
                         item.get('summary') or item.get('description'),
                         max_chars=220,
                     )
                     published = str(item.get('published_at') or item.get('published') or '').strip()
                     published_short = published[:10] if published else 'na'
-                    pair_rel = round(_clamp(_safe_float(item.get('pair_relevance'), 0.0), 0.0, 1.0), 2)
+                    pair_rel = round(_clamp(_safe_float(item.get('final_pair_relevance'), 0.0), 0.0, 1.0), 2)
                     hint = str(item.get('sentiment_hint') or 'unknown').strip().lower() or 'unknown'
+                    pair_effect = str(item.get('pair_directional_effect') or 'neutral').strip().lower() or 'neutral'
                     evidence_lines.append(
-                        f"- [news] {title} (date={published_short}, rel={pair_rel}, hint={hint}) | {summary or 'no summary'}"
+                        f"- [news] {title} (date={published_short}, rel={pair_rel}, cat={item.get('relevance_category')}, hint={hint}, pair_effect={pair_effect})"
+                        f" | {item_summary or 'no summary'}"
                     )
             evidence_text = '\n'.join(evidence_lines) or '- none'
 
             fallback_system = (
                 'Tu es un analyste news multi-actifs. '
-                'Confirme ou invalide un biais directionnel en restant strict et concis.'
+                'N invente jamais de causalité. '
+                'Tu dois garder cohérents le résumé, le signal et la force du signal. '
+                'Raisonne d abord sur l instrument analysé; pour le FX seulement, sépare impact sur actif principal et actif de référence avant de conclure sur la paire. '
+                'Distingue strictement no_signal, weak_signal et directional_signal.'
             )
             fallback_user = (
-                'Pair: {pair}\nTimeframe: {timeframe}\nCoverage: {coverage}\n'
+                'Instrument: {pair}\nDisplay symbol: {display_symbol}\nAsset class: {asset_class}\nInstrument type: {instrument_type}\n'
+                'Primary asset: {primary_asset}\nSecondary asset: {secondary_asset}\nTimeframe: {timeframe}\nCoverage: {coverage}\n'
                 'Signal déterministe initial: {signal}\nScore initial: {score}\n'
-                'Titres:\n{headlines}\n'
-                'Réponds sur une seule ligne: bullish|bearish|neutral puis une justification <=20 mots.'
+                'Evidences retenues:\n{headlines}\n'
+                'Règles du contrat:\n'
+                '- Pour le FX, interprète d abord l effet probable sur l actif principal et sur l actif de référence, puis convertis ensuite en biais sur la paire.\n'
+                '- Pour les autres classes d actifs, raisonne sur l instrument lui-même, son sous-jacent ou son secteur si ces éléments sont réellement présents.\n'
+                '- Si aucune évidence n est directement exploitable pour l instrument, retourne neutral.\n'
+                '- Si les évidences sont seulement faibles ou indirectes, retourne neutral.\n'
+                '- Première ligne obligatoire: bullish, bearish ou neutral.\n'
+                '- Deuxième ligne: case=no_signal|weak_signal|directional_signal.\n'
+                '- Troisième ligne max: justification courte reliant les évidences à l instrument.\n'
+                '- Ne déclare jamais bullish/bearish si le texte conclut à aucune news pertinente.'
             )
             if db is not None:
                 prompt_info = self.prompt_service.render(
@@ -1380,8 +1710,12 @@ class NewsAnalystAgent:
                     fallback_system=fallback_system,
                     fallback_user=fallback_user,
                     variables={
+                        **instrument_vars,
                         'pair': ctx.pair,
                         'timeframe': ctx.timeframe,
+                        'asset_class': asset_class,
+                        'base_asset': base_asset or 'N/A',
+                        'quote_asset': quote_asset or 'N/A',
                         'coverage': coverage,
                         'signal': signal,
                         'score': score,
@@ -1394,15 +1728,20 @@ class NewsAnalystAgent:
                 user = prompt_info['user_prompt']
             else:
                 system = fallback_system
-                user = fallback_user.format(
-                    pair=ctx.pair,
-                    timeframe=ctx.timeframe,
-                    coverage=coverage,
-                    signal=signal,
-                    score=score,
-                    headlines=evidence_text,
-                    evidence=evidence_text,
-                )
+                user = fallback_user.format(**_merge_prompt_variables(
+                    instrument_vars,
+                    {
+                        'timeframe': ctx.timeframe,
+                        'asset_class': asset_class,
+                        'base_asset': base_asset or 'N/A',
+                        'quote_asset': quote_asset or 'N/A',
+                        'coverage': coverage,
+                        'signal': signal,
+                        'score': score,
+                        'headlines': evidence_text,
+                        'evidence': evidence_text,
+                    },
+                ))
             system, user = _optimize_news_prompts_for_latency(system, user)
             system, user = _apply_mode_prompt_guidance(
                 system,
@@ -1440,8 +1779,12 @@ class NewsAnalystAgent:
                 llm_signal = _parse_signal_from_text(llm_text)
                 llm_bias = {'bullish': 0.08, 'bearish': -0.08, 'neutral': 0.0}[llm_signal]
                 score = round(_clamp(score * 0.9 + llm_bias * 0.1, -1.0, 1.0), 3)
-                if llm_signal in {'bullish', 'bearish'} and signal == 'neutral':
+                if llm_signal == 'neutral':
+                    signal = 'neutral'
+                elif llm_signal in {'bullish', 'bearish'} and signal == 'neutral' and strongest_relevance >= min_directional_relevance:
                     signal = llm_signal
+                    if decision_mode == 'neutral_from_mixed_news' and directional_evidence_count >= 2:
+                        score = 0.12 if llm_signal == 'bullish' else -0.12
                 # Keep the reported signal and score directionally coherent for traceability.
                 if signal == 'bullish' and score <= 0.0:
                     score = round(max(abs(score), 0.01), 3)
@@ -1454,7 +1797,8 @@ class NewsAnalystAgent:
                 llm_fallback_used = True
                 if not llm_summary.strip():
                     llm_summary = _build_empty_llm_summary(llm_res, retried=llm_retry_used)
-                summary = 'LLM degraded for news-analyst. Deterministic skill-aware fallback used.'
+                if llm_degraded:
+                    summary = 'LLM degraded for news-analyst. Deterministic skill-aware fallback used.'
                 self._record_llm_failure(
                     threshold=llm_circuit_failure_threshold,
                     open_seconds=llm_circuit_open_seconds,
@@ -1474,7 +1818,19 @@ class NewsAnalystAgent:
                         'importance': item.get('importance'),
                         'published_at': item.get('published_at'),
                         'pair_relevance': item.get('pair_relevance'),
+                        'final_pair_relevance': item.get('final_pair_relevance'),
+                        'relevance_category': item.get('relevance_category'),
+                        'instrument_type': item.get('instrument_type'),
+                        'primary_asset': item.get('primary_asset'),
+                        'secondary_asset': item.get('secondary_asset'),
                         'directional_hint': item.get('directional_hint'),
+                        'instrument_directional_effect': item.get('instrument_directional_effect'),
+                        'instrument_bias_score': item.get('instrument_bias_score'),
+                        'impacted_assets': item.get('impacted_assets'),
+                        'impacted_currencies': item.get('impacted_currencies'),
+                        'impact_on_base': item.get('impact_on_base'),
+                        'impact_on_quote': item.get('impact_on_quote'),
+                        'pair_directional_effect': item.get('pair_directional_effect'),
                     }
                 )
             else:
@@ -1490,7 +1846,21 @@ class NewsAnalystAgent:
                         'publisher': item.get('publisher') or item.get('source_name'),
                         'source_name': item.get('source_name') or item.get('publisher'),
                         'pair_relevance': item.get('pair_relevance'),
+                        'final_pair_relevance': item.get('final_pair_relevance'),
+                        'relevance_category': item.get('relevance_category'),
+                        'instrument_type': item.get('instrument_type'),
+                        'primary_asset': item.get('primary_asset'),
+                        'secondary_asset': item.get('secondary_asset'),
+                        'asset_symbols_detected': item.get('asset_symbols_detected'),
+                        'macro_tags': item.get('macro_tags'),
                         'sentiment_hint': item.get('sentiment_hint'),
+                        'instrument_directional_effect': item.get('instrument_directional_effect'),
+                        'instrument_bias_score': item.get('instrument_bias_score'),
+                        'impacted_assets': item.get('impacted_assets'),
+                        'impacted_currencies': item.get('impacted_currencies'),
+                        'impact_on_base': item.get('impact_on_base'),
+                        'impact_on_quote': item.get('impact_on_quote'),
+                        'pair_directional_effect': item.get('pair_directional_effect'),
                     }
                 )
 
@@ -1507,8 +1877,26 @@ class NewsAnalystAgent:
             'summary': summary,
             'news_count': len(valid_news),
             'macro_event_count': len(valid_macro_events),
+            'retained_news_count': len(relevant_news),
+            'retained_macro_event_count': len(relevant_macro),
             'provider_status': provider_status,
+            'instrument': instrument_context['instrument_dict'],
             'evidence': top_evidence,
+            'selection_trace': {
+                'instrument': instrument_context['instrument_dict'],
+                'collected_news_count': len(valid_news),
+                'collected_macro_event_count': len(valid_macro_events),
+                'retained_news_count': len(relevant_news),
+                'retained_macro_event_count': len(relevant_macro),
+                'rejected': rejected_evidence[:max_debug_rejected_items],
+                'providers_contributing': sorted(
+                    {
+                        str(item.get('provider') or '').strip()
+                        for item in (relevant_news + relevant_macro)
+                        if str(item.get('provider') or '').strip()
+                    }
+                ),
+            },
             'provider_symbol': provider_symbol,
             'provider_reason': provider_reason,
             'provider_symbols_scanned': provider_symbols_scanned,
@@ -1528,6 +1916,12 @@ class NewsAnalystAgent:
                 'skills_count': len(resolved_skills),
             },
         }
+        output = _validate_news_output(
+            output,
+            selected_evidence=relevant_news + relevant_macro,
+            rejected_evidence=rejected_evidence,
+            min_directional_relevance=min_directional_relevance,
+        )
         _enrich_prompt_meta_debug(
             output['prompt_meta'],
             runtime_skills=resolved_skills,
@@ -1802,6 +2196,7 @@ class MarketContextAnalystAgent:
 
     def run(self, ctx: AgentContext, db: Session | None = None) -> dict[str, Any]:
         output = self._build_structured_context(ctx.market_snapshot)
+        instrument_vars = build_instrument_prompt_variables(ctx.pair)
         llm_enabled = self.model_selector.is_enabled(db, self.name)
         runtime_skills = _resolve_runtime_skills(self.model_selector, db, self.name)
         llm_model = _resolve_llm_model(ctx, self.model_selector, db, self.name)
@@ -1848,12 +2243,13 @@ class MarketContextAnalystAgent:
                 'Keep analysis cautious and concise.'
             )
             fallback_user = (
-                'Pair: {pair}\nTimeframe: {timeframe}\nTrend: {trend}\nLast price: {last_price}\n'
+                'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nTrend: {trend}\nLast price: {last_price}\n'
                 'Change pct: {change_pct}\nATR: {atr}\nATR ratio: {atr_ratio}\nRSI: {rsi}\n'
                 'EMA fast: {ema_fast}\nEMA slow: {ema_slow}\n'
                 'Return only one concise context note (no trading instruction).'
             )
             variables = {
+                **instrument_vars,
                 'pair': ctx.pair,
                 'timeframe': ctx.timeframe,
                 'trend': ctx.market_snapshot.get('trend'),
@@ -1938,6 +2334,7 @@ class BullishResearcherAgent:
 
     def run(self, ctx: AgentContext, agent_outputs: dict[str, dict[str, Any]], db: Session | None = None) -> dict[str, Any]:
         debate_inputs = _compact_outputs_for_debate(agent_outputs)
+        instrument_vars = build_instrument_prompt_variables(ctx.pair)
         arguments = []
         for name, output in debate_inputs.items():
             if output.get('score', 0) > 0:
@@ -1945,19 +2342,21 @@ class BullishResearcherAgent:
 
         confidence = round(min(sum(max(v.get('score', 0), 0) for v in debate_inputs.values()), 1.0), 3)
         fallback_system = (
-            'Tu es un chercheur de marché haussier multi-actifs. Construis la meilleure thèse haussière à partir des preuves. '
+            'Tu es un chercheur de marché haussier multi-actifs. Construis la meilleure thèse haussière à partir des preuves, sans inventer de données externes absentes du payload. '
             'Réponds en français.'
         )
         fallback_user = (
-            'Pair: {pair}\nTimeframe: {timeframe}\nSignals: {signals_json}\n'
+            'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nSignals: {signals_json}\n'
             "Mémoire long-terme:\n{memory_context}\nProduit des arguments haussiers concis et des risques d'invalidation."
         )
-        fallback_user_rendered = fallback_user.format(
-            pair=ctx.pair,
-            timeframe=ctx.timeframe,
-            signals_json=json.dumps(debate_inputs, ensure_ascii=True),
-            memory_context='\n'.join(f"- {m.get('summary', '')}" for m in ctx.memory_context) or '- none',
-        )
+        fallback_user_rendered = fallback_user.format(**_merge_prompt_variables(
+            instrument_vars,
+            {
+                'timeframe': ctx.timeframe,
+                'signals_json': json.dumps(debate_inputs, ensure_ascii=True),
+                'memory_context': '\n'.join(f"- {m.get('summary', '')}" for m in ctx.memory_context) or '- none',
+            },
+        ))
 
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
         llm_enabled = self.model_selector.is_enabled(db, self.name)
@@ -1974,6 +2373,7 @@ class BullishResearcherAgent:
                 fallback_system=fallback_system,
                 fallback_user=fallback_user,
                 variables={
+                    **instrument_vars,
                     'pair': ctx.pair,
                     'timeframe': ctx.timeframe,
                     'signals_json': json.dumps(debate_inputs, ensure_ascii=True),
@@ -2029,6 +2429,7 @@ class BearishResearcherAgent:
 
     def run(self, ctx: AgentContext, agent_outputs: dict[str, dict[str, Any]], db: Session | None = None) -> dict[str, Any]:
         debate_inputs = _compact_outputs_for_debate(agent_outputs)
+        instrument_vars = build_instrument_prompt_variables(ctx.pair)
         arguments = []
         for name, output in debate_inputs.items():
             if output.get('score', 0) < 0:
@@ -2036,19 +2437,21 @@ class BearishResearcherAgent:
 
         confidence = round(min(abs(sum(min(v.get('score', 0), 0) for v in debate_inputs.values())), 1.0), 3)
         fallback_system = (
-            'Tu es un chercheur de marché baissier multi-actifs. Construis la meilleure thèse baissière à partir des preuves. '
+            'Tu es un chercheur de marché baissier multi-actifs. Construis la meilleure thèse baissière à partir des preuves, sans inventer de données externes absentes du payload. '
             'Réponds en français.'
         )
         fallback_user = (
-            'Pair: {pair}\nTimeframe: {timeframe}\nSignals: {signals_json}\n'
+            'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nSignals: {signals_json}\n'
             "Mémoire long-terme:\n{memory_context}\nProduit des arguments baissiers concis et des risques d'invalidation."
         )
-        fallback_user_rendered = fallback_user.format(
-            pair=ctx.pair,
-            timeframe=ctx.timeframe,
-            signals_json=json.dumps(debate_inputs, ensure_ascii=True),
-            memory_context='\n'.join(f"- {m.get('summary', '')}" for m in ctx.memory_context) or '- none',
-        )
+        fallback_user_rendered = fallback_user.format(**_merge_prompt_variables(
+            instrument_vars,
+            {
+                'timeframe': ctx.timeframe,
+                'signals_json': json.dumps(debate_inputs, ensure_ascii=True),
+                'memory_context': '\n'.join(f"- {m.get('summary', '')}" for m in ctx.memory_context) or '- none',
+            },
+        ))
 
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
         llm_enabled = self.model_selector.is_enabled(db, self.name)
@@ -2065,6 +2468,7 @@ class BearishResearcherAgent:
                 fallback_system=fallback_system,
                 fallback_user=fallback_user,
                 variables={
+                    **instrument_vars,
                     'pair': ctx.pair,
                     'timeframe': ctx.timeframe,
                     'signals_json': json.dumps(debate_inputs, ensure_ascii=True),
@@ -2126,6 +2530,7 @@ class TraderAgent:
         bearish: dict[str, Any],
         db: Session | None = None,
     ) -> dict[str, Any]:
+        instrument_vars = build_instrument_prompt_variables(ctx.pair)
         news_output_name: str | None = None
         news_output: dict[str, Any] | None = None
         if isinstance(agent_outputs.get('news-analyst'), dict):
@@ -2270,13 +2675,22 @@ class TraderAgent:
         if preliminary_signal in {'bullish', 'bearish'} and directional_total > 0:
             aligned_preliminary = len(directional_sources[preliminary_signal])
             opposing_preliminary = directional_total - aligned_preliminary
-            source_alignment_score = (aligned_preliminary - opposing_preliminary) / float(directional_total)
+            raw_alignment = (aligned_preliminary - opposing_preliminary) / float(directional_total)
+            coverage_factor = min(aligned_preliminary / 2.0, 1.0)
+            independence_count = len(independent_sources.get(preliminary_signal, []))
+            if aligned_preliminary <= 1 and independence_count == 0:
+                independence_factor = 0.45
+            elif independence_count == 0:
+                independence_factor = 0.8
+            else:
+                independence_factor = min(0.65 + independence_count * 0.2, 1.0)
+            source_alignment_score = raw_alignment * coverage_factor * independence_factor
         elif (
             preliminary_signal in {'bullish', 'bearish'}
             and technical_signal == preliminary_signal
             and abs(technical_score) >= 0.10
         ):
-            source_alignment_score = 1.0
+            source_alignment_score = 0.22
 
         debate_sign = 1.0 if preliminary_signal == 'bullish' else -1.0 if preliminary_signal == 'bearish' else 0.0
         debate_score = round(debate_sign * source_alignment_score * 0.12, 3)
@@ -2423,8 +2837,36 @@ class TraderAgent:
             confidence = _clamp(confidence + memory_confidence_adjustment_applied, 0.0, 1.0)
         else:
             memory_confidence_adjustment_applied = 0.0
+        single_directional_source = bool(
+            candidate_signal in {'bullish', 'bearish'}
+            and aligned_source_count == 1
+            and independent_aligned_count == 0
+        )
+        single_directional_source_penalty_applied = False
+        if single_directional_source:
+            confidence_cap = {
+                'conservative': 0.42,
+                'balanced': 0.48,
+                'permissive': 0.44,
+            }.get(policy.mode, 0.48)
+            confidence_cap = max(min_confidence, round(confidence_cap * confidence_multiplier, 3))
+            if confidence > confidence_cap:
+                confidence = confidence_cap
+                single_directional_source_penalty_applied = True
         confidence = round(float(confidence), 3)
         edge_strength = round(float(edge_strength), 3)
+
+        if candidate_signal in {'bullish', 'bearish'}:
+            if aligned_source_count >= 3 or independent_aligned_count >= 2:
+                consensus_strength = 'strong'
+            elif aligned_source_count >= 2:
+                consensus_strength = 'moderate'
+            elif aligned_source_count == 1:
+                consensus_strength = 'weak'
+            else:
+                consensus_strength = 'none'
+        else:
+            consensus_strength = 'none'
 
         technical_single_source_override = bool(
             policy.allow_technical_single_source_override
@@ -2611,6 +3053,7 @@ class TraderAgent:
             'decision': decision,
             'confidence': confidence,
             'decision_confidence': confidence,
+            'consensus_strength': consensus_strength,
             'edge_strength': edge_strength,
             'evidence_quality': evidence_quality,
             'raw_net_score': raw_net_score,
@@ -2648,6 +3091,8 @@ class TraderAgent:
             'memory_signal': memory_signal_output,
             'decision_gates': gate_reasons,
             'uncertainty_level': uncertainty_level,
+            'single_directional_source': single_directional_source,
+            'single_directional_source_penalty_applied': single_directional_source_penalty_applied,
             'needs_follow_up': needs_follow_up,
             'follow_up_reason': follow_up_reason,
             'evidence_strength': round(evidence_quality, 3),
@@ -2670,6 +3115,7 @@ class TraderAgent:
                 'news_score_raw': round(news_score_raw, 4),
                 'news_score_effective': round(float(news_score_effective), 4),
                 'source_consensus_score': round(source_alignment_score, 3),
+                'consensus_strength': consensus_strength,
                 'debate_score': debate_score,
                 'raw_combined_score': raw_combined_score,
                 'combined_score_before_memory': round(combined_score_before_memory, 3),
@@ -2721,6 +3167,8 @@ class TraderAgent:
                 'independent_directional_sources': independent_sources.get(candidate_signal, []),
                 'independent_directional_source_count': independent_aligned_count,
                 'independent_directional_strength': round(independent_aligned_strength, 3),
+                'single_directional_source': single_directional_source,
+                'single_directional_source_penalty_applied': single_directional_source_penalty_applied,
                 'evidence_source_requirement_bypassed': permissive_technical_override and not evidence_source_ok,
                 'min_combined_score': min_combined_score,
                 'min_confidence': min_confidence,
@@ -2766,7 +3214,7 @@ class TraderAgent:
 
         fallback_system = "Tu es un assistant trader multi-actifs. Résume la justification finale en note d'exécution compacte."
         fallback_user = (
-            "Pair: {pair}\nTimeframe: {timeframe}\nDecision: {decision}\nEntry: {entry}\nStop loss: {stop_loss}\n"
+            "Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nDecision: {decision}\nEntry: {entry}\nStop loss: {stop_loss}\n"
             "Take profit: {take_profit}\nConfidence: {confidence}\nBullish: {bullish_args}\n"
             "Bearish: {bearish_args}\nNotes de risque: {risk_notes}\nNet score: {net_score}\nCombined score: {combined_score}\n"
             "Rédige uniquement une note compacte fidèle aux paramètres fournis. N'invente ni nouveaux niveaux, ni nouvelle décision."
@@ -2779,6 +3227,7 @@ class TraderAgent:
                 fallback_system=fallback_system,
                 fallback_user=fallback_user,
                 variables={
+                    **instrument_vars,
                     'pair': ctx.pair,
                     'timeframe': ctx.timeframe,
                     'decision': decision,
@@ -2817,40 +3266,42 @@ class TraderAgent:
             user_prompt = prompt_info['user_prompt']
         else:
             system_prompt = fallback_system
-            user_prompt = fallback_user.format(
-                pair=ctx.pair,
-                timeframe=ctx.timeframe,
-                decision=decision,
-                entry=last_price,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-                confidence=confidence,
-                bullish_args=json.dumps(bullish.get('arguments', []), ensure_ascii=True),
-                bearish_args=json.dumps(bearish.get('arguments', []), ensure_ascii=True),
-                risk_notes=json.dumps(
-                    [
-                        f'decision_mode={decision_mode}',
-                        f'net_score={net_score}',
-                        f'raw_net_score={raw_net_score}',
-                        f'news_coverage={news_coverage}',
-                        f'news_weight_multiplier={round(news_weight_multiplier, 3)}',
-                        f'debate_score={debate_score}',
-                        f'combined_score={combined_score}',
-                        f'combined_score_before_memory={combined_score_before_memory}',
-                        f'strong_conflict={strong_conflict}',
-                        f'low_edge={low_edge}',
-                        f'contradiction_level={contradiction_level}',
-                        f'memory_used={memory_signal_used}',
-                        f'memory_score_adjustment_applied={round(memory_score_adjustment_applied, 4)}',
-                        f'memory_confidence_adjustment_applied={round(memory_confidence_adjustment_applied, 4)}',
-                        f'memory_risk_block={memory_risk_block}',
-                        f'execution_allowed={execution_allowed}',
-                    ],
-                    ensure_ascii=True,
-                ),
-                net_score=net_score,
-                combined_score=combined_score,
-            )
+            user_prompt = fallback_user.format(**_merge_prompt_variables(
+                instrument_vars,
+                {
+                    'timeframe': ctx.timeframe,
+                    'decision': decision,
+                    'entry': last_price,
+                    'stop_loss': stop_loss,
+                    'take_profit': take_profit,
+                    'confidence': confidence,
+                    'bullish_args': json.dumps(bullish.get('arguments', []), ensure_ascii=True),
+                    'bearish_args': json.dumps(bearish.get('arguments', []), ensure_ascii=True),
+                    'risk_notes': json.dumps(
+                        [
+                            f'decision_mode={decision_mode}',
+                            f'net_score={net_score}',
+                            f'raw_net_score={raw_net_score}',
+                            f'news_coverage={news_coverage}',
+                            f'news_weight_multiplier={round(news_weight_multiplier, 3)}',
+                            f'debate_score={debate_score}',
+                            f'combined_score={combined_score}',
+                            f'combined_score_before_memory={combined_score_before_memory}',
+                            f'strong_conflict={strong_conflict}',
+                            f'low_edge={low_edge}',
+                            f'contradiction_level={contradiction_level}',
+                            f'memory_used={memory_signal_used}',
+                            f'memory_score_adjustment_applied={round(memory_score_adjustment_applied, 4)}',
+                            f'memory_confidence_adjustment_applied={round(memory_confidence_adjustment_applied, 4)}',
+                            f'memory_risk_block={memory_risk_block}',
+                            f'execution_allowed={execution_allowed}',
+                        ],
+                        ensure_ascii=True,
+                    ),
+                    'net_score': net_score,
+                    'combined_score': combined_score,
+                },
+            ))
         system_prompt, user_prompt = _apply_mode_prompt_guidance(
             system_prompt,
             user_prompt,

@@ -22,6 +22,40 @@ export interface Run {
   updated_at: string;
 }
 
+export interface InstrumentDescriptor {
+  raw_symbol?: string;
+  canonical_symbol?: string;
+  display_symbol?: string;
+  asset_class?: string;
+  instrument_type?: string;
+  market?: string;
+  provider?: string;
+  provider_symbol?: string;
+  primary_asset?: string;
+  secondary_asset?: string;
+  base_asset?: string;
+  quote_asset?: string;
+  reference_asset?: string;
+  venue?: string;
+  exchange?: string;
+  provider_symbols?: Record<string, unknown>;
+  classification_trace?: unknown;
+  flags?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface ProviderResolutionTrace {
+  provider?: string;
+  provider_symbol?: string;
+  resolved_symbol?: string;
+  canonical_symbol?: string;
+  raw_symbol?: string;
+  resolution_path?: string[];
+  fallback_used?: boolean;
+  status?: string;
+  [key: string]: unknown;
+}
+
 export interface AgentStep {
   id: number;
   agent_name: string;

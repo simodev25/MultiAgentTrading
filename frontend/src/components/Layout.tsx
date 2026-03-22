@@ -16,10 +16,10 @@ export function Layout({ children }: { children: React.ReactNode }) {
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark" aria-hidden>
-            FX
+            MA
           </div>
           <div>
-            <h1>Tauric FX</h1>
+            <h1>Tauric Markets</h1>
             <p>Plateforme Multi-Agent</p>
           </div>
         </div>
@@ -42,9 +42,9 @@ export function Layout({ children }: { children: React.ReactNode }) {
         <header className="topbar">
           <div className="topbar-heading">
             <Link to="/" className="topbar-title">
-              Plateforme Trading Forex
+              Plateforme Trading Multi-Actifs
             </Link>
-            <p className="topbar-subtitle">Dark Premium Control Room</p>
+            <p className="topbar-subtitle">Control Room Multi-Marchés</p>
           </div>
           <div className="topbar-actions">
             <span className="badge role">{user?.role}</span>

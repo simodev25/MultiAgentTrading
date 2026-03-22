@@ -226,6 +226,8 @@ def test_get_market_candles_sdk_skips_empty_symbol_candidate(monkeypatch) -> Non
     assert result.get('degraded') is False
     assert result.get('provider') == 'sdk'
     assert result.get('symbol') == 'EURUSD'
+    assert result.get('instrument', {}).get('canonical_symbol') == 'EURUSD'
+    assert result.get('provider_resolution', {}).get('provider_symbol') == 'EURUSD.PRO'
     assert isinstance(result.get('candles'), list)
     assert len(result['candles']) == 1
     assert 'EURUSD.pro' in result.get('tried_symbols', [])
