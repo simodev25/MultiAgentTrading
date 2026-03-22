@@ -214,6 +214,38 @@ function parseSkillsInput(value: string): string[] {
   return normalizeSkillsList(raw.split(/\n+/));
 }
 
+interface AgentToolToggleRow {
+  tool_id: string;
+  label: string;
+  description: string;
+  enabled_by_default: boolean;
+  enabled_current: boolean;
+}
+
+function parseAgentToolCatalog(value: unknown): AgentToolToggleRow[] {
+  if (!Array.isArray(value)) return [];
+  const rows: AgentToolToggleRow[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const raw = item as Record<string, unknown>;
+    const toolId = typeof raw.tool_id === 'string' ? raw.tool_id.trim() : '';
+    if (!toolId) continue;
+    const key = toolId.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const enabledByDefault = normalizeBooleanSetting(raw.enabled_by_default, true);
+    rows.push({
+      tool_id: toolId,
+      label: typeof raw.label === 'string' && raw.label.trim() ? raw.label.trim() : toolId,
+      description: typeof raw.description === 'string' ? raw.description.trim() : '',
+      enabled_by_default: enabledByDefault,
+      enabled_current: normalizeBooleanSetting(raw.enabled_current, enabledByDefault),
+    });
+  }
+  return rows;
+}
+
 interface EditableSymbolGroup {
   id: string;
   name: string;
@@ -345,6 +377,12 @@ export function ConnectorsPage() {
   const [agentLlmEnabled, setAgentLlmEnabled] = useState<Record<string, boolean>>(
     Object.fromEntries(MODEL_EDIT_AGENTS.map((agent) => [agent, DEFAULT_AGENT_LLM_ENABLED[agent] ?? false])),
   );
+  const [agentToolCatalog, setAgentToolCatalog] = useState<Record<string, AgentToolToggleRow[]>>(
+    Object.fromEntries(MODEL_EDIT_AGENTS.map((agent) => [agent, []])),
+  );
+  const [agentTools, setAgentTools] = useState<Record<string, Record<string, boolean>>>(
+    Object.fromEntries(MODEL_EDIT_AGENTS.map((agent) => [agent, {}])),
+  );
   const [modelChoices, setModelChoices] = useState<string[]>([]);
   const [modelSource, setModelSource] = useState<string>('');
   const [savingModels, setSavingModels] = useState(false);
@@ -393,6 +431,12 @@ export function ConnectorsPage() {
     const rawEnabled = settings.agent_llm_enabled && typeof settings.agent_llm_enabled === 'object'
       ? (settings.agent_llm_enabled as Record<string, unknown>)
       : {};
+    const rawAgentTools = settings.agent_tools && typeof settings.agent_tools === 'object'
+      ? (settings.agent_tools as Record<string, unknown>)
+      : {};
+    const rawAgentToolsCatalog = settings.agent_tools_catalog && typeof settings.agent_tools_catalog === 'object'
+      ? (settings.agent_tools_catalog as Record<string, unknown>)
+      : {};
     const legacyAwareValue = (source: Record<string, unknown>, agentName: string): unknown => {
       if (source[agentName] !== undefined) return source[agentName];
       if (agentName === 'market-context-analyst') {
@@ -405,6 +449,17 @@ export function ConnectorsPage() {
     const next: Record<string, string> = {};
     const nextSkills: Record<string, string[]> = {};
     const nextEnabled: Record<string, boolean> = {};
+    const nextToolCatalog: Record<string, AgentToolToggleRow[]> = {};
+    const nextTools: Record<string, Record<string, boolean>> = {};
+    const parseToolEnabledValue = (value: unknown, fallback: boolean): boolean => {
+      if (value && typeof value === 'object') {
+        const payload = value as Record<string, unknown>;
+        if (payload.enabled_current !== undefined) return normalizeBooleanSetting(payload.enabled_current, fallback);
+        if (payload.enabled !== undefined) return normalizeBooleanSetting(payload.enabled, fallback);
+        if (payload.active !== undefined) return normalizeBooleanSetting(payload.active, fallback);
+      }
+      return normalizeBooleanSetting(value, fallback);
+    };
     MODEL_EDIT_AGENTS.forEach((agentName) => {
       const value = legacyAwareValue(rawMap, agentName);
       next[agentName] = typeof value === 'string' ? value : '';
@@ -426,6 +481,40 @@ export function ConnectorsPage() {
       nextEnabled[agentName] = typeof enabledValue === 'boolean'
         ? enabledValue
         : (DEFAULT_AGENT_LLM_ENABLED[agentName] ?? false);
+
+      const catalogValue = legacyAwareValue(rawAgentToolsCatalog, agentName);
+      const parsedCatalog = parseAgentToolCatalog(catalogValue);
+      const toolsValue = legacyAwareValue(rawAgentTools, agentName);
+      const toolsMap = toolsValue && typeof toolsValue === 'object'
+        ? (toolsValue as Record<string, unknown>)
+        : {};
+
+      const resolvedCatalog = parsedCatalog.length > 0
+        ? parsedCatalog
+        : Object.entries(toolsMap)
+          .map(([toolId, rawTool]) => {
+            const normalizedToolId = String(toolId || '').trim();
+            if (!normalizedToolId) return null;
+            const enabledCurrent = parseToolEnabledValue(rawTool, true);
+            return {
+              tool_id: normalizedToolId,
+              label: normalizedToolId,
+              description: '',
+              enabled_by_default: true,
+              enabled_current: enabledCurrent,
+            } as AgentToolToggleRow;
+          })
+          .filter((row): row is AgentToolToggleRow => row !== null);
+
+      const toolState: Record<string, boolean> = {};
+      resolvedCatalog.forEach((row) => {
+        const rawOverride = toolsMap[row.tool_id];
+        toolState[row.tool_id] = rawOverride === undefined
+          ? row.enabled_current
+          : parseToolEnabledValue(rawOverride, row.enabled_current);
+      });
+      nextToolCatalog[agentName] = resolvedCatalog;
+      nextTools[agentName] = toolState;
     });
 
     setLlmProvider(provider);
@@ -435,6 +524,8 @@ export function ConnectorsPage() {
     setAgentModels(next);
     setAgentSkills(nextSkills);
     setAgentLlmEnabled(nextEnabled);
+    setAgentToolCatalog(nextToolCatalog);
+    setAgentTools(nextTools);
   };
 
   const hydrateSecretFields = (connectorRows: ConnectorConfig[]) => {
@@ -637,6 +728,21 @@ export function ConnectorsPage() {
         .map(([agentName, skills]) => [agentName, normalizeSkillsList(skills ?? [])] as const)
         .filter(([, skills]) => Array.isArray(skills) && skills.length > 0),
     );
+    const cleanedAgentTools = Object.fromEntries(
+      MODEL_EDIT_AGENTS
+        .map((agentName) => {
+          const rows = Array.isArray(agentToolCatalog[agentName]) ? agentToolCatalog[agentName] : [];
+          if (rows.length === 0) return [agentName, {}] as const;
+          const states = Object.fromEntries(
+            rows.map((row) => {
+              const current = agentTools[agentName]?.[row.tool_id];
+              return [row.tool_id, typeof current === 'boolean' ? current : row.enabled_current] as const;
+            }),
+          );
+          return [agentName, states] as const;
+        })
+        .filter(([, toolMap]) => Object.keys(toolMap).length > 0),
+    );
     const existingSettings = (ollama.settings ?? {}) as Record<string, unknown>;
 
     setSavingModels(true);
@@ -651,6 +757,7 @@ export function ConnectorsPage() {
           agent_models: cleanedModels,
           agent_llm_enabled: cleanedEnabled,
           agent_skills: cleanedSkills,
+          agent_tools: cleanedAgentTools,
           memory_context_enabled: memoryContextEnabled,
         },
       });
@@ -1165,6 +1272,7 @@ export function ConnectorsPage() {
                       <th>LLM actif</th>
                       <th>Modèle</th>
                       <th>Skills</th>
+                      <th>Tools runtime</th>
                       <th>LLM effectif</th>
                       <th>Prompt</th>
                     </tr>
@@ -1206,6 +1314,39 @@ export function ConnectorsPage() {
                             : <code>{(agentSkills[agentName] ?? []).length} règle(s)</code>}
                         </td>
                         <td>
+                          {(() => {
+                            const rows = Array.isArray(agentToolCatalog[agentName]) ? agentToolCatalog[agentName] : [];
+                            if (rows.length === 0) return <code>aucun</code>;
+                            return (
+                              <div style={{ display: 'grid', gap: '6px' }}>
+                                {rows.map((row) => (
+                                  <label key={`${agentName}:${row.tool_id}`} style={{ display: 'grid', gap: '2px' }}>
+                                    <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                      <input
+                                        className="ui-switch"
+                                        type="checkbox"
+                                        checked={Boolean(agentTools[agentName]?.[row.tool_id] ?? row.enabled_current)}
+                                        onChange={(e) => {
+                                          const checked = e.target.checked;
+                                          setAgentTools((prev) => ({
+                                            ...prev,
+                                            [agentName]: {
+                                              ...(prev[agentName] ?? {}),
+                                              [row.tool_id]: checked,
+                                            },
+                                          }));
+                                        }}
+                                      />
+                                      <code>{row.label}</code>
+                                    </span>
+                                    {row.description && <small>{row.description}</small>}
+                                  </label>
+                                ))}
+                              </div>
+                            );
+                          })()}
+                        </td>
+                        <td>
                           {NON_SWITCHABLE_LLM_AGENTS.has(agentName) ? <code>-</code> : <code>{effectiveModelFor(agentName)}</code>}
                         </td>
                         <td>
@@ -1233,6 +1374,9 @@ export function ConnectorsPage() {
                 </table>
                 <p className="model-source">
                   Les skills se modifient dans l’éditeur prompt ci-dessous, puis s’enregistrent via “Enregistrer skills de l’agent”.
+                </p>
+                <p className="model-source">
+                  Les tools runtime par agent sont sauvegardés avec “Enregistrer les modèles”. Tous les tools autorisés sont activés par défaut.
                 </p>
 
                 <button className="btn-primary" disabled={savingModels}>{savingModels ? 'Enregistrement...' : 'Enregistrer les modèles'}</button>

@@ -176,3 +176,19 @@ def test_news_analyst_default_prompt_stays_pair_aware_for_fx() -> None:
     assert 'devise de cotation' in system
     assert '{base_asset}' in user
     assert '{quote_asset}' in user
+
+
+def test_default_prompts_include_structured_contracts_for_priority_agents() -> None:
+    technical_user = DEFAULT_PROMPTS['technical-analyst']['user']
+    news_user = DEFAULT_PROMPTS['news-analyst']['user']
+    market_context_user = DEFAULT_PROMPTS['market-context-analyst']['user']
+
+    assert 'setup_quality=high|medium|low' in technical_user
+    assert 'validation=<condition principale' in technical_user
+    assert 'invalidation=<condition principale' in technical_user
+
+    assert 'horizon=intraday|swing|uncertain' in news_user
+    assert 'impact=high|medium|low' in news_user
+
+    assert 'regime=trending|ranging|calm|unstable|volatile' in market_context_user
+    assert 'context_support=supportive|neutral|unsupportive' in market_context_user

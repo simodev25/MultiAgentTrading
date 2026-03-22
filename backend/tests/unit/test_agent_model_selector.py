@@ -210,3 +210,38 @@ def test_agent_model_selector_resolves_memory_context_enabled_with_fallback() ->
         db.commit()
         AgentModelSelector.clear_cache()
         assert selector.resolve_memory_context_enabled(db) is False
+
+
+def test_agent_model_selector_resolves_agent_tools_with_default_enabled() -> None:
+    selector = AgentModelSelector()
+    enabled_tools = selector.resolve_enabled_tools(None, 'news-analyst')
+
+    assert 'news_search' in enabled_tools
+    assert 'macro_calendar_or_event_feed' in enabled_tools
+
+
+def test_agent_model_selector_resolves_agent_tools_overrides() -> None:
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(bind=engine)
+
+    with Session(engine) as db:
+        db.add(
+            ConnectorConfig(
+                connector_name='ollama',
+                enabled=True,
+                settings={
+                    'agent_tools': {
+                        'news-analyst': {
+                            'news_search': False,
+                            'macro_calendar_or_event_feed': True,
+                        }
+                    }
+                },
+            )
+        )
+        db.commit()
+
+        selector = AgentModelSelector()
+        enabled_tools = selector.resolve_enabled_tools(db, 'news-analyst')
+        assert 'news_search' not in enabled_tools
+        assert 'macro_calendar_or_event_feed' in enabled_tools

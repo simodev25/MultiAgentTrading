@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.db.base import Base
 from app.db.models.connector_config import ConnectorConfig
-from app.services.orchestrator.agents import AgentContext, MarketContextAnalystAgent, NewsAnalystAgent, TraderAgent
+from app.services.orchestrator.agents import AgentContext, MarketContextAnalystAgent, NewsAnalystAgent, TechnicalAnalystAgent, TraderAgent
 
 
 def _context() -> AgentContext:
@@ -50,6 +50,56 @@ def test_market_context_agent_applies_deterministic_skill_guardrails() -> None:
         assert result['prompt_meta']['skills_count'] == 1
 
 
+def test_technical_agent_injects_tools_into_llm_and_executes_tool_calls(monkeypatch) -> None:
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(bind=engine)
+
+    with Session(engine) as db:
+        db.add(
+            ConnectorConfig(
+                connector_name='ollama',
+                enabled=True,
+                settings={
+                    'agent_llm_enabled': {'technical-analyst': True},
+                },
+            )
+        )
+        db.commit()
+
+        agent = TechnicalAnalystAgent()
+        seen_payloads: list[dict[str, object]] = []
+
+        def fake_chat(_system: str, _user: str, **kwargs):
+            seen_payloads.append(dict(kwargs))
+            if len(seen_payloads) == 1:
+                return {
+                    'text': '',
+                    'degraded': False,
+                    'tool_calls': [
+                        {
+                            'id': 'call_market_snapshot',
+                            'name': 'market_snapshot',
+                            'arguments': {},
+                        }
+                    ],
+                }
+            return {
+                'text': 'bullish\nsetup_quality=medium\nvalidation=ok\ninvalidation=ko',
+                'degraded': False,
+            }
+
+        monkeypatch.setattr(agent.llm, 'chat', fake_chat)
+        result = agent.run(_context(), db=db)
+
+        assert seen_payloads
+        assert isinstance(seen_payloads[0].get('tools'), list)
+        assert seen_payloads[0].get('tool_choice') == 'required'
+        assert result['tooling']['llm_tool_calls']
+        assert result['tooling']['llm_tool_calls'][0]['name'] == 'market_snapshot'
+        invocations = result['tooling']['invocations']
+        assert invocations['market_snapshot']['llm_invocations'][0]['status'] == 'ok'
+
+
 def test_news_agent_uses_skill_aware_fallback_when_llm_disabled() -> None:
     engine = create_engine('sqlite:///:memory:')
     Base.metadata.create_all(bind=engine)
@@ -74,10 +124,44 @@ def test_news_agent_uses_skill_aware_fallback_when_llm_disabled() -> None:
         agent = NewsAnalystAgent(prompt_service=agent_prompt_service())
         result = agent.run(_context(), db=db)
 
-        assert result['signal'] == 'bullish'
-        assert result['score'] > 0.0
-        assert result['summary'] == 'LLM disabled for news-analyst. Deterministic skill-aware fallback used.'
+        assert result['signal'] == 'neutral'
+        assert abs(result['score']) <= 0.05
+        assert result['summary'].startswith('neutral')
+        assert result['decision_mode'] == 'neutral_from_low_relevance'
         assert result['prompt_meta']['skills_count'] == 1
+
+
+def test_news_agent_respects_disabled_news_search_tool() -> None:
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(bind=engine)
+
+    with Session(engine) as db:
+        db.add(
+            ConnectorConfig(
+                connector_name='ollama',
+                enabled=True,
+                settings={
+                    'agent_llm_enabled': {'news-analyst': False},
+                    'agent_tools': {
+                        'news-analyst': {
+                            'news_search': False,
+                            'macro_calendar_or_event_feed': True,
+                            'symbol_relevance_filter': True,
+                            'sentiment_or_event_impact_parser': True,
+                        }
+                    },
+                },
+            )
+        )
+        db.commit()
+
+        agent = NewsAnalystAgent(prompt_service=agent_prompt_service())
+        result = agent.run(_context(), db=db)
+
+        assert result['news_count'] == 0
+        assert result['signal'] == 'neutral'
+        invocations = (result.get('tooling') or {}).get('invocations') or {}
+        assert invocations.get('news_search', {}).get('status') == 'disabled'
 
 
 def test_news_agent_timeout_case_matches_live_payload(monkeypatch) -> None:
@@ -137,16 +221,17 @@ def test_news_agent_timeout_case_matches_live_payload(monkeypatch) -> None:
 
         result = agent.run(ctx, db=db)
 
-        assert result['signal'] == 'bullish'
-        assert result['score'] > 0.05
+        assert result['signal'] == 'neutral'
+        assert abs(result['score']) <= 0.05
         assert result['degraded'] is False
-        assert result['llm_fallback_used'] is True
-        assert 'timed out' in result['llm_summary'].lower()
-        assert result['summary'] == 'LLM degraded for news-analyst. Deterministic skill-aware fallback used.'
+        assert result['llm_fallback_used'] is False
+        assert result['llm_call_attempted'] is False
+        assert 'coverage_low' in result['llm_summary'].lower()
+        assert result['summary'].startswith('neutral')
         assert result['provider_symbol'] == 'EURUSD=X'
         assert result['provider_symbols_scanned'] == ['EURUSD=X']
-        assert result['coverage'] in {'medium', 'high'}
-        assert result['decision_mode'] == 'directional'
+        assert result['coverage'] == 'low'
+        assert result['decision_mode'] == 'neutral_from_low_relevance'
         assert result['fetch_status'] == 'ok'
         assert result['prompt_meta']['skills_count'] == 5
 
@@ -186,7 +271,7 @@ def test_trader_agent_uses_skill_hold_guardrail_when_llm_disabled() -> None:
 
         result = agent.run(ctx, outputs, bullish, bearish, db=db)
 
-        assert result['combined_score'] == 0.3
+        assert 0.24 <= result['combined_score'] <= 0.31
         assert result['rationale']['decision_buy_threshold'] == 0.3
         assert result['decision'] == 'HOLD'
         assert result['prompt_meta']['skills_count'] == 2

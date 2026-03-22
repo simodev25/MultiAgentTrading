@@ -13,8 +13,11 @@ from app.services.llm.model_selector import (
     AgentModelSelector,
     DEFAULT_DECISION_MODE,
     SUPPORTED_DECISION_MODES,
+    build_agent_tools_catalog,
+    normalize_agent_tools_settings,
     normalize_agent_name,
     normalize_decision_mode,
+    validate_agent_tools_payload,
 )
 from app.services.llm.provider_client import LlmClient
 from app.services.market.symbols import get_market_symbols_config, save_market_symbols_config
@@ -166,6 +169,9 @@ def _sanitize_ollama_settings(raw_settings: dict) -> dict:
         settings.get('memory_context_enabled'),
         fallback=False,
     )
+    normalized_agent_tools = normalize_agent_tools_settings(settings.get('agent_tools'))
+    settings['agent_tools'] = normalized_agent_tools
+    settings['agent_tools_catalog'] = build_agent_tools_catalog(normalized_agent_tools)
     return settings
 
 
@@ -180,6 +186,20 @@ def _validate_decision_mode_value(raw_settings: dict) -> None:
             status_code=422,
             detail=f"Invalid decision_mode '{raw_settings.get('decision_mode')}'. Allowed: {', '.join(sorted(SUPPORTED_DECISION_MODES))}.",
         )
+
+
+def _validate_agent_tools_value(raw_settings: dict) -> None:
+    if not isinstance(raw_settings, dict):
+        return
+    if 'agent_tools' not in raw_settings:
+        return
+    issues = validate_agent_tools_payload(raw_settings.get('agent_tools'))
+    if not issues:
+        return
+    raise HTTPException(
+        status_code=422,
+        detail='; '.join(issues),
+    )
 
 
 @router.get('', response_model=list[ConnectorConfigOut])
@@ -292,6 +312,7 @@ def update_connector(
     conn.enabled = payload.enabled
     if connector_name == 'ollama':
         _validate_decision_mode_value(payload.settings)
+        _validate_agent_tools_value(payload.settings)
         conn.settings = _sanitize_ollama_settings(payload.settings)
     else:
         conn.settings = payload.settings

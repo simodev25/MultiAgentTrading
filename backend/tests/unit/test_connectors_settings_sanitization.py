@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.api.routes.connectors import (
     _sanitize_ollama_settings,
+    _validate_agent_tools_value,
     _validate_decision_mode_value,
     list_connectors,
     update_connector,
@@ -73,6 +74,44 @@ def test_sanitize_ollama_settings_normalizes_memory_context_flag() -> None:
 
     fallback = _sanitize_ollama_settings({'provider': 'ollama'})
     assert fallback['memory_context_enabled'] is False
+
+
+def test_sanitize_ollama_settings_adds_agent_tools_defaults_and_catalog() -> None:
+    result = _sanitize_ollama_settings({'provider': 'ollama'})
+
+    assert isinstance(result.get('agent_tools'), dict)
+    assert isinstance(result.get('agent_tools_catalog'), dict)
+
+    news_tools = result['agent_tools'].get('news-analyst', {})
+    assert news_tools.get('news_search') is True
+    assert news_tools.get('macro_calendar_or_event_feed') is True
+
+    technical_catalog = result['agent_tools_catalog'].get('technical-analyst', [])
+    assert any(item.get('tool_id') == 'market_snapshot' for item in technical_catalog)
+
+
+def test_sanitize_ollama_settings_respects_agent_tools_overrides() -> None:
+    result = _sanitize_ollama_settings(
+        {
+            'provider': 'ollama',
+            'agent_tools': {
+                'news-analyst': {
+                    'news_search': False,
+                    'macro_calendar_or_event_feed': True,
+                }
+            },
+        }
+    )
+
+    news_tools = result['agent_tools'].get('news-analyst', {})
+    assert news_tools.get('news_search') is False
+    assert news_tools.get('macro_calendar_or_event_feed') is True
+
+
+def test_validate_agent_tools_value_rejects_non_allowed_tool_activation() -> None:
+    _validate_agent_tools_value({'agent_tools': {'news-analyst': {'news_search': True}}})
+    with pytest.raises(HTTPException):
+        _validate_agent_tools_value({'agent_tools': {'news-analyst': {'unknown_tool': True}}})
 
 
 def test_validate_decision_mode_value_rejects_invalid_values() -> None:

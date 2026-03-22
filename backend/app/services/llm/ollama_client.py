@@ -1,3 +1,4 @@
+import json
 import logging
 import threading
 import time
@@ -173,23 +174,61 @@ class OllamaCloudClient:
         completion_tokens = int(data.get('eval_count') or data.get('completion_tokens') or 0)
         return text, prompt_tokens, completion_tokens
 
+    def _normalize_messages(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        if isinstance(messages, list):
+            normalized_messages: list[dict[str, Any]] = []
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                role = str(message.get('role') or '').strip().lower()
+                if role not in {'system', 'user', 'assistant', 'tool'}:
+                    continue
+                payload: dict[str, Any] = {'role': role}
+                if 'content' in message:
+                    payload['content'] = message.get('content')
+                if role == 'assistant' and isinstance(message.get('tool_calls'), list):
+                    payload['tool_calls'] = message.get('tool_calls')
+                if role == 'tool':
+                    tool_call_id = message.get('tool_call_id')
+                    name = message.get('name')
+                    if isinstance(tool_call_id, str) and tool_call_id.strip():
+                        payload['tool_call_id'] = tool_call_id.strip()
+                    if isinstance(name, str) and name.strip():
+                        payload['name'] = name.strip()
+                normalized_messages.append(payload)
+            if normalized_messages:
+                return normalized_messages
+        return [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': user_prompt},
+        ]
+
     def _build_chat_payload(
         self,
         model: str,
         system_prompt: str,
         user_prompt: str,
         *,
+        messages: list[dict[str, Any]] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         max_tokens: int | None = None,
         temperature: float | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             'model': model,
-            'messages': [
-                {'role': 'system', 'content': system_prompt},
-                {'role': 'user', 'content': user_prompt},
-            ],
+            'messages': self._normalize_messages(system_prompt, user_prompt, messages),
             'stream': False,
         }
+        if isinstance(tools, list) and tools:
+            payload['tools'] = tools
+            if tool_choice is not None:
+                payload['tool_choice'] = tool_choice
         options: dict[str, Any] = {}
         if max_tokens is not None:
             options['num_predict'] = int(max(max_tokens, 1))
@@ -198,6 +237,46 @@ class OllamaCloudClient:
         if options:
             payload['options'] = options
         return payload
+
+    @staticmethod
+    def _extract_tool_calls(data: dict[str, Any]) -> list[dict[str, Any]]:
+        calls: list[dict[str, Any]] = []
+        message = data.get('message')
+        if not isinstance(message, dict):
+            return calls
+        raw_calls = message.get('tool_calls')
+        if not isinstance(raw_calls, list):
+            return calls
+        for index, raw_call in enumerate(raw_calls):
+            if not isinstance(raw_call, dict):
+                continue
+            function = raw_call.get('function')
+            if not isinstance(function, dict):
+                continue
+            name = str(function.get('name') or '').strip()
+            if not name:
+                continue
+            raw_arguments = function.get('arguments')
+            parsed_arguments: dict[str, Any] = {}
+            if isinstance(raw_arguments, dict):
+                parsed_arguments = dict(raw_arguments)
+            elif isinstance(raw_arguments, str):
+                try:
+                    candidate = json.loads(raw_arguments)
+                    if isinstance(candidate, dict):
+                        parsed_arguments = candidate
+                except json.JSONDecodeError:
+                    parsed_arguments = {}
+            call_id = str(raw_call.get('id') or f'call_{index}').strip() or f'call_{index}'
+            calls.append(
+                {
+                    'id': call_id,
+                    'name': name,
+                    'arguments': parsed_arguments,
+                    'raw_arguments': raw_arguments,
+                }
+            )
+        return calls
 
     def list_models(self, db: Session | None = None) -> dict[str, Any]:
         base_url = self._normalized_base_url()
@@ -251,9 +330,14 @@ class OllamaCloudClient:
         max_tokens_raw = kwargs.get('max_tokens')
         temperature_raw = kwargs.get('temperature')
         request_timeout_raw = kwargs.get('request_timeout_seconds')
+        messages_raw = kwargs.get('messages')
+        tools_raw = kwargs.get('tools')
+        tool_choice = kwargs.get('tool_choice')
         max_tokens: int | None = None
         temperature: float | None = None
         request_timeout_seconds: float | None = None
+        messages: list[dict[str, Any]] | None = None
+        tools: list[dict[str, Any]] | None = None
         try:
             if max_tokens_raw is not None:
                 max_tokens = int(max_tokens_raw)
@@ -269,6 +353,10 @@ class OllamaCloudClient:
                 request_timeout_seconds = float(request_timeout_raw)
         except (TypeError, ValueError):
             request_timeout_seconds = None
+        if isinstance(messages_raw, list):
+            messages = [item for item in messages_raw if isinstance(item, dict)]
+        if isinstance(tools_raw, list):
+            tools = [item for item in tools_raw if isinstance(item, dict)]
 
         if not self.is_configured(base_url=base_url, db=db):
             latency = time.perf_counter() - started
@@ -299,6 +387,9 @@ class OllamaCloudClient:
             selected_model,
             system_prompt,
             user_prompt,
+            messages=messages,
+            tools=tools,
+            tool_choice=tool_choice,
             max_tokens=max_tokens,
             temperature=temperature,
         )
@@ -310,6 +401,7 @@ class OllamaCloudClient:
         try:
             data = self._call_remote(url, payload, headers, timeout_seconds=request_timeout_seconds)
             text, prompt_tokens, completion_tokens = self._extract_usage(data)
+            tool_calls = self._extract_tool_calls(data)
             cost_usd = self._estimate_cost_usd(prompt_tokens, completion_tokens)
             latency = time.perf_counter() - started
 
@@ -340,6 +432,7 @@ class OllamaCloudClient:
             return {
                 'provider': provider,
                 'text': text,
+                'tool_calls': tool_calls,
                 'raw': data,
                 'degraded': False,
                 'prompt_tokens': prompt_tokens,
@@ -367,6 +460,9 @@ class OllamaCloudClient:
                             fallback_model,
                             system_prompt,
                             user_prompt,
+                            messages=messages,
+                            tools=tools,
+                            tool_choice=tool_choice,
                             max_tokens=max_tokens,
                             temperature=temperature,
                         ),
@@ -374,6 +470,7 @@ class OllamaCloudClient:
                         timeout_seconds=request_timeout_seconds,
                     )
                     text, prompt_tokens, completion_tokens = self._extract_usage(fallback_data)
+                    tool_calls = self._extract_tool_calls(fallback_data)
                     cost_usd = self._estimate_cost_usd(prompt_tokens, completion_tokens)
                     latency = time.perf_counter() - started
 
@@ -395,6 +492,7 @@ class OllamaCloudClient:
                     return {
                         'provider': provider,
                         'text': text,
+                        'tool_calls': tool_calls,
                         'raw': fallback_data,
                         'degraded': False,
                         'prompt_tokens': prompt_tokens,

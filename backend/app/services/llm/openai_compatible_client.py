@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -208,27 +209,111 @@ class OpenAICompatibleClient:
         return prompt_tokens, completion_tokens
 
     @staticmethod
+    def _normalize_messages(
+        system_prompt: str,
+        user_prompt: str,
+        messages: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        if isinstance(messages, list):
+            normalized_messages: list[dict[str, Any]] = []
+            for message in messages:
+                if not isinstance(message, dict):
+                    continue
+                role = str(message.get('role') or '').strip().lower()
+                if role not in {'system', 'user', 'assistant', 'tool'}:
+                    continue
+                payload: dict[str, Any] = {'role': role}
+                if 'content' in message:
+                    payload['content'] = message.get('content')
+                if role == 'assistant' and isinstance(message.get('tool_calls'), list):
+                    payload['tool_calls'] = message.get('tool_calls')
+                if role == 'tool':
+                    tool_call_id = message.get('tool_call_id')
+                    name = message.get('name')
+                    if isinstance(tool_call_id, str) and tool_call_id.strip():
+                        payload['tool_call_id'] = tool_call_id.strip()
+                    if isinstance(name, str) and name.strip():
+                        payload['name'] = name.strip()
+                normalized_messages.append(payload)
+            if normalized_messages:
+                return normalized_messages
+        return [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': user_prompt},
+        ]
+
+    @staticmethod
     def _build_chat_payload(
         model: str,
         system_prompt: str,
         user_prompt: str,
         *,
+        messages: list[dict[str, Any]] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         max_tokens: int | None = None,
         temperature: float | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             'model': model,
-            'messages': [
-                {'role': 'system', 'content': system_prompt},
-                {'role': 'user', 'content': user_prompt},
-            ],
+            'messages': OpenAICompatibleClient._normalize_messages(system_prompt, user_prompt, messages),
             'stream': False,
         }
+        if isinstance(tools, list) and tools:
+            payload['tools'] = tools
+            if tool_choice is not None:
+                payload['tool_choice'] = tool_choice
         if max_tokens is not None:
             payload['max_tokens'] = int(max(max_tokens, 1))
         if temperature is not None:
             payload['temperature'] = float(temperature)
         return payload
+
+    @staticmethod
+    def _extract_tool_calls(data: dict[str, Any]) -> list[dict[str, Any]]:
+        calls: list[dict[str, Any]] = []
+        choices = data.get('choices')
+        if not isinstance(choices, list) or not choices:
+            return calls
+        first_choice = choices[0]
+        if not isinstance(first_choice, dict):
+            return calls
+        message = first_choice.get('message')
+        if not isinstance(message, dict):
+            return calls
+        raw_calls = message.get('tool_calls')
+        if not isinstance(raw_calls, list):
+            return calls
+        for index, raw_call in enumerate(raw_calls):
+            if not isinstance(raw_call, dict):
+                continue
+            function = raw_call.get('function')
+            if not isinstance(function, dict):
+                continue
+            name = str(function.get('name') or '').strip()
+            if not name:
+                continue
+            raw_arguments = function.get('arguments')
+            parsed_arguments: dict[str, Any] = {}
+            if isinstance(raw_arguments, dict):
+                parsed_arguments = dict(raw_arguments)
+            elif isinstance(raw_arguments, str):
+                try:
+                    candidate = json.loads(raw_arguments)
+                    if isinstance(candidate, dict):
+                        parsed_arguments = candidate
+                except json.JSONDecodeError:
+                    parsed_arguments = {}
+            call_id = str(raw_call.get('id') or f'call_{index}').strip() or f'call_{index}'
+            calls.append(
+                {
+                    'id': call_id,
+                    'name': name,
+                    'arguments': parsed_arguments,
+                    'raw_arguments': raw_arguments,
+                }
+            )
+        return calls
 
     def list_models(self, db: Session | None = None) -> dict[str, Any]:
         base_url = self._normalized_base_url()
@@ -283,8 +368,13 @@ class OpenAICompatibleClient:
         base_url = self._normalized_base_url()
         max_tokens_raw = kwargs.get('max_tokens')
         temperature_raw = kwargs.get('temperature')
+        messages_raw = kwargs.get('messages')
+        tools_raw = kwargs.get('tools')
+        tool_choice = kwargs.get('tool_choice')
         max_tokens: int | None = None
         temperature: float | None = None
+        messages: list[dict[str, Any]] | None = None
+        tools: list[dict[str, Any]] | None = None
         try:
             if max_tokens_raw is not None:
                 max_tokens = int(max_tokens_raw)
@@ -295,6 +385,10 @@ class OpenAICompatibleClient:
                 temperature = float(temperature_raw)
         except (TypeError, ValueError):
             temperature = None
+        if isinstance(messages_raw, list):
+            messages = [item for item in messages_raw if isinstance(item, dict)]
+        if isinstance(tools_raw, list):
+            tools = [item for item in tools_raw if isinstance(item, dict)]
 
         if not self.is_configured(base_url=base_url, db=db):
             latency = time.perf_counter() - started
@@ -325,6 +419,9 @@ class OpenAICompatibleClient:
             selected_model,
             system_prompt,
             user_prompt,
+            messages=messages,
+            tools=tools,
+            tool_choice=tool_choice,
             max_tokens=max_tokens,
             temperature=temperature,
         )
@@ -336,6 +433,7 @@ class OpenAICompatibleClient:
         try:
             data = self._request_json('POST', url, headers, payload=payload)
             text = self._extract_text(data)
+            tool_calls = self._extract_tool_calls(data)
             prompt_tokens, completion_tokens = self._extract_usage(data)
             cost_usd = self._estimate_cost_usd(prompt_tokens, completion_tokens)
             latency = time.perf_counter() - started
@@ -358,6 +456,7 @@ class OpenAICompatibleClient:
             return {
                 'provider': provider,
                 'text': text,
+                'tool_calls': tool_calls,
                 'raw': data,
                 'degraded': False,
                 'prompt_tokens': prompt_tokens,
@@ -381,11 +480,15 @@ class OpenAICompatibleClient:
                             fallback_model,
                             system_prompt,
                             user_prompt,
+                            messages=messages,
+                            tools=tools,
+                            tool_choice=tool_choice,
                             max_tokens=max_tokens,
                             temperature=temperature,
                         ),
                     )
                     text = self._extract_text(fallback_data)
+                    tool_calls = self._extract_tool_calls(fallback_data)
                     prompt_tokens, completion_tokens = self._extract_usage(fallback_data)
                     cost_usd = self._estimate_cost_usd(prompt_tokens, completion_tokens)
                     latency = time.perf_counter() - started
@@ -408,6 +511,7 @@ class OpenAICompatibleClient:
                     return {
                         'provider': provider,
                         'text': text,
+                        'tool_calls': tool_calls,
                         'raw': fallback_data,
                         'degraded': False,
                         'prompt_tokens': prompt_tokens,

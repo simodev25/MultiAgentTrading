@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.services.llm.provider_client import LlmClient
-from app.services.llm.model_selector import AgentModelSelector, normalize_decision_mode
+from app.services.llm.model_selector import AGENT_TOOL_DEFINITIONS, AgentModelSelector, normalize_decision_mode
+from app.services.orchestrator.langchain_tools import build_llm_tool_specs, get_langchain_agent_tool
 from app.services.orchestrator.instrument_helpers import (
     build_instrument_context,
     build_instrument_prompt_variables,
@@ -261,6 +262,94 @@ def _compact_outputs_for_debate(agent_outputs: dict[str, dict[str, Any]]) -> dic
     return compact
 
 
+def _normalize_directional_signal(value: Any, *, score: float, threshold: float = 0.05) -> str:
+    signal = str(value or '').strip().lower()
+    if signal in {'bullish', 'bearish', 'neutral'}:
+        return signal
+    return _score_to_signal(score, threshold)
+
+
+def _summarize_research_evidence(output: dict[str, Any]) -> str:
+    reason = str(output.get('reason') or '').strip()
+    if reason:
+        return _compact_prompt_text(reason, max_chars=180)
+    summary = str(output.get('summary') or '').strip()
+    if summary:
+        return _compact_prompt_text(summary, max_chars=180)
+    llm_summary = str(output.get('llm_summary') or '').strip()
+    if llm_summary:
+        return _compact_prompt_text(llm_summary, max_chars=180)
+    return 'Signal présent mais justification textuelle limitée.'
+
+
+def _build_directional_research_view(
+    debate_inputs: dict[str, dict[str, Any]],
+    *,
+    target_signal: str,
+) -> dict[str, Any]:
+    opposite_signal = 'bearish' if target_signal == 'bullish' else 'bullish'
+    ranked_items: list[tuple[str, float, str, str]] = []
+    for name, output in debate_inputs.items():
+        score = _safe_float(output.get('score', 0.0), 0.0)
+        signal = _normalize_directional_signal(output.get('signal'), score=score, threshold=0.05)
+        evidence = _summarize_research_evidence(output)
+        ranked_items.append((str(name), score, signal, evidence))
+
+    ranked_items.sort(key=lambda item: abs(item[1]), reverse=True)
+
+    supporting_items: list[tuple[str, float, str]] = []
+    opposing_items: list[tuple[str, float, str]] = []
+    mixed_items: list[tuple[str, float, str]] = []
+    for name, score, signal, evidence in ranked_items:
+        if abs(score) < 0.03 or signal == 'neutral':
+            mixed_items.append((name, score, evidence))
+            continue
+        if signal == target_signal:
+            supporting_items.append((name, score, evidence))
+        elif signal == opposite_signal:
+            opposing_items.append((name, score, evidence))
+        else:
+            mixed_items.append((name, score, evidence))
+
+    supporting_arguments = [
+        f'{name}: {evidence} (score={round(score, 3)})'
+        for name, score, evidence in supporting_items[:3]
+    ]
+    opposing_arguments = [
+        f'{name}: {evidence} (score={round(score, 3)})'
+        for name, score, evidence in opposing_items[:2]
+    ]
+
+    invalidation_conditions: list[str] = []
+    if opposing_items:
+        strongest_opp_name, strongest_opp_score, _ = opposing_items[0]
+        invalidation_conditions.append(
+            f'Invalidation si {strongest_opp_name} maintient un biais {opposite_signal} dominant '
+            f'(score={round(strongest_opp_score, 3)}).'
+        )
+    if len(supporting_items) <= 1:
+        invalidation_conditions.append(
+            "Invalidation si la confirmation inter-sources reste insuffisante."
+        )
+    independent_sources = {'news-analyst', 'market-context-analyst'}
+    if not any(name in independent_sources for name, _score, _evidence in supporting_items):
+        invalidation_conditions.append(
+            "Invalidation si aucune source indépendante (news/contexte) ne confirme la thèse."
+        )
+
+    return {
+        'supporting_arguments': supporting_arguments,
+        'opposing_arguments': opposing_arguments,
+        'mixed_inputs': [
+            f'{name}: {evidence} (score={round(score, 3)})'
+            for name, score, evidence in mixed_items[:2]
+        ],
+        'invalidation_conditions': invalidation_conditions[:3],
+        'supporting_signal_count': len(supporting_items),
+        'opposing_signal_count': len(opposing_items),
+    }
+
+
 def _merge_llm_signal(base_score: float, llm_signal: str, *, threshold: float, llm_bias: float) -> tuple[float, str]:
     llm_score = {'bullish': llm_bias, 'bearish': -llm_bias, 'neutral': 0.0}[llm_signal]
     base_score = float(base_score)
@@ -378,6 +467,461 @@ def _resolve_runtime_skills(selector: AgentModelSelector, db: Session | None, ag
     if db is None:
         return []
     return selector.resolve_skills(db, agent_name)
+
+
+def _resolve_enabled_tools(selector: AgentModelSelector, db: Session | None, agent_name: str) -> list[str]:
+    return selector.resolve_enabled_tools(db, agent_name)
+
+
+def _tool_label(tool_id: str) -> str:
+    meta = AGENT_TOOL_DEFINITIONS.get(tool_id, {})
+    return str(meta.get('label') or tool_id)
+
+
+def _run_agent_tool(
+    *,
+    tool_id: str,
+    enabled_tools: list[str],
+    executor,
+) -> dict[str, Any]:
+    enabled = tool_id in set(enabled_tools)
+    if not enabled:
+        return {
+            'tool_id': tool_id,
+            'label': _tool_label(tool_id),
+            'enabled': False,
+            'status': 'disabled',
+            'latency_ms': 0.0,
+            'error': None,
+            'data': {},
+        }
+
+    started = time.perf_counter()
+    try:
+        tool_input = executor()
+        langchain_tool = get_langchain_agent_tool(tool_id)
+        if langchain_tool is not None:
+            if isinstance(tool_input, dict):
+                payload = langchain_tool.invoke({'payload': tool_input})
+            else:
+                payload = langchain_tool.invoke({'payload': {'value': tool_input}})
+        else:
+            payload = tool_input
+        if not isinstance(payload, dict):
+            payload = {'value': payload}
+        return {
+            'tool_id': tool_id,
+            'label': _tool_label(tool_id),
+            'enabled': True,
+            'status': 'ok',
+            'runtime': 'langchain_core.tool' if langchain_tool is not None else 'internal_executor',
+            'latency_ms': round((time.perf_counter() - started) * 1000.0, 2),
+            'error': None,
+            'data': payload,
+        }
+    except Exception as exc:
+        return {
+            'tool_id': tool_id,
+            'label': _tool_label(tool_id),
+            'enabled': True,
+            'status': 'error',
+            'runtime': 'langchain_core.tool',
+            'latency_ms': round((time.perf_counter() - started) * 1000.0, 2),
+            'error': str(exc),
+            'data': {},
+        }
+
+
+def _append_tools_prompt_guidance(system_prompt: str, *, enabled_tools: list[str]) -> str:
+    unique_tools: list[str] = []
+    seen: set[str] = set()
+    for item in enabled_tools:
+        key = str(item or '').strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique_tools.append(key)
+
+    if not unique_tools:
+        guidance = (
+            "Aucun tool actif pour cet agent dans cette exécution. "
+            "Travaille uniquement avec les données fournies et explicite toute limite d'observation."
+        )
+        return f'{system_prompt}\n\n{guidance}'
+
+    rendered_tools = ', '.join(unique_tools)
+    guidance = (
+        "Tools activés pour cette exécution: "
+        f"{rendered_tools}. "
+        "Priorise les observations de ces tools. "
+        "N'invente jamais de résultat tool absent et n'utilise aucun tool non listé."
+    )
+    return f'{system_prompt}\n\n{guidance}'
+
+
+def _parse_llm_tool_call_arguments(raw_arguments: Any) -> dict[str, Any]:
+    if isinstance(raw_arguments, dict):
+        return dict(raw_arguments)
+    if isinstance(raw_arguments, str):
+        try:
+            parsed = json.loads(raw_arguments)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _normalize_llm_tool_calls(llm_res: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_calls = llm_res.get('tool_calls')
+    if not isinstance(raw_calls, list):
+        return []
+    normalized_calls: list[dict[str, Any]] = []
+    for index, raw_call in enumerate(raw_calls):
+        if not isinstance(raw_call, dict):
+            continue
+        tool_name = str(raw_call.get('name') or '').strip()
+        if not tool_name:
+            function = raw_call.get('function')
+            if isinstance(function, dict):
+                tool_name = str(function.get('name') or '').strip()
+        if not tool_name:
+            continue
+        raw_arguments = raw_call.get('arguments')
+        if raw_arguments is None:
+            function = raw_call.get('function')
+            if isinstance(function, dict):
+                raw_arguments = function.get('arguments')
+        call_id = str(raw_call.get('id') or f'llm_tool_call_{index}').strip() or f'llm_tool_call_{index}'
+        normalized_calls.append(
+            {
+                'id': call_id,
+                'name': tool_name,
+                'arguments': _parse_llm_tool_call_arguments(raw_arguments),
+                'raw_arguments': raw_arguments,
+            }
+        )
+    return normalized_calls
+
+
+def _register_llm_tool_invocation(
+    tool_invocations: dict[str, dict[str, Any]],
+    *,
+    tool_id: str,
+    invocation: dict[str, Any],
+) -> None:
+    existing = tool_invocations.get(tool_id)
+    if isinstance(existing, dict):
+        llm_invocations = existing.get('llm_invocations')
+        if not isinstance(llm_invocations, list):
+            llm_invocations = []
+            existing['llm_invocations'] = llm_invocations
+        llm_invocations.append(invocation)
+        return
+    tool_invocations[tool_id] = invocation
+
+
+def _llm_tool_injection_unsupported(llm_res: dict[str, Any]) -> bool:
+    if not bool(llm_res.get('degraded', False)):
+        return False
+    text = str(llm_res.get('error') or llm_res.get('text') or '').strip().lower()
+    if not text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            'tool_choice',
+            'tools',
+            'tool call',
+            'function call',
+            'invalid schema',
+            'invalid_request',
+        )
+    )
+
+
+def _serialize_tool_result_for_llm(invocation: dict[str, Any], *, max_chars: int = 4000) -> str:
+    payload = {
+        'status': invocation.get('status'),
+        'error': invocation.get('error'),
+        'data': invocation.get('data'),
+    }
+    rendered = json.dumps(payload, ensure_ascii=True, default=str)
+    if len(rendered) <= max_chars:
+        return rendered
+
+    data = invocation.get('data')
+    data_summary: dict[str, Any] = {}
+    if isinstance(data, dict):
+        for index, (key, value) in enumerate(data.items()):
+            if index >= 12:
+                data_summary['truncated_keys'] = max(len(data) - 12, 0)
+                break
+            if isinstance(value, list):
+                data_summary[str(key)] = {
+                    'type': 'list',
+                    'count': len(value),
+                    'sample': value[:2],
+                }
+            elif isinstance(value, dict):
+                data_summary[str(key)] = {
+                    'type': 'object',
+                    'keys': list(value.keys())[:8],
+                }
+            else:
+                data_summary[str(key)] = value
+
+    compact_payload = {
+        'status': invocation.get('status'),
+        'error': invocation.get('error'),
+        'data_summary': data_summary,
+        'truncated': True,
+    }
+    compact_rendered = json.dumps(compact_payload, ensure_ascii=True, default=str)
+    if len(compact_rendered) <= max_chars:
+        return compact_rendered
+    return _compact_prompt_text(compact_rendered, max_chars=max_chars)
+
+
+def _chat_with_runtime_tools(
+    *,
+    llm_client: LlmClient,
+    llm_model: str,
+    db: Session | None,
+    system_prompt: str,
+    user_prompt: str,
+    enabled_tools: list[str],
+    tool_dispatchers: dict[str, Any],
+    tool_invocations: dict[str, dict[str, Any]],
+    max_tool_rounds: int = 2,
+    require_tool_call: bool = False,
+    default_tool_id: str | None = None,
+    **llm_kwargs: Any,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    tool_specs = build_llm_tool_specs(enabled_tools)
+    if not tool_specs:
+        return (
+            llm_client.chat(
+                system_prompt,
+                user_prompt,
+                model=llm_model,
+                db=db,
+                **llm_kwargs,
+            ),
+            [],
+        )
+
+    messages: list[dict[str, Any]] = [
+        {'role': 'system', 'content': system_prompt},
+        {'role': 'user', 'content': user_prompt},
+    ]
+    executed_tool_calls: list[dict[str, Any]] = []
+    enabled_set = set(enabled_tools)
+
+    def _default_tool_fallback(
+        current_llm_res: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
+        if not require_tool_call or executed_tool_calls:
+            return None
+
+        selected_tool_id = ''
+        preferred = str(default_tool_id or '').strip()
+        if preferred and preferred in enabled_set and preferred in tool_dispatchers:
+            selected_tool_id = preferred
+        else:
+            for candidate in enabled_tools:
+                if candidate in tool_dispatchers:
+                    selected_tool_id = candidate
+                    break
+        if not selected_tool_id:
+            return None
+
+        dispatcher = tool_dispatchers.get(selected_tool_id)
+        if dispatcher is None:
+            return None
+
+        invocation = _run_agent_tool(
+            tool_id=selected_tool_id,
+            enabled_tools=enabled_tools,
+            executor=lambda dispatcher=dispatcher: dispatcher({}),
+        )
+        _register_llm_tool_invocation(
+            tool_invocations,
+            tool_id=selected_tool_id,
+            invocation=invocation,
+        )
+        fallback_call_id = f'runtime_default_{selected_tool_id}'
+        executed_tool_calls.append(
+            {
+                'id': fallback_call_id,
+                'name': selected_tool_id,
+                'status': invocation.get('status'),
+                'error': invocation.get('error'),
+                'source': 'runtime_default',
+            }
+        )
+        llm_text, _ = _normalize_llm_text_and_degraded(current_llm_res, require_text=False)
+        if llm_text.strip():
+            messages.append({'role': 'assistant', 'content': llm_text})
+        messages.append(
+            {
+                'role': 'user',
+                'content': (
+                    f"Runtime tool fallback `{selected_tool_id}` output:\n"
+                    f"{_serialize_tool_result_for_llm(invocation)}\n"
+                    "Use this tool evidence in your final answer."
+                ),
+            }
+        )
+        final_res = llm_client.chat(
+            system_prompt,
+            user_prompt,
+            model=llm_model,
+            db=db,
+            messages=messages,
+            **llm_kwargs,
+        )
+        return final_res, executed_tool_calls
+
+    initial_tool_choice: str | dict[str, Any] = 'required' if require_tool_call else 'auto'
+
+    llm_res = llm_client.chat(
+        system_prompt,
+        user_prompt,
+        model=llm_model,
+        db=db,
+        messages=messages,
+        tools=tool_specs,
+        tool_choice=initial_tool_choice,
+        **llm_kwargs,
+    )
+    if _llm_tool_injection_unsupported(llm_res):
+        fallback_result = _default_tool_fallback(llm_res)
+        if fallback_result is not None:
+            return fallback_result
+        return (
+            llm_client.chat(
+                system_prompt,
+                user_prompt,
+                model=llm_model,
+                db=db,
+                **llm_kwargs,
+            ),
+            executed_tool_calls,
+        )
+    rounds = 0
+    while rounds < max(max_tool_rounds, 0):
+        tool_calls = _normalize_llm_tool_calls(llm_res)
+        if not tool_calls:
+            fallback_result = _default_tool_fallback(llm_res)
+            if fallback_result is not None:
+                return fallback_result
+            return llm_res, executed_tool_calls
+
+        llm_text, _ = _normalize_llm_text_and_degraded(llm_res, require_text=False)
+        assistant_message: dict[str, Any] = {'role': 'assistant', 'content': llm_text}
+        assistant_tool_calls: list[dict[str, Any]] = []
+        for call in tool_calls:
+            assistant_tool_calls.append(
+                {
+                    'id': call['id'],
+                    'type': 'function',
+                    'function': {
+                        'name': call['name'],
+                        'arguments': json.dumps(call.get('arguments') or {}, ensure_ascii=True),
+                    },
+                }
+            )
+        assistant_message['tool_calls'] = assistant_tool_calls
+        messages.append(assistant_message)
+
+        for call in tool_calls:
+            tool_id = str(call.get('name') or '').strip()
+            raw_call_args = call.get('arguments')
+            call_args = dict(raw_call_args) if isinstance(raw_call_args, dict) else {}
+            payload_args = call_args.get('payload')
+            dispatch_args = dict(payload_args) if isinstance(payload_args, dict) else call_args
+            dispatcher = tool_dispatchers.get(tool_id)
+            if dispatcher is None:
+                is_enabled = tool_id in enabled_set
+                invocation = {
+                    'tool_id': tool_id,
+                    'label': _tool_label(tool_id),
+                    'enabled': is_enabled,
+                    'status': 'error' if is_enabled else 'disabled',
+                    'runtime': 'langchain_core.tool',
+                    'latency_ms': 0.0,
+                    'error': None if not is_enabled else f"No runtime dispatcher registered for tool '{tool_id}'.",
+                    'data': {},
+                }
+            else:
+                invocation = _run_agent_tool(
+                    tool_id=tool_id,
+                    enabled_tools=enabled_tools,
+                    executor=lambda dispatcher=dispatcher, dispatch_args=dispatch_args: dispatcher(dispatch_args),
+                )
+
+            _register_llm_tool_invocation(
+                tool_invocations,
+                tool_id=tool_id,
+                invocation=invocation,
+            )
+            tool_result_payload = {
+                'status': invocation.get('status'),
+                'error': invocation.get('error'),
+                'data': invocation.get('data'),
+            }
+            messages.append(
+                {
+                    'role': 'tool',
+                    'tool_call_id': call['id'],
+                    'name': tool_id,
+                    'content': _serialize_tool_result_for_llm(tool_result_payload),
+                }
+            )
+            executed_tool_calls.append(
+                {
+                    'id': call['id'],
+                    'name': tool_id,
+                    'status': invocation.get('status'),
+                    'error': invocation.get('error'),
+                }
+            )
+
+        rounds += 1
+        llm_res = llm_client.chat(
+            system_prompt,
+            user_prompt,
+            model=llm_model,
+            db=db,
+            messages=messages,
+            tools=tool_specs,
+            tool_choice='auto',
+            **llm_kwargs,
+        )
+        if _llm_tool_injection_unsupported(llm_res):
+            return (
+                llm_client.chat(
+                    system_prompt,
+                    user_prompt,
+                    model=llm_model,
+                    db=db,
+                    messages=messages,
+                    **llm_kwargs,
+                ),
+                executed_tool_calls,
+            )
+
+    # Force a final textual answer after max tool rounds.
+    final_res = llm_client.chat(
+        system_prompt,
+        user_prompt,
+        model=llm_model,
+        db=db,
+        messages=messages,
+        **llm_kwargs,
+    )
+    return final_res, executed_tool_calls
 
 
 def _skill_text(skills: list[str]) -> str:
@@ -832,8 +1376,11 @@ def _optimize_news_prompts_for_latency(system_prompt: str, user_prompt: str) -> 
     system = _compact_prompt_text(system_prompt, max_chars=1200)
     user = _compact_prompt_text(user_prompt, max_chars=1200)
     guidance = (
-        'Format de sortie strict: première ligne commence par bullish, bearish ou neutral, '
-        'puis justification très courte (20 mots max).'
+        'Format de sortie strict: ligne 1 bullish/bearish/neutral; '
+        'ligne 2 case=no_signal|weak_signal|directional_signal; '
+        'ligne 3 horizon=intraday|swing|uncertain; '
+        'ligne 4 impact=high|medium|low; '
+        'ligne 5 justification très courte.'
     )
     if guidance not in system:
         system = f'{system}\n\n{guidance}'
@@ -1075,36 +1622,124 @@ class TechnicalAnalystAgent:
         self.prompt_service = PromptTemplateService()
 
     def run(self, ctx: AgentContext, db: Session | None = None) -> dict[str, Any]:
-        m = ctx.market_snapshot
+        enabled_tools = _resolve_enabled_tools(self.model_selector, db, self.name)
+        tool_invocations: dict[str, dict[str, Any]] = {}
+
+        market_snapshot_tool = _run_agent_tool(
+            tool_id='market_snapshot',
+            enabled_tools=enabled_tools,
+            executor=lambda: dict(ctx.market_snapshot or {}),
+        )
+        tool_invocations['market_snapshot'] = market_snapshot_tool
+
+        m = dict(ctx.market_snapshot or {})
+        if market_snapshot_tool.get('status') == 'ok' and isinstance(market_snapshot_tool.get('data'), dict):
+            m = dict(market_snapshot_tool.get('data') or {})
+
         if m.get('degraded'):
-            return {'signal': 'neutral', 'score': 0.0, 'reason': 'Market data unavailable'}
+            return {
+                'signal': 'neutral',
+                'score': 0.0,
+                'reason': 'Market data unavailable',
+                'tooling': {
+                    'enabled_tools': enabled_tools,
+                    'invocations': tool_invocations,
+                },
+            }
         instrument_vars = build_instrument_prompt_variables(ctx.pair)
 
+        indicator_bundle_tool = _run_agent_tool(
+            tool_id='indicator_bundle',
+            enabled_tools=enabled_tools,
+            executor=lambda: {
+                'trend': m.get('trend'),
+                'rsi': m.get('rsi'),
+                'macd_diff': m.get('macd_diff'),
+                'change_pct': m.get('change_pct'),
+                'atr': m.get('atr'),
+                'last_price': m.get('last_price'),
+                'ema_fast': m.get('ema_fast'),
+                'ema_slow': m.get('ema_slow'),
+            },
+        )
+        tool_invocations['indicator_bundle'] = indicator_bundle_tool
+        indicator_payload = (
+            dict(indicator_bundle_tool.get('data') or {})
+            if indicator_bundle_tool.get('status') == 'ok'
+            else {}
+        )
+
+        trend = str(indicator_payload.get('trend') or m.get('trend') or 'neutral').strip().lower()
+        if trend not in {'bullish', 'bearish', 'neutral'}:
+            trend = 'neutral'
+        rsi = _safe_float(indicator_payload.get('rsi', m.get('rsi')), 50.0)
+        macd_diff = _safe_float(indicator_payload.get('macd_diff', m.get('macd_diff')), 0.0)
+
         score = 0.0
-        if m['trend'] == 'bullish':
+        if trend == 'bullish':
             score += 0.35
-        elif m['trend'] == 'bearish':
+        elif trend == 'bearish':
             score -= 0.35
 
-        if m['rsi'] < 35:
+        if rsi < 35:
             score += 0.25
-        elif m['rsi'] > 65:
+        elif rsi > 65:
             score -= 0.25
 
-        if m['macd_diff'] > 0:
+        if macd_diff > 0:
             score += 0.2
         else:
             score -= 0.2
 
         signal = 'bullish' if score > 0.15 else 'bearish' if score < -0.15 else 'neutral'
+        structure_tool = _run_agent_tool(
+            tool_id='support_resistance_or_structure_detector',
+            enabled_tools=enabled_tools,
+            executor=lambda: {
+                'validation': (
+                    f"Conserver un biais {signal} tant que le prix reste dans la direction du trend ({trend})."
+                    if trend in {'bullish', 'bearish'}
+                    else 'Validation conditionnelle: attendre une reprise de momentum.'
+                ),
+                'invalidation': (
+                    f"Invalider si RSI passe en zone opposée (rsi={round(rsi, 2)}) "
+                    f"et MACD diff inverse durablement ({round(macd_diff, 6)})."
+                ),
+            },
+        )
+        tool_invocations['support_resistance_or_structure_detector'] = structure_tool
+        multi_timeframe_tool = _run_agent_tool(
+            tool_id='multi_timeframe_context',
+            enabled_tools=enabled_tools,
+            executor=lambda: {
+                'timeframe': ctx.timeframe,
+                'availability': 'single_timeframe_snapshot',
+                'alignment': trend,
+            },
+        )
+        tool_invocations['multi_timeframe_context'] = multi_timeframe_tool
+
+        m_effective = {
+            **m,
+            'trend': trend,
+            'rsi': round(rsi, 3),
+            'macd_diff': round(macd_diff, 6),
+        }
         runtime_skills = _resolve_runtime_skills(self.model_selector, db, self.name)
         llm_enabled = self.model_selector.is_enabled(db, self.name)
         output: dict[str, Any] = {
             'signal': signal,
             'score': round(score, 3),
-            'indicators': m,
+            'indicators': m_effective,
             'llm_enabled': llm_enabled,
+            'tooling': {
+                'enabled_tools': enabled_tools,
+                'invocations': tool_invocations,
+                'llm_tool_calls': [],
+            },
         }
+        if structure_tool.get('status') == 'ok':
+            output['structure'] = dict(structure_tool.get('data') or {})
         llm_model = _resolve_llm_model(ctx, self.model_selector, db, self.name)
         output['prompt_meta'] = {
             'prompt_id': None,
@@ -1112,6 +1747,7 @@ class TechnicalAnalystAgent:
             'llm_model': llm_model,
             'llm_enabled': bool(output['llm_enabled']),
             'skills_count': len(runtime_skills),
+            'enabled_tools_count': len(enabled_tools),
         }
         _enrich_prompt_meta_debug(output['prompt_meta'], runtime_skills=runtime_skills)
 
@@ -1127,10 +1763,22 @@ class TechnicalAnalystAgent:
                 output['reason'] = 'Skill guardrails applied (deterministic mode)'
             return output
 
-        fallback_system = 'Tu es un analyste technique multi-actifs. Réponds en français.'
+        fallback_system = (
+            'Tu es un analyste technique multi-actifs discipliné. '
+            'Tu sépares faits, inférences et incertitudes. '
+            'Tu raisonnes en conditions de validation/invalidation. '
+            'N invente jamais niveaux, patterns, volume, corrélations ou news absents.'
+        )
         fallback_user = (
-            'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nTrend: {trend}\nRSI: {rsi}\nMACD diff: {macd_diff}\n'
-            'Prix: {last_price}\nDonne uniquement: bullish, bearish ou neutral puis une courte justification.'
+            'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\n'
+            'Trend: {trend}\nRSI: {rsi}\nMACD diff: {macd_diff}\n'
+            'Change pct: {change_pct}\nATR: {atr}\nPrix: {last_price}\n'
+            'Contrat de sortie:\n'
+            '- Ligne 1: bullish|bearish|neutral.\n'
+            '- Ligne 2: setup_quality=high|medium|low.\n'
+            '- Ligne 3: validation=<condition principale>.\n'
+            '- Ligne 4: invalidation=<condition principale>.\n'
+            '- Ligne 5 max: justification courte faits -> inférence.'
         )
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
         if db is not None:
@@ -1143,10 +1791,12 @@ class TechnicalAnalystAgent:
                     **instrument_vars,
                     'pair': ctx.pair,
                     'timeframe': ctx.timeframe,
-                    'trend': m.get('trend'),
-                    'rsi': m.get('rsi'),
-                    'macd_diff': m.get('macd_diff'),
-                    'last_price': m.get('last_price'),
+                    'trend': m_effective.get('trend'),
+                    'rsi': m_effective.get('rsi'),
+                    'macd_diff': m_effective.get('macd_diff'),
+                    'change_pct': m_effective.get('change_pct'),
+                    'atr': m_effective.get('atr'),
+                    'last_price': m_effective.get('last_price'),
                 },
             )
             system_prompt = prompt_info['system_prompt']
@@ -1157,12 +1807,15 @@ class TechnicalAnalystAgent:
                 instrument_vars,
                 {
                     'timeframe': ctx.timeframe,
-                    'trend': m.get('trend'),
-                    'rsi': m.get('rsi'),
-                    'macd_diff': m.get('macd_diff'),
-                    'last_price': m.get('last_price'),
+                    'trend': m_effective.get('trend'),
+                    'rsi': m_effective.get('rsi'),
+                    'macd_diff': m_effective.get('macd_diff'),
+                    'change_pct': m_effective.get('change_pct'),
+                    'atr': m_effective.get('atr'),
+                    'last_price': m_effective.get('last_price'),
                 },
             ))
+        system_prompt = _append_tools_prompt_guidance(system_prompt, enabled_tools=enabled_tools)
         decision_mode = self.model_selector.resolve_decision_mode(db)
         system_prompt, user_prompt = _apply_mode_prompt_guidance(
             system_prompt,
@@ -1170,12 +1823,38 @@ class TechnicalAnalystAgent:
             decision_mode=decision_mode,
             agent_name=self.name,
         )
-        llm_res = self.llm.chat(
-            system_prompt,
-            user_prompt,
-            model=llm_model,
+        technical_tool_dispatchers: dict[str, Any] = {
+            'market_snapshot': lambda _args: dict(m_effective),
+            'indicator_bundle': lambda _args: {
+                'trend': m_effective.get('trend'),
+                'rsi': m_effective.get('rsi'),
+                'macd_diff': m_effective.get('macd_diff'),
+                'change_pct': m_effective.get('change_pct'),
+                'atr': m_effective.get('atr'),
+                'last_price': m_effective.get('last_price'),
+                'ema_fast': m_effective.get('ema_fast'),
+                'ema_slow': m_effective.get('ema_slow'),
+            },
+            'support_resistance_or_structure_detector': lambda _args: dict(structure_tool.get('data') or {}),
+            'multi_timeframe_context': lambda _args: {
+                'timeframe': ctx.timeframe,
+                'availability': 'single_timeframe_snapshot',
+                'alignment': trend,
+            },
+        }
+        llm_res, llm_tool_calls = _chat_with_runtime_tools(
+            llm_client=self.llm,
+            llm_model=llm_model,
             db=db,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            enabled_tools=enabled_tools,
+            tool_dispatchers=technical_tool_dispatchers,
+            tool_invocations=tool_invocations,
+            require_tool_call=True,
+            default_tool_id='market_snapshot',
         )
+        output['tooling']['llm_tool_calls'] = llm_tool_calls
         llm_text, llm_degraded = _normalize_llm_text_and_degraded(llm_res, require_text=True)
         llm_signal = _parse_signal_from_text(llm_text)
         merged_score, merged_signal = _merge_llm_signal(
@@ -1198,6 +1877,7 @@ class TechnicalAnalystAgent:
                     'llm_model': llm_model,
                     'llm_enabled': True,
                     'skills_count': len(resolved_skills),
+                    'enabled_tools_count': len(enabled_tools),
                 },
             }
         )
@@ -1234,14 +1914,47 @@ class NewsAnalystAgent:
             self._llm_consecutive_failures = 0
 
     def run(self, ctx: AgentContext, db: Session | None = None) -> dict[str, Any]:
+        enabled_tools = _resolve_enabled_tools(self.model_selector, db, self.name)
+        tool_invocations: dict[str, dict[str, Any]] = {}
         raw_news = ctx.news_context.get('news', [])
         raw_macro_events = ctx.news_context.get('macro_events', [])
+
+        news_search_tool = _run_agent_tool(
+            tool_id='news_search',
+            enabled_tools=enabled_tools,
+            executor=lambda: {
+                'items': list(raw_news) if isinstance(raw_news, list) else [],
+                'count': len(raw_news) if isinstance(raw_news, list) else 0,
+            },
+        )
+        tool_invocations['news_search'] = news_search_tool
+        macro_feed_tool = _run_agent_tool(
+            tool_id='macro_calendar_or_event_feed',
+            enabled_tools=enabled_tools,
+            executor=lambda: {
+                'items': list(raw_macro_events) if isinstance(raw_macro_events, list) else [],
+                'count': len(raw_macro_events) if isinstance(raw_macro_events, list) else 0,
+            },
+        )
+        tool_invocations['macro_calendar_or_event_feed'] = macro_feed_tool
+
+        news_items_source = (
+            list(news_search_tool.get('data', {}).get('items', []))
+            if news_search_tool.get('status') == 'ok'
+            else []
+        )
+        macro_items_source = (
+            list(macro_feed_tool.get('data', {}).get('items', []))
+            if macro_feed_tool.get('status') == 'ok'
+            else []
+        )
+
         valid_news = [
-            item for item in raw_news
+            item for item in news_items_source
             if isinstance(item, dict) and str(item.get('title', '') or '').strip()
         ]
         valid_macro_events = [
-            item for item in raw_macro_events
+            item for item in macro_items_source
             if isinstance(item, dict) and str(item.get('event_name', '') or '').strip()
         ]
 
@@ -1508,6 +2221,45 @@ class NewsAnalystAgent:
             (_safe_float(item.get('final_pair_relevance'), 0.0) for item in (relevant_news + relevant_macro)),
             default=0.0,
         )
+        symbol_relevance_tool = _run_agent_tool(
+            tool_id='symbol_relevance_filter',
+            enabled_tools=enabled_tools,
+            executor=lambda: {
+                'retained_news_count': len(relevant_news),
+                'retained_macro_count': len(relevant_macro),
+                'strongest_relevance': round(strongest_relevance, 3),
+                'average_relevance': round(
+                    (
+                        sum(_safe_float(item.get('final_pair_relevance'), 0.0) for item in (relevant_news + relevant_macro))
+                        / max(len(relevant_news) + len(relevant_macro), 1)
+                    ),
+                    3,
+                ),
+            },
+        )
+        tool_invocations['symbol_relevance_filter'] = symbol_relevance_tool
+        sentiment_parser_tool = _run_agent_tool(
+            tool_id='sentiment_or_event_impact_parser',
+            enabled_tools=enabled_tools,
+            executor=lambda: {
+                'bullish_hints': sum(
+                    1
+                    for item in (relevant_news + relevant_macro)
+                    if str(item.get('sentiment_hint') or item.get('directional_hint') or '').strip().lower() == 'bullish'
+                ),
+                'bearish_hints': sum(
+                    1
+                    for item in (relevant_news + relevant_macro)
+                    if str(item.get('sentiment_hint') or item.get('directional_hint') or '').strip().lower() == 'bearish'
+                ),
+                'neutral_hints': sum(
+                    1
+                    for item in (relevant_news + relevant_macro)
+                    if str(item.get('sentiment_hint') or item.get('directional_hint') or '').strip().lower() == 'neutral'
+                ),
+            },
+        )
+        tool_invocations['sentiment_or_event_impact_parser'] = sentiment_parser_tool
         mixed_signals = bullish_weight > 0.15 and bearish_weight > 0.15 and abs(directional_sum) <= max(weight_sum * 0.2, 0.08)
         directional_edge = directional_sum / weight_sum if weight_sum > 0.0 else 0.0
         score = round(_clamp(directional_edge, -1.0, 1.0), 3)
@@ -1615,6 +2367,7 @@ class NewsAnalystAgent:
         llm_retry_used = False
         llm_call_attempted = False
         llm_skipped_reason: str | None = None
+        llm_tool_calls: list[dict[str, Any]] = []
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
         system = ''
         user = ''
@@ -1683,8 +2436,10 @@ class NewsAnalystAgent:
 
             fallback_system = (
                 'Tu es un analyste news multi-actifs. '
+                'Objectif: isoler uniquement les catalyseurs actionnables pour l instrument analysé. '
                 'N invente jamais de causalité. '
                 'Tu dois garder cohérents le résumé, le signal et la force du signal. '
+                'Distingue faits, inférences et incertitudes. '
                 'Raisonne d abord sur l instrument analysé; pour le FX seulement, sépare impact sur actif principal et actif de référence avant de conclure sur la paire. '
                 'Distingue strictement no_signal, weak_signal et directional_signal.'
             )
@@ -1700,7 +2455,9 @@ class NewsAnalystAgent:
                 '- Si les évidences sont seulement faibles ou indirectes, retourne neutral.\n'
                 '- Première ligne obligatoire: bullish, bearish ou neutral.\n'
                 '- Deuxième ligne: case=no_signal|weak_signal|directional_signal.\n'
-                '- Troisième ligne max: justification courte reliant les évidences à l instrument.\n'
+                '- Troisième ligne: horizon=intraday|swing|uncertain.\n'
+                '- Quatrième ligne: impact=high|medium|low.\n'
+                '- Cinquième ligne max: justification courte reliant les évidences à l instrument.\n'
                 '- Ne déclare jamais bullish/bearish si le texte conclut à aucune news pertinente.'
             )
             if db is not None:
@@ -1742,6 +2499,7 @@ class NewsAnalystAgent:
                         'evidence': evidence_text,
                     },
                 ))
+            system = _append_tools_prompt_guidance(system, enabled_tools=enabled_tools)
             system, user = _optimize_news_prompts_for_latency(system, user)
             system, user = _apply_mode_prompt_guidance(
                 system,
@@ -1749,12 +2507,56 @@ class NewsAnalystAgent:
                 decision_mode=trading_decision_mode,
                 agent_name=self.name,
             )
-
-            llm_res = self.llm.chat(
-                system,
-                user,
-                model=llm_model,
+            news_tool_dispatchers: dict[str, Any] = {
+                'news_search': lambda _args: {
+                    'items': list(news_items_source),
+                    'count': len(news_items_source),
+                },
+                'macro_calendar_or_event_feed': lambda _args: {
+                    'items': list(macro_items_source),
+                    'count': len(macro_items_source),
+                },
+                'symbol_relevance_filter': lambda _args: {
+                    'retained_news_count': len(relevant_news),
+                    'retained_macro_count': len(relevant_macro),
+                    'strongest_relevance': round(strongest_relevance, 3),
+                    'average_relevance': round(
+                        (
+                            sum(_safe_float(item.get('final_pair_relevance'), 0.0) for item in (relevant_news + relevant_macro))
+                            / max(len(relevant_news) + len(relevant_macro), 1)
+                        ),
+                        3,
+                    ),
+                },
+                'sentiment_or_event_impact_parser': lambda _args: {
+                    'bullish_hints': sum(
+                        1
+                        for item in (relevant_news + relevant_macro)
+                        if str(item.get('sentiment_hint') or item.get('directional_hint') or '').strip().lower() == 'bullish'
+                    ),
+                    'bearish_hints': sum(
+                        1
+                        for item in (relevant_news + relevant_macro)
+                        if str(item.get('sentiment_hint') or item.get('directional_hint') or '').strip().lower() == 'bearish'
+                    ),
+                    'neutral_hints': sum(
+                        1
+                        for item in (relevant_news + relevant_macro)
+                        if str(item.get('sentiment_hint') or item.get('directional_hint') or '').strip().lower() == 'neutral'
+                    ),
+                },
+            }
+            llm_res, llm_tool_calls = _chat_with_runtime_tools(
+                llm_client=self.llm,
+                llm_model=llm_model,
                 db=db,
+                system_prompt=system,
+                user_prompt=user,
+                enabled_tools=enabled_tools,
+                tool_dispatchers=news_tool_dispatchers,
+                tool_invocations=tool_invocations,
+                require_tool_call=True,
+                default_tool_id='news_search',
                 max_tokens=96,
                 temperature=0.1,
                 request_timeout_seconds=45.0,
@@ -1763,15 +2565,22 @@ class NewsAnalystAgent:
 
             if _should_retry_empty_llm_response(llm_res, llm_text, llm_degraded):
                 llm_retry_used = True
-                llm_res = self.llm.chat(
-                    system,
-                    user,
-                    model=llm_model,
+                llm_res, retry_tool_calls = _chat_with_runtime_tools(
+                    llm_client=self.llm,
+                    llm_model=llm_model,
                     db=db,
+                    system_prompt=system,
+                    user_prompt=user,
+                    enabled_tools=enabled_tools,
+                    tool_dispatchers=news_tool_dispatchers,
+                    tool_invocations=tool_invocations,
+                    require_tool_call=True,
+                    default_tool_id='news_search',
                     max_tokens=384,
                     temperature=0.0,
                     request_timeout_seconds=45.0,
                 )
+                llm_tool_calls.extend(retry_tool_calls)
                 llm_text, llm_degraded = _normalize_llm_text_and_degraded(llm_res, require_text=True)
 
             llm_summary = llm_text
@@ -1908,12 +2717,18 @@ class NewsAnalystAgent:
             'llm_circuit_open': self._is_llm_circuit_open(),
             'degraded': degraded,
             'fetch_status': fetch_status,
+            'tooling': {
+                'enabled_tools': enabled_tools,
+                'invocations': tool_invocations,
+                'llm_tool_calls': llm_tool_calls,
+            },
             'prompt_meta': {
                 'prompt_id': prompt_info.get('prompt_id'),
                 'prompt_version': prompt_info.get('version', 0),
                 'llm_model': llm_model,
                 'llm_enabled': llm_enabled,
                 'skills_count': len(resolved_skills),
+                'enabled_tools_count': len(enabled_tools),
             },
         }
         output = _validate_news_output(
@@ -2195,7 +3010,63 @@ class MarketContextAnalystAgent:
         }
 
     def run(self, ctx: AgentContext, db: Session | None = None) -> dict[str, Any]:
+        enabled_tools = _resolve_enabled_tools(self.model_selector, db, self.name)
+        tool_invocations: dict[str, dict[str, Any]] = {}
         output = self._build_structured_context(ctx.market_snapshot)
+        regime_tool = _run_agent_tool(
+            tool_id='market_regime_context',
+            enabled_tools=enabled_tools,
+            executor=lambda: {
+                'regime': output.get('regime'),
+                'signal': output.get('signal'),
+                'reason': output.get('reason'),
+            },
+        )
+        tool_invocations['market_regime_context'] = regime_tool
+
+        utc_hour = int(time.gmtime().tm_hour)
+        session_label = 'asia'
+        if 7 <= utc_hour < 15:
+            session_label = 'europe'
+        elif 13 <= utc_hour < 22:
+            session_label = 'us'
+        session_tool = _run_agent_tool(
+            tool_id='session_context',
+            enabled_tools=enabled_tools,
+            executor=lambda: {
+                'session': session_label,
+                'utc_hour': utc_hour,
+                'timeframe': ctx.timeframe,
+            },
+        )
+        tool_invocations['session_context'] = session_tool
+
+        correlation_tool = _run_agent_tool(
+            tool_id='correlation_context',
+            enabled_tools=enabled_tools,
+            executor=lambda: {
+                'pair': ctx.pair,
+                'asset_class': instrument_aware_asset_class(ctx.pair),
+                'note': 'Context correlation is heuristic and instrument-aware.',
+            },
+        )
+        tool_invocations['correlation_context'] = correlation_tool
+
+        atr = abs(_safe_float(ctx.market_snapshot.get('atr'), 0.0))
+        last_price = max(abs(_safe_float(ctx.market_snapshot.get('last_price'), 0.0)), 1e-9)
+        atr_ratio = round(
+            _safe_float(ctx.market_snapshot.get('atr_ratio'), atr / last_price),
+            6,
+        )
+        volatility_tool = _run_agent_tool(
+            tool_id='volatility_context',
+            enabled_tools=enabled_tools,
+            executor=lambda: {
+                'atr_ratio': atr_ratio,
+                'volatility_context': output.get('volatility_context'),
+            },
+        )
+        tool_invocations['volatility_context'] = volatility_tool
         instrument_vars = build_instrument_prompt_variables(ctx.pair)
         llm_enabled = self.model_selector.is_enabled(db, self.name)
         runtime_skills = _resolve_runtime_skills(self.model_selector, db, self.name)
@@ -2231,22 +3102,33 @@ class MarketContextAnalystAgent:
         output['llm_call_attempted'] = False
         output['llm_fallback_used'] = False
         output['llm_note'] = ''
+        llm_tool_calls: list[dict[str, Any]] = []
+        output['tooling'] = {
+            'enabled_tools': enabled_tools,
+            'invocations': tool_invocations,
+            'llm_tool_calls': llm_tool_calls,
+        }
 
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
         system_prompt = ''
         user_prompt = ''
         if llm_enabled:
             fallback_system = (
-                'You are market-context-analyst. '
-                'Evaluate only market regime, short-term contextual momentum, movement readability, and volatility context. '
-                'Do not invent macro-fundamental or external sentiment causality. '
-                'Keep analysis cautious and concise.'
+                'Tu es market-context-analyst. '
+                'Evalue uniquement le regime de marche, le momentum contextuel court terme, la lisibilite du mouvement et la volatilite. '
+                'Distingue faits, inférences et incertitudes. '
+                'N invente pas de causalite macro-fondamentale ni de correlations externes.'
             )
             fallback_user = (
                 'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nTrend: {trend}\nLast price: {last_price}\n'
                 'Change pct: {change_pct}\nATR: {atr}\nATR ratio: {atr_ratio}\nRSI: {rsi}\n'
-                'EMA fast: {ema_fast}\nEMA slow: {ema_slow}\n'
-                'Return only one concise context note (no trading instruction).'
+                'EMA fast: {ema_fast}\nEMA slow: {ema_slow}\nMACD diff: {macd_diff}\n'
+                'Contrat de sortie:\n'
+                '- Ligne 1: bullish|bearish|neutral.\n'
+                '- Ligne 2: regime=trending|ranging|calm|unstable|volatile.\n'
+                '- Ligne 3: context_support=supportive|neutral|unsupportive.\n'
+                '- Ligne 4: confidence=low|medium|high.\n'
+                '- Ligne 5 max: note contextuelle prudente sans instruction de trade.'
             )
             variables = {
                 **instrument_vars,
@@ -2282,6 +3164,7 @@ class MarketContextAnalystAgent:
             else:
                 system_prompt = fallback_system
                 user_prompt = fallback_user.format(**variables)
+            system_prompt = _append_tools_prompt_guidance(system_prompt, enabled_tools=enabled_tools)
             system_prompt, user_prompt = _apply_mode_prompt_guidance(
                 system_prompt,
                 user_prompt,
@@ -2290,14 +3173,42 @@ class MarketContextAnalystAgent:
             )
 
             output['llm_call_attempted'] = True
-            llm_res = self.llm.chat(
-                system_prompt,
-                user_prompt,
-                model=llm_model,
+            market_context_tool_dispatchers: dict[str, Any] = {
+                'market_regime_context': lambda _args: {
+                    'regime': output.get('regime'),
+                    'signal': output.get('signal'),
+                    'reason': output.get('reason'),
+                },
+                'session_context': lambda _args: {
+                    'session': session_label,
+                    'utc_hour': utc_hour,
+                    'timeframe': ctx.timeframe,
+                },
+                'correlation_context': lambda _args: {
+                    'pair': ctx.pair,
+                    'asset_class': instrument_aware_asset_class(ctx.pair),
+                    'note': 'Context correlation is heuristic and instrument-aware.',
+                },
+                'volatility_context': lambda _args: {
+                    'atr_ratio': atr_ratio,
+                    'volatility_context': output.get('volatility_context'),
+                },
+            }
+            llm_res, llm_tool_calls = _chat_with_runtime_tools(
+                llm_client=self.llm,
+                llm_model=llm_model,
                 db=db,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                enabled_tools=enabled_tools,
+                tool_dispatchers=market_context_tool_dispatchers,
+                tool_invocations=tool_invocations,
+                require_tool_call=True,
+                default_tool_id='market_regime_context',
                 max_tokens=80,
                 temperature=0.0,
             )
+            output['tooling']['llm_tool_calls'] = llm_tool_calls
             llm_text, llm_degraded = _normalize_llm_text_and_degraded(llm_res, require_text=True)
             if not llm_degraded and llm_text.strip():
                 output['llm_note'] = _compact_prompt_text(llm_text, max_chars=220)
@@ -2314,6 +3225,7 @@ class MarketContextAnalystAgent:
             'llm_model': llm_model,
             'llm_enabled': llm_enabled,
             'skills_count': len(resolved_skills),
+            'enabled_tools_count': len(enabled_tools),
         }
         _enrich_prompt_meta_debug(
             output['prompt_meta'],
@@ -2333,21 +3245,53 @@ class BullishResearcherAgent:
         self.model_selector = AgentModelSelector()
 
     def run(self, ctx: AgentContext, agent_outputs: dict[str, dict[str, Any]], db: Session | None = None) -> dict[str, Any]:
+        enabled_tools = _resolve_enabled_tools(self.model_selector, db, self.name)
+        tool_invocations: dict[str, dict[str, Any]] = {}
         debate_inputs = _compact_outputs_for_debate(agent_outputs)
+        evidence_query_tool = _run_agent_tool(
+            tool_id='evidence_query',
+            enabled_tools=enabled_tools,
+            executor=lambda: {
+                'analysis_outputs': debate_inputs,
+                'analysis_count': len(debate_inputs),
+            },
+        )
+        tool_invocations['evidence_query'] = evidence_query_tool
         instrument_vars = build_instrument_prompt_variables(ctx.pair)
-        arguments = []
-        for name, output in debate_inputs.items():
-            if output.get('score', 0) > 0:
-                arguments.append(f"{name}: {output.get('reason', output.get('signal', 'bullish context'))}")
-
+        research_view = _build_directional_research_view(debate_inputs, target_signal='bullish')
+        thesis_support_tool = _run_agent_tool(
+            tool_id='thesis_support_extractor',
+            enabled_tools=enabled_tools,
+            executor=lambda: {
+                'supporting_arguments': list(research_view.get('supporting_arguments', [])),
+                'opposing_arguments': list(research_view.get('opposing_arguments', [])),
+            },
+        )
+        tool_invocations['thesis_support_extractor'] = thesis_support_tool
+        scenario_validation_tool = _run_agent_tool(
+            tool_id='scenario_validation',
+            enabled_tools=enabled_tools,
+            executor=lambda: {
+                'invalidation_conditions': list(research_view.get('invalidation_conditions', [])),
+            },
+        )
+        tool_invocations['scenario_validation'] = scenario_validation_tool
+        arguments = list(research_view.get('supporting_arguments', []))
         confidence = round(min(sum(max(v.get('score', 0), 0) for v in debate_inputs.values()), 1.0), 3)
         fallback_system = (
-            'Tu es un chercheur de marché haussier multi-actifs. Construis la meilleure thèse haussière à partir des preuves, sans inventer de données externes absentes du payload. '
-            'Réponds en français.'
+            'Tu es un chercheur de marché haussier multi-actifs. '
+            'Construis la meilleure thèse haussière à partir des preuves sans inventer de données externes absentes du payload. '
+            'Structure ta réponse: thèse, preuves prioritaires, limites et invalidations. '
+            'Evite la répétition brute de l analyse technique.'
         )
         fallback_user = (
             'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nSignals: {signals_json}\n'
-            "Mémoire long-terme:\n{memory_context}\nProduit des arguments haussiers concis et des risques d'invalidation."
+            "Mémoire long-terme:\n{memory_context}\n"
+            "Contrat de sortie:\n"
+            "- Thèse haussière (1 phrase).\n"
+            "- Preuves haussières prioritaires (max 3, format source -> fait -> implication).\n"
+            "- Limites/contre-arguments (max 2).\n"
+            "- Conditions d'invalidation (max 2)."
         )
         fallback_user_rendered = fallback_user.format(**_merge_prompt_variables(
             instrument_vars,
@@ -2364,6 +3308,7 @@ class BullishResearcherAgent:
         llm_model = _resolve_llm_model(ctx, self.model_selector, db, self.name)
         trading_decision_mode = self.model_selector.resolve_decision_mode(db)
         should_call_llm = llm_enabled and any(abs(float(item.get('score', 0.0) or 0.0)) >= 0.08 for item in debate_inputs.values())
+        llm_tool_calls: list[dict[str, Any]] = []
         system_prompt = fallback_system
         user_prompt = fallback_user_rendered
         if db is not None and should_call_llm:
@@ -2382,13 +3327,38 @@ class BullishResearcherAgent:
             )
             system_prompt = prompt_info['system_prompt']
             user_prompt = prompt_info['user_prompt']
+            system_prompt = _append_tools_prompt_guidance(system_prompt, enabled_tools=enabled_tools)
             system_prompt, user_prompt = _apply_mode_prompt_guidance(
                 system_prompt,
                 user_prompt,
                 decision_mode=trading_decision_mode,
                 agent_name=self.name,
             )
-            llm_out = self.llm.chat(system_prompt, user_prompt, model=llm_model, db=db)
+            researcher_tool_dispatchers: dict[str, Any] = {
+                'evidence_query': lambda _args: {
+                    'analysis_outputs': debate_inputs,
+                    'analysis_count': len(debate_inputs),
+                },
+                'thesis_support_extractor': lambda _args: {
+                    'supporting_arguments': list(research_view.get('supporting_arguments', [])),
+                    'opposing_arguments': list(research_view.get('opposing_arguments', [])),
+                },
+                'scenario_validation': lambda _args: {
+                    'invalidation_conditions': list(research_view.get('invalidation_conditions', [])),
+                },
+            }
+            llm_out, llm_tool_calls = _chat_with_runtime_tools(
+                llm_client=self.llm,
+                llm_model=llm_model,
+                db=db,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                enabled_tools=enabled_tools,
+                tool_dispatchers=researcher_tool_dispatchers,
+                tool_invocations=tool_invocations,
+                require_tool_call=True,
+                default_tool_id='evidence_query',
+            )
             llm_text, llm_degraded = _normalize_llm_text_and_degraded(llm_out, require_text=True)
         else:
             llm_out = {'text': ''}
@@ -2402,12 +3372,23 @@ class BullishResearcherAgent:
             'llm_debate': llm_text,
             'degraded': llm_degraded,
             'llm_called': bool(db is not None and should_call_llm),
+            'counter_arguments': list(research_view.get('opposing_arguments', [])),
+            'mixed_inputs': list(research_view.get('mixed_inputs', [])),
+            'invalidation_conditions': list(research_view.get('invalidation_conditions', [])),
+            'supporting_signal_count': int(research_view.get('supporting_signal_count', 0) or 0),
+            'opposing_signal_count': int(research_view.get('opposing_signal_count', 0) or 0),
+            'tooling': {
+                'enabled_tools': enabled_tools,
+                'invocations': tool_invocations,
+                'llm_tool_calls': llm_tool_calls,
+            },
             'prompt_meta': {
                 'prompt_id': prompt_info.get('prompt_id'),
                 'prompt_version': prompt_info.get('version', 0),
                 'llm_model': llm_model,
                 'llm_enabled': llm_enabled,
                 'skills_count': len(resolved_skills),
+                'enabled_tools_count': len(enabled_tools),
             },
         }
         _enrich_prompt_meta_debug(
@@ -2428,21 +3409,53 @@ class BearishResearcherAgent:
         self.model_selector = AgentModelSelector()
 
     def run(self, ctx: AgentContext, agent_outputs: dict[str, dict[str, Any]], db: Session | None = None) -> dict[str, Any]:
+        enabled_tools = _resolve_enabled_tools(self.model_selector, db, self.name)
+        tool_invocations: dict[str, dict[str, Any]] = {}
         debate_inputs = _compact_outputs_for_debate(agent_outputs)
+        evidence_query_tool = _run_agent_tool(
+            tool_id='evidence_query',
+            enabled_tools=enabled_tools,
+            executor=lambda: {
+                'analysis_outputs': debate_inputs,
+                'analysis_count': len(debate_inputs),
+            },
+        )
+        tool_invocations['evidence_query'] = evidence_query_tool
         instrument_vars = build_instrument_prompt_variables(ctx.pair)
-        arguments = []
-        for name, output in debate_inputs.items():
-            if output.get('score', 0) < 0:
-                arguments.append(f"{name}: {output.get('reason', output.get('signal', 'bearish context'))}")
-
+        research_view = _build_directional_research_view(debate_inputs, target_signal='bearish')
+        thesis_support_tool = _run_agent_tool(
+            tool_id='thesis_support_extractor',
+            enabled_tools=enabled_tools,
+            executor=lambda: {
+                'supporting_arguments': list(research_view.get('supporting_arguments', [])),
+                'opposing_arguments': list(research_view.get('opposing_arguments', [])),
+            },
+        )
+        tool_invocations['thesis_support_extractor'] = thesis_support_tool
+        scenario_validation_tool = _run_agent_tool(
+            tool_id='scenario_validation',
+            enabled_tools=enabled_tools,
+            executor=lambda: {
+                'invalidation_conditions': list(research_view.get('invalidation_conditions', [])),
+            },
+        )
+        tool_invocations['scenario_validation'] = scenario_validation_tool
+        arguments = list(research_view.get('supporting_arguments', []))
         confidence = round(min(abs(sum(min(v.get('score', 0), 0) for v in debate_inputs.values())), 1.0), 3)
         fallback_system = (
-            'Tu es un chercheur de marché baissier multi-actifs. Construis la meilleure thèse baissière à partir des preuves, sans inventer de données externes absentes du payload. '
-            'Réponds en français.'
+            'Tu es un chercheur de marché baissier multi-actifs. '
+            'Construis la meilleure thèse baissière à partir des preuves sans inventer de données externes absentes du payload. '
+            'Structure ta réponse: thèse, preuves prioritaires, limites et invalidations. '
+            'Evite la répétition brute de l analyse technique.'
         )
         fallback_user = (
             'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nSignals: {signals_json}\n'
-            "Mémoire long-terme:\n{memory_context}\nProduit des arguments baissiers concis et des risques d'invalidation."
+            "Mémoire long-terme:\n{memory_context}\n"
+            "Contrat de sortie:\n"
+            "- Thèse baissière (1 phrase).\n"
+            "- Preuves baissières prioritaires (max 3, format source -> fait -> implication).\n"
+            "- Limites/contre-arguments (max 2).\n"
+            "- Conditions d'invalidation (max 2)."
         )
         fallback_user_rendered = fallback_user.format(**_merge_prompt_variables(
             instrument_vars,
@@ -2459,6 +3472,7 @@ class BearishResearcherAgent:
         llm_model = _resolve_llm_model(ctx, self.model_selector, db, self.name)
         trading_decision_mode = self.model_selector.resolve_decision_mode(db)
         should_call_llm = llm_enabled and any(abs(float(item.get('score', 0.0) or 0.0)) >= 0.08 for item in debate_inputs.values())
+        llm_tool_calls: list[dict[str, Any]] = []
         system_prompt = fallback_system
         user_prompt = fallback_user_rendered
         if db is not None and should_call_llm:
@@ -2477,13 +3491,38 @@ class BearishResearcherAgent:
             )
             system_prompt = prompt_info['system_prompt']
             user_prompt = prompt_info['user_prompt']
+            system_prompt = _append_tools_prompt_guidance(system_prompt, enabled_tools=enabled_tools)
             system_prompt, user_prompt = _apply_mode_prompt_guidance(
                 system_prompt,
                 user_prompt,
                 decision_mode=trading_decision_mode,
                 agent_name=self.name,
             )
-            llm_out = self.llm.chat(system_prompt, user_prompt, model=llm_model, db=db)
+            researcher_tool_dispatchers: dict[str, Any] = {
+                'evidence_query': lambda _args: {
+                    'analysis_outputs': debate_inputs,
+                    'analysis_count': len(debate_inputs),
+                },
+                'thesis_support_extractor': lambda _args: {
+                    'supporting_arguments': list(research_view.get('supporting_arguments', [])),
+                    'opposing_arguments': list(research_view.get('opposing_arguments', [])),
+                },
+                'scenario_validation': lambda _args: {
+                    'invalidation_conditions': list(research_view.get('invalidation_conditions', [])),
+                },
+            }
+            llm_out, llm_tool_calls = _chat_with_runtime_tools(
+                llm_client=self.llm,
+                llm_model=llm_model,
+                db=db,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                enabled_tools=enabled_tools,
+                tool_dispatchers=researcher_tool_dispatchers,
+                tool_invocations=tool_invocations,
+                require_tool_call=True,
+                default_tool_id='evidence_query',
+            )
             llm_text, llm_degraded = _normalize_llm_text_and_degraded(llm_out, require_text=True)
         else:
             llm_out = {'text': ''}
@@ -2497,12 +3536,23 @@ class BearishResearcherAgent:
             'llm_debate': llm_text,
             'degraded': llm_degraded,
             'llm_called': bool(db is not None and should_call_llm),
+            'counter_arguments': list(research_view.get('opposing_arguments', [])),
+            'mixed_inputs': list(research_view.get('mixed_inputs', [])),
+            'invalidation_conditions': list(research_view.get('invalidation_conditions', [])),
+            'supporting_signal_count': int(research_view.get('supporting_signal_count', 0) or 0),
+            'opposing_signal_count': int(research_view.get('opposing_signal_count', 0) or 0),
+            'tooling': {
+                'enabled_tools': enabled_tools,
+                'invocations': tool_invocations,
+                'llm_tool_calls': llm_tool_calls,
+            },
             'prompt_meta': {
                 'prompt_id': prompt_info.get('prompt_id'),
                 'prompt_version': prompt_info.get('version', 0),
                 'llm_model': llm_model,
                 'llm_enabled': llm_enabled,
                 'skills_count': len(resolved_skills),
+                'enabled_tools_count': len(enabled_tools),
             },
         }
         _enrich_prompt_meta_debug(
@@ -3212,12 +4262,16 @@ class TraderAgent:
         if not llm_enabled:
             return output
 
-        fallback_system = "Tu es un assistant trader multi-actifs. Résume la justification finale en note d'exécution compacte."
+        fallback_system = (
+            "Tu es un assistant trader multi-actifs. "
+            "Tu résumes la justification finale en note d'exécution compacte, sans inventer d'information."
+        )
         fallback_user = (
             "Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nDecision: {decision}\nEntry: {entry}\nStop loss: {stop_loss}\n"
             "Take profit: {take_profit}\nConfidence: {confidence}\nBullish: {bullish_args}\n"
             "Bearish: {bearish_args}\nNotes de risque: {risk_notes}\nNet score: {net_score}\nCombined score: {combined_score}\n"
-            "Rédige uniquement une note compacte fidèle aux paramètres fournis. N'invente ni nouveaux niveaux, ni nouvelle décision."
+            "Rédige uniquement une note compacte fidèle aux paramètres fournis. "
+            "N'invente ni nouveaux niveaux, ni nouvelle décision, ni nouveaux signaux."
         )
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
         if db is not None:
@@ -3422,14 +4476,16 @@ class RiskManagerAgent:
 
         fallback_system = (
             'Tu es un risk manager multi-actifs. '
-            'Tu valides ou rejettes la proposition de risque avec discipline.'
+            'Tu valides ou rejettes la proposition de risque avec discipline. '
+            'Tu restes strictement cohérent avec les garde-fous fournis.'
         )
         fallback_user = (
             'Pair: {pair}\nTimeframe: {timeframe}\nMode: {mode}\nDecision: {decision}\n'
             'Entry: {entry}\nStop loss: {stop_loss}\nTake profit: {take_profit}\n'
             'Risk %: {risk_percent}\n'
             'Sortie déterministe: accepted={accepted}, suggested_volume={suggested_volume}, reasons={reasons}\n'
-            'Retour attendu: JSON strict {{"decision":"APPROVE|REJECT","justification":"..."}} sans texte additionnel.'
+            'Retour attendu: JSON strict {{"decision":"APPROVE|REJECT","justification":"..."}} sans texte additionnel. '
+            "N'invente aucune métrique absente."
         )
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
         if db is not None:
@@ -3563,13 +4619,15 @@ class ExecutionManagerAgent:
 
         fallback_system = (
             'Tu es un execution manager multi-actifs. '
-            'Tu confirmes BUY/SELL ou imposes HOLD si la prudence l’exige.'
+            'Tu confirmes BUY/SELL ou imposes HOLD si la prudence l’exige. '
+            'Tu ne peux jamais inverser la direction sans justification stricte.'
         )
         fallback_user = (
             'Pair: {pair}\nTimeframe: {timeframe}\nMode: {mode}\nDecision trader: {decision}\n'
             'Risk accepted: {risk_accepted}\nSuggested volume: {suggested_volume}\n'
             'Stop loss: {stop_loss}\nTake profit: {take_profit}\n'
-            'Retour attendu: JSON strict {{"decision":"BUY|SELL|HOLD","justification":"..."}} sans texte additionnel.'
+            'Retour attendu: JSON strict {{"decision":"BUY|SELL|HOLD","justification":"..."}} sans texte additionnel. '
+            "Si les signaux de sécurité sont insuffisants, retourne HOLD."
         )
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
         if db is not None:

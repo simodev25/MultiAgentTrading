@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from typing import Any
 from weakref import WeakKeyDictionary
 
 from sqlalchemy.orm import Session
@@ -33,6 +34,141 @@ DEFAULT_MEMORY_CONTEXT_ENABLED = False
 LEGACY_AGENT_ALIASES: dict[str, str] = {
     'macro-analyst': 'market-context-analyst',
     'sentiment-agent': 'market-context-analyst',
+}
+AGENT_TOOL_DEFINITIONS: dict[str, dict[str, Any]] = {
+    'news_search': {
+        'label': 'News Search',
+        'description': "Collecte les news pertinentes déjà disponibles pour l'instrument.",
+        'enabled_by_default': True,
+        'reference_origin': 'tradingAgents.get_news',
+    },
+    'macro_calendar_or_event_feed': {
+        'label': 'Macro Event Feed',
+        'description': 'Expose les événements macro récents déjà collectés.',
+        'enabled_by_default': True,
+        'reference_origin': 'tradingAgents.get_global_news',
+    },
+    'symbol_relevance_filter': {
+        'label': 'Symbol Relevance Filter',
+        'description': "Filtre les évidences selon leur pertinence pour l'instrument.",
+        'enabled_by_default': True,
+        'reference_origin': 'adapted relevance scoring patterns',
+    },
+    'sentiment_or_event_impact_parser': {
+        'label': 'Sentiment Impact Parser',
+        'description': "Parse les biais directionnels et l'impact probable des news.",
+        'enabled_by_default': True,
+        'reference_origin': 'tradingAgents news parsing discipline',
+    },
+    'market_snapshot': {
+        'label': 'Market Snapshot',
+        'description': 'Expose le snapshot marché (prix, trend, variation, volatilité).',
+        'enabled_by_default': True,
+        'reference_origin': 'tradingAgents.get_stock_data',
+    },
+    'indicator_bundle': {
+        'label': 'Indicator Bundle',
+        'description': 'Expose RSI, MACD, EMA et métriques techniques associées.',
+        'enabled_by_default': True,
+        'reference_origin': 'tradingAgents.get_indicators',
+    },
+    'support_resistance_or_structure_detector': {
+        'label': 'Structure Detector',
+        'description': 'Déduit des bornes structurelles et des conditions invalidantes.',
+        'enabled_by_default': True,
+        'reference_origin': 'adapted technical structure heuristics',
+    },
+    'multi_timeframe_context': {
+        'label': 'Multi Timeframe Context',
+        'description': "Expose le contexte multi-timeframe disponible pour l'instrument.",
+        'enabled_by_default': True,
+        'reference_origin': 'tradingAgents multi-horizon discipline',
+    },
+    'market_regime_context': {
+        'label': 'Market Regime Context',
+        'description': 'Décrit le régime de marché (trending/ranging/volatile/calm).',
+        'enabled_by_default': True,
+        'reference_origin': 'tradingAgents market analyst regime style',
+    },
+    'session_context': {
+        'label': 'Session Context',
+        'description': 'Indique la session de marché et sa liquidité typique.',
+        'enabled_by_default': True,
+        'reference_origin': 'adapted context-injection pattern',
+    },
+    'correlation_context': {
+        'label': 'Correlation Context',
+        'description': "Résume les corrélations de contexte plausibles pour l'actif.",
+        'enabled_by_default': True,
+        'reference_origin': 'adapted macro-context pattern',
+    },
+    'volatility_context': {
+        'label': 'Volatility Context',
+        'description': 'Qualifie le niveau de volatilité et sa compatibilité setup.',
+        'enabled_by_default': True,
+        'reference_origin': 'tradingAgents market context discipline',
+    },
+    'evidence_query': {
+        'label': 'Evidence Query',
+        'description': 'Interroge les sorties agents pour extraire les signaux exploitables.',
+        'enabled_by_default': True,
+        'reference_origin': 'tradingAgents debate evidence gathering',
+    },
+    'thesis_support_extractor': {
+        'label': 'Thesis Support Extractor',
+        'description': 'Sépare arguments de support, contre-arguments et limites.',
+        'enabled_by_default': True,
+        'reference_origin': 'tradingAgents bull/bear researcher pattern',
+    },
+    'scenario_validation': {
+        'label': 'Scenario Validation',
+        'description': "Construit les conditions de validation et d'invalidation de scénario.",
+        'enabled_by_default': True,
+        'reference_origin': 'tradingAgents debate/risk validation pattern',
+    },
+}
+DEFAULT_AGENT_ALLOWED_TOOLS: dict[str, tuple[str, ...]] = {
+    'technical-analyst': (
+        'market_snapshot',
+        'indicator_bundle',
+        'support_resistance_or_structure_detector',
+        'multi_timeframe_context',
+    ),
+    'news-analyst': (
+        'news_search',
+        'macro_calendar_or_event_feed',
+        'symbol_relevance_filter',
+        'sentiment_or_event_impact_parser',
+    ),
+    'market-context-analyst': (
+        'market_regime_context',
+        'session_context',
+        'correlation_context',
+        'volatility_context',
+    ),
+    'bullish-researcher': (
+        'evidence_query',
+        'thesis_support_extractor',
+        'scenario_validation',
+    ),
+    'bearish-researcher': (
+        'evidence_query',
+        'thesis_support_extractor',
+        'scenario_validation',
+    ),
+    'trader-agent': (
+        'evidence_query',
+        'scenario_validation',
+    ),
+    'risk-manager': (
+        'scenario_validation',
+    ),
+    'execution-manager': (
+        'scenario_validation',
+    ),
+    'schedule-planner-agent': (),
+    'order-guardian': (),
+    'agentic-runtime-planner': (),
 }
 
 
@@ -78,6 +214,113 @@ def _normalize_bool_setting(value: object, *, fallback: bool) -> bool:
         if value == 0:
             return False
     return fallback
+
+
+def _default_agent_tools_map() -> dict[str, dict[str, bool]]:
+    return {
+        agent_name: {
+            tool_id: bool(AGENT_TOOL_DEFINITIONS.get(tool_id, {}).get('enabled_by_default', True))
+            for tool_id in allowed_tools
+        }
+        for agent_name, allowed_tools in DEFAULT_AGENT_ALLOWED_TOOLS.items()
+    }
+
+
+def _extract_tool_enabled_value(value: object, *, fallback: bool) -> bool:
+    if isinstance(value, dict):
+        for key in ('enabled_current', 'enabled', 'active', 'value'):
+            if key in value:
+                return _normalize_bool_setting(value.get(key), fallback=fallback)
+    return _normalize_bool_setting(value, fallback=fallback)
+
+
+def _normalize_tools_for_agent(raw_value: object, *, allowed_tools: tuple[str, ...]) -> dict[str, bool]:
+    defaults = {
+        tool_id: bool(AGENT_TOOL_DEFINITIONS.get(tool_id, {}).get('enabled_by_default', True))
+        for tool_id in allowed_tools
+    }
+    if not isinstance(raw_value, dict):
+        return defaults
+
+    normalized = dict(defaults)
+    for raw_tool_id, raw_tool_payload in raw_value.items():
+        tool_id = str(raw_tool_id or '').strip()
+        if not tool_id or tool_id not in defaults:
+            continue
+        normalized[tool_id] = _extract_tool_enabled_value(raw_tool_payload, fallback=defaults[tool_id])
+    return normalized
+
+
+def normalize_agent_tools_settings(raw_agent_tools: object) -> dict[str, dict[str, bool]]:
+    normalized = _default_agent_tools_map()
+    if not isinstance(raw_agent_tools, dict):
+        return normalized
+
+    for raw_agent_name, raw_agent_tools_map in raw_agent_tools.items():
+        agent_name = normalize_agent_name(str(raw_agent_name or '').strip())
+        if not agent_name:
+            continue
+        allowed_tools = DEFAULT_AGENT_ALLOWED_TOOLS.get(agent_name)
+        if allowed_tools is None:
+            continue
+        normalized[agent_name] = _normalize_tools_for_agent(
+            raw_agent_tools_map,
+            allowed_tools=allowed_tools,
+        )
+    return normalized
+
+
+def build_agent_tools_catalog(agent_tools: object | None = None) -> dict[str, list[dict[str, Any]]]:
+    resolved_tools = normalize_agent_tools_settings(agent_tools)
+    catalog: dict[str, list[dict[str, Any]]] = {}
+    for agent_name, allowed_tools in DEFAULT_AGENT_ALLOWED_TOOLS.items():
+        current_tools = resolved_tools.get(agent_name, {})
+        rows: list[dict[str, Any]] = []
+        for tool_id in allowed_tools:
+            meta = AGENT_TOOL_DEFINITIONS.get(tool_id, {})
+            enabled_by_default = bool(meta.get('enabled_by_default', True))
+            rows.append(
+                {
+                    'tool_id': tool_id,
+                    'label': str(meta.get('label') or tool_id),
+                    'description': str(meta.get('description') or ''),
+                    'enabled_by_default': enabled_by_default,
+                    'enabled_current': bool(current_tools.get(tool_id, enabled_by_default)),
+                }
+            )
+        catalog[agent_name] = rows
+    return catalog
+
+
+def validate_agent_tools_payload(raw_agent_tools: object) -> list[str]:
+    if raw_agent_tools is None:
+        return []
+    if not isinstance(raw_agent_tools, dict):
+        return ['agent_tools must be an object mapping agent_name -> tool states.']
+
+    issues: list[str] = []
+    for raw_agent_name, raw_agent_tools_map in raw_agent_tools.items():
+        agent_name = normalize_agent_name(str(raw_agent_name or '').strip())
+        if not agent_name:
+            continue
+        allowed_tools = DEFAULT_AGENT_ALLOWED_TOOLS.get(agent_name)
+        if allowed_tools is None:
+            issues.append(f"Unknown agent '{raw_agent_name}' in agent_tools.")
+            continue
+        if not isinstance(raw_agent_tools_map, dict):
+            issues.append(f"agent_tools['{raw_agent_name}'] must be an object.")
+            continue
+        for raw_tool_id, raw_tool_payload in raw_agent_tools_map.items():
+            tool_id = str(raw_tool_id or '').strip()
+            if not tool_id:
+                continue
+            if tool_id in allowed_tools:
+                continue
+            if _extract_tool_enabled_value(raw_tool_payload, fallback=False):
+                issues.append(
+                    f"Tool '{tool_id}' is not allowed for agent '{agent_name}'."
+                )
+    return issues
 
 
 class AgentModelSelector:
@@ -233,6 +476,27 @@ class AgentModelSelector:
                 break
 
         return deduped
+
+    def resolve_enabled_tools(self, db: Session | None, agent_name: str) -> list[str]:
+        normalized_agent_name = normalize_agent_name(agent_name)
+        allowed_tools = DEFAULT_AGENT_ALLOWED_TOOLS.get(normalized_agent_name, ())
+        if not allowed_tools:
+            return []
+
+        settings = self._load_llm_settings(db)
+        resolved = normalize_agent_tools_settings(settings.get('agent_tools'))
+        agent_tool_state = resolved.get(normalized_agent_name, {})
+        enabled_tools: list[str] = []
+        for tool_id in allowed_tools:
+            default_enabled = bool(AGENT_TOOL_DEFINITIONS.get(tool_id, {}).get('enabled_by_default', True))
+            if bool(agent_tool_state.get(tool_id, default_enabled)):
+                enabled_tools.append(tool_id)
+        return enabled_tools
+
+    def resolve_tool_catalog(self, db: Session | None, agent_name: str) -> list[dict[str, Any]]:
+        normalized_agent_name = normalize_agent_name(agent_name)
+        catalog = build_agent_tools_catalog(self._load_llm_settings(db).get('agent_tools'))
+        return list(catalog.get(normalized_agent_name, []))
 
     def resolve_decision_mode(self, db: Session | None) -> str:
         fallback = normalize_decision_mode(getattr(self.settings, 'decision_mode', DEFAULT_DECISION_MODE))
