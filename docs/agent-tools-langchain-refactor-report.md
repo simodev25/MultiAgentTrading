@@ -184,6 +184,10 @@ Tests:
   - gestion des `tool_calls` retournés par le modèle
   - boucle d'exécution `tool_call -> résultat tool -> nouveau tour LLM`
   - fallback automatique en mode sans tools si un provider rejette l'injection
+- Gouvernance runtime v2 renforcée:
+  - `RuntimeToolRegistry` applique maintenant une allowlist scoped par appel (`allowed_tools`)
+  - suppression du `allow=['*']` au bootstrap runtime v2 au profit d'une allowlist explicite
+  - `_call_tool(...)` et `sessions_resume` ne peuvent exécuter que le tool explicitement autorisé pour l'étape courante
 - Mode tool-first renforcé:
   - `tool_choice=required` sur les agents prioritaires quand un appel LLM est tenté
   - fallback runtime déterministe si le modèle ne renvoie aucun `tool_call`
@@ -194,6 +198,9 @@ Tests:
   - `error`
   - `data`
 - Les résultats tools réinjectés vers le LLM sont tronqués/compactés pour éviter des prompts excessifs.
+- Le tracing `tooling.llm_tool_calls` est désormais toujours renseigné:
+  - vrai `tool_call` LLM quand disponible
+  - fallback `runtime_preload` synthétique quand l'agent tourne en déterministe
 - Les agents prioritaires utilisent la couche tools en respectant les activations:
   - `technical-analyst`
   - `news-analyst`
@@ -213,9 +220,9 @@ Tests:
 
 Backend (pytest):
 
-`pytest backend/tests/unit/test_connectors_settings_sanitization.py backend/tests/unit/test_agent_model_selector.py backend/tests/unit/test_agent_runtime_skills.py backend/tests/unit/test_prompt_registry.py backend/tests/unit/test_market_context_agent.py backend/tests/unit/test_news_analyst_agent.py backend/tests/unit/test_researcher_agents.py`
+`pytest backend/tests/unit/test_connectors_settings_sanitization.py backend/tests/unit/test_agent_model_selector.py backend/tests/unit/test_agent_runtime_skills.py backend/tests/unit/test_prompt_registry.py backend/tests/unit/test_market_context_agent.py backend/tests/unit/test_news_analyst_agent.py backend/tests/unit/test_researcher_agents.py backend/tests/unit/test_llm_provider_client.py backend/tests/unit/test_ollama_client.py backend/tests/unit/test_agentic_runtime.py`
 
-Résultat: `64 passed`.
+Résultat: `92 passed`.
 
 Frontend:
 

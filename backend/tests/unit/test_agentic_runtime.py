@@ -10,6 +10,7 @@ from app.db.base import Base
 from app.db.models.agent_runtime_event import AgentRuntimeEvent
 from app.db.models.agent_runtime_message import AgentRuntimeMessage
 from app.db.models.agent_runtime_session import AgentRuntimeSession
+from app.db.models.connector_config import ConnectorConfig
 from app.db.models.run import AnalysisRun
 from app.db.models.user import User
 from app.services.agent_runtime.constants import AGENTIC_V2_RUNTIME
@@ -67,6 +68,18 @@ def test_runtime_tool_registry_supports_sync_and_async_handlers() -> None:
 
     assert sync_result == {'value': 'sync'}
     assert async_result == {'value': 'async'}
+
+
+def test_runtime_tool_registry_enforces_scoped_allowlist() -> None:
+    registry = RuntimeToolRegistry()
+    registry.register('allowed-tool', lambda **_kwargs: {'status': 'ok'})
+    registry.register('blocked-tool', lambda **_kwargs: {'status': 'ok'})
+
+    allowed_result = asyncio.run(registry.call('allowed-tool', allowed_tools=['allowed-tool']))
+    assert allowed_result == {'status': 'ok'}
+
+    with pytest.raises(PermissionError):
+        asyncio.run(registry.call('blocked-tool', allowed_tools=['allowed-tool']))
 
 
 def test_runtime_session_store_appends_monotonic_events() -> None:
@@ -819,6 +832,74 @@ def test_agentic_runtime_writes_debug_trade_trace_json(monkeypatch, tmp_path: Pa
             status='skipped',
             mode='simulation',
         ) == executions_before + 1.0
+
+
+def test_agentic_runtime_news_tool_toggle_is_applied_in_runtime_v2() -> None:
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(bind=engine)
+
+    with Session(engine) as db:
+        db.add(
+            ConnectorConfig(
+                connector_name='ollama',
+                enabled=True,
+                settings={
+                    'agent_llm_enabled': {'news-analyst': False},
+                    'agent_tools': {
+                        'news-analyst': {
+                            'news_search': False,
+                            'macro_calendar_or_event_feed': True,
+                            'symbol_relevance_filter': True,
+                            'sentiment_or_event_impact_parser': True,
+                        }
+                    },
+                },
+            )
+        )
+        db.commit()
+
+        run = _seed_run(db)
+        runtime = AgenticTradingRuntime()
+        state = RuntimeSessionState(
+            objective={'kind': 'trade-analysis'},
+            max_turns=12,
+            plan=list(runtime.PLAN),
+        )
+        state.context.update(
+            {
+                'market': {'trend': 'neutral', 'last_price': 1.1, 'atr': 0.001},
+                'news': {
+                    'news': [{'title': 'EUR stays mixed into session open'}],
+                    'macro_events': [],
+                },
+                'memory_context': [],
+                'memory_signal': {},
+                'memory_context_enabled': False,
+            }
+        )
+
+        runtime.session_store.initialize(
+            db,
+            run,
+            runtime_engine=AGENTIC_V2_RUNTIME,
+            objective=state.objective,
+            plan=state.plan,
+            max_turns=state.max_turns,
+        )
+
+        output = asyncio.run(
+            runtime._tool_run_news_analyst(
+                db=db,
+                run=run,
+                state=state,
+                risk_percent=1.0,
+                metaapi_account_ref=None,
+            )
+        )
+
+        invocations = ((output.get('tooling') or {}).get('invocations') or {})
+        assert invocations.get('news_search', {}).get('status') == 'disabled'
+        assert invocations.get('macro_calendar_or_event_feed', {}).get('status') == 'ok'
 
 
 def test_agentic_runtime_writes_debug_trade_trace_json_on_failure(monkeypatch, tmp_path: Path) -> None:

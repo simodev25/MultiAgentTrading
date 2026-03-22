@@ -184,7 +184,10 @@ class AgenticTradingRuntime:
             section='execution',
             profiles=('agentic_v2',),
         )
-        self.registry.set_policy(allow=['*'], deny=[])
+        self.registry.set_policy(
+            allow=[str(item.get('name') or '').strip() for item in self.registry.list_tools()],
+            deny=[],
+        )
 
     @staticmethod
     def _bool_label(value: bool) -> str:
@@ -891,6 +894,7 @@ class AgenticTradingRuntime:
         try:
             result = await self.registry.call(
                 tool_name,
+                allowed_tools=[tool_name],
                 db=db,
                 run=run,
                 state=state,
@@ -1403,6 +1407,7 @@ class AgenticTradingRuntime:
 
         return await self.registry.call(
             source_tool,
+            allowed_tools=[source_tool],
             db=db,
             run=run,
             state=state,

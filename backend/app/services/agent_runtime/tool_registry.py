@@ -42,6 +42,8 @@ class RuntimeToolRegistry:
             profiles=tuple(str(item).strip() for item in profiles if str(item).strip()),
             handler=handler,
         )
+        if self._allow is not None:
+            self._allow.add(normalized)
 
     def set_policy(
         self,
@@ -75,13 +77,32 @@ class RuntimeToolRegistry:
             return True
         return name in self._allow
 
-    async def call(self, name: str, **kwargs: Any) -> dict[str, Any]:
+    @staticmethod
+    def _normalize_allowlist(allowed_tools: list[str] | tuple[str, ...] | set[str] | None) -> set[str] | None:
+        if allowed_tools is None:
+            return None
+        return {
+            str(item or '').strip()
+            for item in allowed_tools
+            if str(item or '').strip()
+        }
+
+    async def call(
+        self,
+        name: str,
+        *,
+        allowed_tools: list[str] | tuple[str, ...] | set[str] | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         normalized = str(name or '').strip()
         definition = self._tools.get(normalized)
         if definition is None:
             raise KeyError(f'Unknown runtime tool: {normalized}')
         if not self._is_allowed(normalized):
             raise PermissionError(f'Runtime tool denied by policy: {normalized}')
+        scoped_allow = self._normalize_allowlist(allowed_tools)
+        if scoped_allow is not None and normalized not in scoped_allow:
+            raise PermissionError(f'Runtime tool denied by scoped allowlist: {normalized}')
 
         result = definition.handler(**kwargs)
         if inspect.isawaitable(result):

@@ -621,6 +621,33 @@ def _register_llm_tool_invocation(
     tool_invocations[tool_id] = invocation
 
 
+def _finalize_llm_tool_calls(
+    llm_tool_calls: list[dict[str, Any]] | None,
+    *,
+    tool_invocations: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if isinstance(llm_tool_calls, list) and llm_tool_calls:
+        return [item for item in llm_tool_calls if isinstance(item, dict)]
+
+    synthesized_calls: list[dict[str, Any]] = []
+    for index, (tool_id, invocation) in enumerate(tool_invocations.items()):
+        if not isinstance(invocation, dict):
+            continue
+        normalized_tool_id = str(tool_id or '').strip()
+        if not normalized_tool_id:
+            continue
+        synthesized_calls.append(
+            {
+                'id': f'runtime_tool_{index}_{normalized_tool_id}',
+                'name': normalized_tool_id,
+                'status': str(invocation.get('status') or 'unknown').strip() or 'unknown',
+                'error': invocation.get('error'),
+                'source': 'runtime_preload',
+            }
+        )
+    return synthesized_calls
+
+
 def _llm_tool_injection_unsupported(llm_res: dict[str, Any]) -> bool:
     if not bool(llm_res.get('degraded', False)):
         return False
@@ -1735,7 +1762,7 @@ class TechnicalAnalystAgent:
             'tooling': {
                 'enabled_tools': enabled_tools,
                 'invocations': tool_invocations,
-                'llm_tool_calls': [],
+                'llm_tool_calls': _finalize_llm_tool_calls([], tool_invocations=tool_invocations),
             },
         }
         if structure_tool.get('status') == 'ok':
@@ -1854,7 +1881,10 @@ class TechnicalAnalystAgent:
             require_tool_call=True,
             default_tool_id='market_snapshot',
         )
-        output['tooling']['llm_tool_calls'] = llm_tool_calls
+        output['tooling']['llm_tool_calls'] = _finalize_llm_tool_calls(
+            llm_tool_calls,
+            tool_invocations=tool_invocations,
+        )
         llm_text, llm_degraded = _normalize_llm_text_and_degraded(llm_res, require_text=True)
         llm_signal = _parse_signal_from_text(llm_text)
         merged_score, merged_signal = _merge_llm_signal(
@@ -2720,7 +2750,10 @@ class NewsAnalystAgent:
             'tooling': {
                 'enabled_tools': enabled_tools,
                 'invocations': tool_invocations,
-                'llm_tool_calls': llm_tool_calls,
+                'llm_tool_calls': _finalize_llm_tool_calls(
+                    llm_tool_calls,
+                    tool_invocations=tool_invocations,
+                ),
             },
             'prompt_meta': {
                 'prompt_id': prompt_info.get('prompt_id'),
@@ -3106,7 +3139,10 @@ class MarketContextAnalystAgent:
         output['tooling'] = {
             'enabled_tools': enabled_tools,
             'invocations': tool_invocations,
-            'llm_tool_calls': llm_tool_calls,
+            'llm_tool_calls': _finalize_llm_tool_calls(
+                llm_tool_calls,
+                tool_invocations=tool_invocations,
+            ),
         }
 
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
@@ -3208,7 +3244,10 @@ class MarketContextAnalystAgent:
                 max_tokens=80,
                 temperature=0.0,
             )
-            output['tooling']['llm_tool_calls'] = llm_tool_calls
+            output['tooling']['llm_tool_calls'] = _finalize_llm_tool_calls(
+                llm_tool_calls,
+                tool_invocations=tool_invocations,
+            )
             llm_text, llm_degraded = _normalize_llm_text_and_degraded(llm_res, require_text=True)
             if not llm_degraded and llm_text.strip():
                 output['llm_note'] = _compact_prompt_text(llm_text, max_chars=220)
@@ -3380,7 +3419,10 @@ class BullishResearcherAgent:
             'tooling': {
                 'enabled_tools': enabled_tools,
                 'invocations': tool_invocations,
-                'llm_tool_calls': llm_tool_calls,
+                'llm_tool_calls': _finalize_llm_tool_calls(
+                    llm_tool_calls,
+                    tool_invocations=tool_invocations,
+                ),
             },
             'prompt_meta': {
                 'prompt_id': prompt_info.get('prompt_id'),
@@ -3544,7 +3586,10 @@ class BearishResearcherAgent:
             'tooling': {
                 'enabled_tools': enabled_tools,
                 'invocations': tool_invocations,
-                'llm_tool_calls': llm_tool_calls,
+                'llm_tool_calls': _finalize_llm_tool_calls(
+                    llm_tool_calls,
+                    tool_invocations=tool_invocations,
+                ),
             },
             'prompt_meta': {
                 'prompt_id': prompt_info.get('prompt_id'),

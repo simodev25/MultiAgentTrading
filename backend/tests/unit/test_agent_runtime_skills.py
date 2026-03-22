@@ -48,6 +48,8 @@ def test_market_context_agent_applies_deterministic_skill_guardrails() -> None:
         assert result['volatility_context'] in {'supportive', 'unsupportive', 'neutral'}
         assert result['llm_summary'].startswith(result['signal'])
         assert result['prompt_meta']['skills_count'] == 1
+        assert result['tooling']['llm_tool_calls']
+        assert result['tooling']['llm_tool_calls'][0]['source'] == 'runtime_preload'
 
 
 def test_technical_agent_injects_tools_into_llm_and_executes_tool_calls(monkeypatch) -> None:
@@ -129,6 +131,8 @@ def test_news_agent_uses_skill_aware_fallback_when_llm_disabled() -> None:
         assert result['summary'].startswith('neutral')
         assert result['decision_mode'] == 'neutral_from_low_relevance'
         assert result['prompt_meta']['skills_count'] == 1
+        assert result['tooling']['llm_tool_calls']
+        assert result['tooling']['llm_tool_calls'][0]['source'] == 'runtime_preload'
 
 
 def test_news_agent_respects_disabled_news_search_tool() -> None:
