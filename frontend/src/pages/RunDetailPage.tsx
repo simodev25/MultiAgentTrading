@@ -3,7 +3,11 @@ import { useParams } from 'react-router-dom';
 import { api, wsRunUrl } from '../api/client';
 import { LoadingSpinner, SectionSkeleton } from '../components/LoadingIndicators';
 import { useAuth } from '../hooks/useAuth';
-import { Download, FileJson, Layers, Radio, Server, Info, ChevronDown, Copy, Check } from 'lucide-react';
+import {
+  Download, FileJson, Layers, Radio, Server, Info, ChevronDown, Copy, Check,
+  LineChart, Newspaper, Globe, TrendingUp, TrendingDown, Wallet, ShieldAlert, Zap, CalendarClock, Shield, Bot,
+} from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import type {
   AgentStep,
   InstrumentDescriptor,
@@ -372,8 +376,23 @@ function ExpansionPanel({
   );
 }
 
+const AGENT_ICON_MAP: Record<string, { icon: LucideIcon; color: string }> = {
+  'technical-analyst':      { icon: LineChart,     color: '#4B7BF5' },
+  'news-analyst':           { icon: Newspaper,     color: '#F5A623' },
+  'market-context-analyst': { icon: Globe,         color: '#8B5CF6' },
+  'bullish-researcher':     { icon: TrendingUp,    color: '#00D26A' },
+  'bearish-researcher':     { icon: TrendingDown,  color: '#FF4757' },
+  'trader-agent':           { icon: Wallet,        color: '#06B6D4' },
+  'risk-manager':           { icon: ShieldAlert,   color: '#F97316' },
+  'execution-manager':      { icon: Zap,           color: '#EAB308' },
+  'schedule-planner-agent': { icon: CalendarClock, color: '#A78BFA' },
+  'order-guardian':         { icon: Shield,        color: '#14B8A6' },
+};
+const DEFAULT_AGENT_ICON = { icon: Bot, color: '#5A5E6E' };
+
 function AgentStepPanel({ step, jsonText }: { step: AgentStep; jsonText: string }) {
   const [open, setOpen] = useState(false);
+  const { icon: Icon, color } = AGENT_ICON_MAP[step.agent_name] ?? DEFAULT_AGENT_ICON;
   return (
     <div className="hw-surface-alt overflow-hidden">
       <button
@@ -382,6 +401,12 @@ function AgentStepPanel({ step, jsonText }: { step: AgentStep; jsonText: string 
         className="w-full flex items-center justify-between px-4 py-2.5 hover:bg-surface-raised/40 transition-colors"
       >
         <div className="flex items-center gap-3 min-w-0">
+          <span
+            className="flex items-center justify-center w-6 h-6 rounded-md shrink-0"
+            style={{ backgroundColor: `${color}20`, color }}
+          >
+            <Icon className="w-3.5 h-3.5" />
+          </span>
           <span className="text-[10px] font-bold text-text-muted tracking-[0.1em] uppercase truncate">
             {step.agent_name}
           </span>
