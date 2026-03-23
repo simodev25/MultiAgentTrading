@@ -8,7 +8,7 @@ const WS_RECONNECT_DELAY_MS = 3000;
 const WS_REFRESH_DEBOUNCE_MS = 1500;
 const WS_HEAVY_REFRESH_MIN_INTERVAL_MS = 45000;
 const LIVE_EXPOSURE_POLL_MS = runtimeConfig.metaApiRealtimePricesPollMs;
-const LIVE_EXPOSURE_SDK_MIN_POLL_MS = 20000;
+const LIVE_EXPOSURE_SDK_MIN_POLL_MS = 10000;
 const LIVE_EXPOSURE_RATE_LIMIT_COOLDOWN_MS = 65000;
 type OpenExposureScope = 'full' | 'positions' | 'orders';
 type TradingOrdersWsMessage = {
@@ -292,8 +292,10 @@ export function useMetaTradingData(token: string | null) {
 
     const refreshOpenExposure = () => {
       if (document.visibilityState === 'hidden') return;
-      const scope = openExposurePollTargetRef.current;
-      openExposurePollTargetRef.current = scope === 'positions' ? 'orders' : 'positions';
+      const cycle = openExposurePollCycleRef.current;
+      openExposurePollCycleRef.current = cycle + 1;
+      // Always fetch positions; fetch orders every 3rd cycle
+      const scope: OpenExposureScope = cycle % 3 === 0 ? 'full' : 'positions';
       void loadOpenExposure(accountRef, scope, 'poll');
     };
 
@@ -398,5 +400,6 @@ export function useMetaTradingData(token: string | null) {
     bootstrapLoading,
     loadMetaTrading,
     liveExposurePollMs,
+    lastPositionUpdate,
   };
 }

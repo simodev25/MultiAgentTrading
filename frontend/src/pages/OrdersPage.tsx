@@ -160,6 +160,7 @@ export function OrdersPage() {
     bootstrapLoading: metaBootstrapLoading,
     loadMetaTrading,
     liveExposurePollMs,
+    lastPositionUpdate,
   } = useMetaTradingData(token);
 
   const {
@@ -906,6 +907,9 @@ export function OrdersPage() {
                 <span className="text-[10px] font-semibold tracking-[0.12em] text-text-muted uppercase block mt-4 mb-2">OPEN_POSITIONS_MT5</span>
                 <p className="model-source">
                   Provider positions: <code>{openPositionsProvider || 'unknown'}</code>
+                  {lastPositionUpdate && (
+                    <> | MAJ: <code>{lastPositionUpdate.toLocaleTimeString()}</code></>
+                  )}
                 </p>
                 {openPositionsError && <p className="alert">{openPositionsError}</p>}
                 <OpenPositionsTable
