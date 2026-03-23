@@ -670,20 +670,23 @@ export function OpenOrdersChart({
   ]);
 
   return (
-    <div className="open-orders-chart open-orders-chart--mt5">
-      <p className="model-source open-orders-legend">
-        Bougies MT5: haussière contour vert, baissière corps blanc | Volume: histogramme vert | Bleu: prix d&apos;entrée positions | Vert: prix courant positions | Orange: prix d&apos;entrée ordres | Rouge: prix courant ordres | S/L: ligne rouge pointillée | T/P: ligne verte pointillée
+    <div className="flex flex-col gap-2">
+      <p className="text-[9px] font-mono text-text-muted leading-relaxed">
+        Bougies MT5: haussière contour vert, baissière corps blanc | Volume: histogramme vert | Bleu: prix d&apos;entrée positions | Vert: prix courant positions
+        <br />
+        Orange: prix d&apos;entrée ordres | Rouge: prix courant ordres | S/L: ligne rouge pointillée | T/P: ligne verte pointillée
       </p>
       {chartRenderError ? (
-        <p className="chart-empty">Erreur graphique: {chartRenderError}</p>
+        <p className="text-text-muted text-xs font-mono py-8 text-center">Erreur graphique: {chartRenderError}</p>
       ) : hasRenderableData ? (
         <div
           aria-label="Graphique TradingView des ordres ouverts"
-          className="open-orders-chart-canvas open-orders-chart-canvas--mt5"
+          className="w-full rounded-lg overflow-hidden border border-border"
+          style={{ height: '520px' }}
           ref={containerRef}
         />
       ) : (
-        <p className="chart-empty">Aucune donnée de prix exploitable pour les ordres ouverts.</p>
+        <p className="text-text-muted text-xs font-mono py-8 text-center">Aucune donnée de prix exploitable pour les ordres ouverts.</p>
       )}
     </div>
   );

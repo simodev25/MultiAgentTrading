@@ -743,7 +743,7 @@ export function OrdersPage() {
         </div>
       </section>
 
-      <section className="grid grid-cols-[200px_1fr_220px] gap-5">
+      <section className="grid grid-cols-[200px_1fr] gap-5">
         <aside className="hw-surface p-4">
           <div className="section-header"><span className="section-title">NAV_PANEL</span></div>
           <nav className="flex flex-col gap-1" aria-label="Navigation ordres">
@@ -763,83 +763,126 @@ export function OrdersPage() {
               <span className="w-5 h-5 rounded bg-surface-alt border border-border flex items-center justify-center text-[9px] font-bold">M</span>
               <span>Trades MT5</span>
             </button>
-            <button
-              className={`flex items-center gap-2 px-3 py-2 rounded-lg text-[11px] font-medium transition-all ${activePanel === 'queue' ? 'bg-accent/10 text-accent border border-accent/20' : 'text-text-muted hover:text-text border border-transparent'}`}
-              type="button"
-              onClick={() => quickNavigate('orders-platform', 'queue')}
-            >
-              <span className="w-5 h-5 rounded bg-surface-alt border border-border flex items-center justify-center text-[9px] font-bold">F</span>
-              <span>File ordres</span>
-            </button>
           </nav>
           <div className="mt-4 pt-3 border-t border-border space-y-1">
             <p className="text-[10px] font-mono text-text-muted">BUY: <strong className="text-success">{buyCount}</strong></p>
             <p className="text-[10px] font-mono text-text-muted">SELL: <strong className="text-danger">{sellCount}</strong></p>
             <p className="text-[10px] font-mono text-text-muted">Pending: <strong className="text-text">{openOrders.length}</strong></p>
           </div>
+          <div className="mt-4 pt-3 border-t border-border">
+            <div className="section-header"><span className="section-title">ORDER_QUEUE</span></div>
+            <p className="model-source">
+              MAJ live: {Math.max(1, Math.round(liveExposurePollMs / 1000))}s (onglet visible)
+            </p>
+            <div className="space-y-2">
+              {watchlist.rows.length === 0 ? (
+                <p className="model-source">Aucun symbole actif.</p>
+              ) : (
+                <>
+                  {watchlist.rows.map((row) => (
+                    <div key={row.symbol} className="flex items-center justify-between text-[10px] font-mono">
+                      <span className="text-text">{row.symbol}</span>
+                      <span className="text-text-muted">{row.last > 0 ? row.last.toFixed(5) : '-'}</span>
+                      <strong className={row.pnl >= 0 ? 'text-success' : 'text-danger'}>{formatSigned(row.pnl)}</strong>
+                    </div>
+                  ))}
+                  <div className="flex items-center justify-between text-[10px] font-mono pt-2 border-t border-border">
+                    <span className="text-text font-semibold">Total</span>
+                    <span className="text-text-muted">{watchlist.totalOrders} ordres</span>
+                    <strong className={watchlist.totalPnl >= 0 ? 'text-success' : 'text-danger'}>
+                      {formatSigned(watchlist.totalPnl)}
+                    </strong>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
         </aside>
 
         <div className="flex flex-col gap-5">
-          <section className="hw-surface p-5" id="orders-chart">
-            <div className="section-header"><span className="section-title">OPEN_ORDERS // TRADINGVIEW</span></div>
+          <section className="hw-surface overflow-hidden" id="orders-chart">
+            {/* ── Chart header bar ── */}
+            <div className="flex items-center justify-between px-5 py-3 border-b border-border">
+              <div className="flex items-center gap-3">
+                <span className="text-sm font-bold tracking-wide text-text" data-testid="open-orders-chart-context">
+                  {chartSelection.displaySymbol ?? 'OPEN_ORDERS'}
+                </span>
+                <span className="terminal-tag">LIVE_FEED</span>
+                <span className="text-[10px] font-mono text-text-muted">
+                  Sources: <code>{openPositionsProvider || '-'}</code> | <code>{openOrdersProvider || '-'}</code>
+                </span>
+              </div>
+              <div className="flex items-center gap-4">
+                <div className="flex items-center gap-1.5 text-[10px] font-mono" data-testid="open-orders-chart-timer">
+                  <span className="text-text-muted">Timer ({chartSelection.timeframe ?? '-'}):</span>
+                  <code className="text-accent">{chartCountdownLabel}</code>
+                  <span className="text-text-muted ml-2">MAJ:</span>
+                  <code className="text-accent">{chartNextRefreshAtLabel}</code>
+                </div>
+              </div>
+            </div>
+
             {metaFeatureDisabled ? (
-              <>
+              <div className="p-5">
                 <p className="model-source">
                   Vue désactivée côté UI. Activer <code>VITE_ENABLE_METAAPI_REAL_TRADES_DASHBOARD=true</code>.
                 </p>
                 {metaError && <p className="alert">{metaError}</p>}
-              </>
+              </div>
             ) : (
               <>
-                <p className="model-source">
-                  Sources: positions <code>{openPositionsProvider || 'unknown'}</code> | ordres <code>{openOrdersProvider || 'unknown'}</code>
-                </p>
-                <div className="flex flex-wrap items-center justify-between gap-3 mt-2">
-                  <div className="space-y-1">
-                    <p className="model-source" data-testid="open-orders-chart-filter">
-                      Filtre actif: <code>{selectedChartTicket ?? 'Tous les ordres'}</code>
-                    </p>
-                    <p className="model-source" data-testid="open-orders-chart-context">
-                      Symbole: <code>{chartSelection.displaySymbol ?? '-'}</code> | Timeframe: <code>{chartSelection.timeframe ?? '-'}</code>{' '}
-                      {chartTimeframeOverride ? '' : `(auto: ${chartSelection.autoTimeframe ?? '-'})`} | Provider marché: <code>{marketProvider || 'unknown'}</code>
-                    </p>
+                {/* ── Controls bar ── */}
+                <div className="flex items-center justify-between px-5 py-2 border-b border-border bg-surface-alt/30">
+                  <div className="flex items-center gap-3">
+                    <span className="micro-label">FILTER</span>
+                    <code className="text-[10px] text-text" data-testid="open-orders-chart-filter">{selectedChartTicket ?? 'Tous les ordres'}</code>
+                    <span className="text-border">|</span>
+                    <span className="micro-label">TF</span>
+                    <code className="text-[10px] text-text">{chartSelection.timeframe ?? '-'}</code>
+                    {!chartTimeframeOverride && <span className="text-[9px] text-text-muted">(auto: {chartSelection.autoTimeframe ?? '-'})</span>}
                   </div>
-                  <div className="space-y-1 text-right">
-                    <p className="model-source" data-testid="open-orders-chart-timer">
-                      Timer bougie ({chartSelection.timeframe ?? '-'}): <code>{chartCountdownLabel}</code> | Prochaine MAJ: <code>{chartNextRefreshAtLabel}</code>
-                    </p>
-                    <div className="flex items-center gap-2 justify-end">
-                      <label className="micro-label">Timeframe graphique</label>
-                      <select
-                        aria-label="Timeframe graphique"
-                        value={chartTimeframeOverride}
-                        onChange={(e) => setChartTimeframeOverride(e.target.value)}
-                        disabled={!chartSelection.symbol}
-                        className="w-auto"
-                      >
-                        <option value="">Auto (TF ouverture)</option>
-                        {DEFAULT_TIMEFRAMES.map((item) => (
-                          <option key={item} value={item}>{item}</option>
-                        ))}
-                      </select>
+                  <div className="flex items-center gap-2">
+                    <span className="micro-label">TIME_SCALE</span>
+                    <div className="flex items-center gap-1" role="group" aria-label="Timeframe graphique">
+                      {DEFAULT_TIMEFRAMES.map((item) => (
+                        <button
+                          key={item}
+                          type="button"
+                          disabled={!chartSelection.symbol}
+                          onClick={() => setChartTimeframeOverride(chartTimeframeOverride === item ? '' : item)}
+                          className={`px-3 py-1.5 rounded-md text-[11px] font-mono font-semibold border transition-all ${
+                            (chartTimeframeOverride || chartSelection.autoTimeframe) === item
+                              ? 'border-accent text-accent bg-accent/10'
+                              : 'border-border text-text-muted bg-surface-alt hover:text-text hover:border-text-muted'
+                          } disabled:opacity-40 disabled:cursor-not-allowed`}
+                        >
+                          {item}
+                        </button>
+                      ))}
                     </div>
                   </div>
                 </div>
-                {marketLoading && marketCandles.length > 0 && <p className="model-source mt-2">Mise à jour de la courbe...</p>}
-                {marketError && <p className="alert mt-2">{marketError}</p>}
-                {marketLoading && marketCandles.length === 0 ? (
-                  <div className="h-64 bg-bg rounded-lg border border-border flex items-center justify-center mt-3" data-testid="open-orders-chart-skeleton" aria-label="Chargement graphique ordres ouverts">
-                    <span className="text-text-muted text-xs font-mono animate-pulse">Chargement graphique...</span>
-                  </div>
-                ) : (
-                  <OpenOrdersChart
-                    openPositions={openPositions}
-                    openOrders={openOrders}
-                    marketCandles={marketCandles}
-                    selectedTicket={selectedChartTicket}
-                    selectedSymbol={chartSelection.symbol}
-                  />
-                )}
+
+                {/* ── Chart area ── */}
+                <div className="p-3">
+                  {marketLoading && marketCandles.length > 0 && (
+                    <p className="text-[10px] font-mono text-accent animate-pulse mb-2 px-2">Mise à jour de la courbe...</p>
+                  )}
+                  {marketError && <p className="alert mb-2">{marketError}</p>}
+                  {marketLoading && marketCandles.length === 0 ? (
+                    <div className="flex items-center justify-center border border-border rounded-lg bg-bg" style={{ height: '520px' }} data-testid="open-orders-chart-skeleton" aria-label="Chargement graphique ordres ouverts">
+                      <span className="text-text-muted text-xs font-mono animate-pulse">Chargement graphique...</span>
+                    </div>
+                  ) : (
+                    <OpenOrdersChart
+                      openPositions={openPositions}
+                      openOrders={openOrders}
+                      marketCandles={marketCandles}
+                      selectedTicket={selectedChartTicket}
+                      selectedSymbol={chartSelection.symbol}
+                    />
+                  )}
+                </div>
               </>
             )}
           </section>
@@ -918,36 +961,6 @@ export function OrdersPage() {
           </section>
         </div>
 
-        <aside className="flex flex-col gap-5">
-          <section className="hw-surface p-4">
-            <div className="section-header"><span className="section-title">ORDER_QUEUE</span></div>
-            <p className="model-source">
-              MAJ live: {Math.max(1, Math.round(liveExposurePollMs / 1000))}s (onglet visible)
-            </p>
-            <div className="space-y-2">
-              {watchlist.rows.length === 0 ? (
-                <p className="model-source">Aucun symbole actif.</p>
-              ) : (
-                <>
-                  {watchlist.rows.map((row) => (
-                    <div key={row.symbol} className="flex items-center justify-between text-[10px] font-mono">
-                      <span className="text-text">{row.symbol}</span>
-                      <span className="text-text-muted">{row.last > 0 ? row.last.toFixed(5) : '-'}</span>
-                      <strong className={row.pnl >= 0 ? 'text-success' : 'text-danger'}>{formatSigned(row.pnl)}</strong>
-                    </div>
-                  ))}
-                  <div className="flex items-center justify-between text-[10px] font-mono pt-2 border-t border-border">
-                    <span className="text-text font-semibold">Total</span>
-                    <span className="text-text-muted">{watchlist.totalOrders} ordres</span>
-                    <strong className={watchlist.totalPnl >= 0 ? 'text-success' : 'text-danger'}>
-                      {formatSigned(watchlist.totalPnl)}
-                    </strong>
-                  </div>
-                </>
-              )}
-            </div>
-          </section>
-        </aside>
       </section>
     </div>
   );
