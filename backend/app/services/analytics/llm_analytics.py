@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
@@ -12,7 +12,7 @@ class LlmAnalyticsService:
     def summary(self, db: Session, days: int | None = None) -> dict:
         query = db.query(LlmCallLog)
         if days:
-            cutoff = datetime.utcnow() - timedelta(days=days)
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
             query = query.filter(LlmCallLog.created_at >= cutoff)
 
         total_calls = query.count()
@@ -42,7 +42,7 @@ class LlmAnalyticsService:
     def models_usage(self, db: Session, days: int | None = None, limit: int = 20) -> list[dict]:
         query = db.query(LlmCallLog)
         if days:
-            cutoff = datetime.utcnow() - timedelta(days=days)
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
             query = query.filter(LlmCallLog.created_at >= cutoff)
 
         rows = (

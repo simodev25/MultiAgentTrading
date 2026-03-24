@@ -8,7 +8,7 @@ const WS_RECONNECT_DELAY_MS = 3000;
 const WS_REFRESH_DEBOUNCE_MS = 1500;
 const WS_HEAVY_REFRESH_MIN_INTERVAL_MS = 45000;
 const LIVE_EXPOSURE_POLL_MS = runtimeConfig.metaApiRealtimePricesPollMs;
-const LIVE_EXPOSURE_SDK_MIN_POLL_MS = 20000;
+const LIVE_EXPOSURE_SDK_MIN_POLL_MS = 10000;
 const LIVE_EXPOSURE_RATE_LIMIT_COOLDOWN_MS = 65000;
 type OpenExposureScope = 'full' | 'positions' | 'orders';
 type TradingOrdersWsMessage = {
@@ -39,9 +39,10 @@ export function useMetaTradingData(token: string | null) {
   const [initialMetaLoadDone, setInitialMetaLoadDone] = useState(false);
   const [bootstrapLoading, setBootstrapLoading] = useState(true);
 
+  const [lastPositionUpdate, setLastPositionUpdate] = useState<Date | null>(null);
   const metaLoadingRef = useRef(false);
   const openExposureLoadingRef = useRef(false);
-  const openExposurePollTargetRef = useRef<'positions' | 'orders'>('positions');
+  const openExposurePollCycleRef = useRef(0);
   const openExposureCooldownUntilMsRef = useRef(0);
   const lastManualRefreshMsRef = useRef(0);
   const lastEventRefreshMsRef = useRef(0);
@@ -112,6 +113,7 @@ export function useMetaTradingData(token: string | null) {
           setOpenPositionsProvider(typeof openPositionsPayload.provider === 'string' ? openPositionsPayload.provider : '');
           setOpenPositionsError(openPositionsPayload.reason ?? null);
           registerRateLimitCooldown(openPositionsPayload.reason);
+          setLastPositionUpdate(new Date());
         } else {
           const message = openPositionsResult.reason instanceof Error ? openPositionsResult.reason.message : 'Unable to load MetaApi open positions';
           setOpenPositionsError(message);
@@ -149,6 +151,7 @@ export function useMetaTradingData(token: string | null) {
         setOpenPositionsProvider(typeof openPositionsPayload.provider === 'string' ? openPositionsPayload.provider : '');
         setOpenPositionsError(openPositionsPayload.reason ?? null);
         registerRateLimitCooldown(openPositionsPayload.reason);
+        setLastPositionUpdate(new Date());
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Unable to load MetaApi open positions';
         setOpenPositionsError(message);
@@ -289,8 +292,10 @@ export function useMetaTradingData(token: string | null) {
 
     const refreshOpenExposure = () => {
       if (document.visibilityState === 'hidden') return;
-      const scope = openExposurePollTargetRef.current;
-      openExposurePollTargetRef.current = scope === 'positions' ? 'orders' : 'positions';
+      const cycle = openExposurePollCycleRef.current;
+      openExposurePollCycleRef.current = cycle + 1;
+      // Always fetch positions; fetch orders every 3rd cycle
+      const scope: OpenExposureScope = cycle % 3 === 0 ? 'full' : 'positions';
       void loadOpenExposure(accountRef, scope, 'poll');
     };
 
@@ -395,5 +400,6 @@ export function useMetaTradingData(token: string | null) {
     bootstrapLoading,
     loadMetaTrading,
     liveExposurePollMs,
+    lastPositionUpdate,
   };
 }

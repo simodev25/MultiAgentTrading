@@ -13,8 +13,10 @@ from app.schemas.order_guardian import OrderGuardianStatusUpdate
 from app.services.llm.model_selector import AgentModelSelector
 from app.services.llm.provider_client import LlmClient
 from app.services.orchestrator.agents import AgentContext
-from app.services.orchestrator.engine import ForexOrchestrator
+from app.services.orchestrator.engine import TradingOrchestrator
 from app.services.prompts.registry import PromptTemplateService
+from app.services.memory.vector_memory import VectorMemoryService
+from app.services.risk.rules import RiskEngine
 from app.services.trading.account_selector import MetaApiAccountSelector
 from app.services.trading.metaapi_client import MetaApiClient
 
@@ -39,10 +41,11 @@ class OrderGuardianService:
     def __init__(self) -> None:
         self.metaapi = MetaApiClient()
         self.account_selector = MetaApiAccountSelector()
-        self.orchestrator = ForexOrchestrator()
+        self.orchestrator = TradingOrchestrator()
         self.llm = LlmClient()
         self.model_selector = AgentModelSelector()
         self.prompt_service = PromptTemplateService()
+        self.risk_engine = RiskEngine()
 
     @staticmethod
     def _to_float(value: Any) -> float | None:
@@ -345,8 +348,15 @@ class OrderGuardianService:
             }
             for item in actions[:25]
         ]
-        summary_json = json.dumps(summary, ensure_ascii=True)
-        actions_json = json.dumps(compact_actions, ensure_ascii=True)
+        # Sanitize data before injecting into LLM prompts to mitigate prompt injection
+        _sanitize = lambda s: s.replace('\n', ' ').replace('\\', '\\\\') if isinstance(s, str) else s
+        sanitized_summary = {k: _sanitize(v) if isinstance(v, str) else v for k, v in summary.items()}
+        sanitized_actions = [
+            {k: _sanitize(v) if isinstance(v, str) else v for k, v in action.items()}
+            for action in compact_actions
+        ]
+        summary_json = json.dumps(sanitized_summary, ensure_ascii=True)
+        actions_json = json.dumps(sanitized_actions, ensure_ascii=True)
 
         prompt_info = self.prompt_service.render(
             db=db,
@@ -465,6 +475,7 @@ class OrderGuardianService:
 
         actions: list[dict[str, Any]] = []
         executed_count = 0
+        _mem_svc: VectorMemoryService | None = None
 
         for position in normalized_positions:
             try:
@@ -502,21 +513,51 @@ class OrderGuardianService:
                             allow_opposite_fallback=False,
                         )
                         executed = bool(execution.get('executed'))
+                        # Backfill outcome weight on associated memories
+                        if executed:
+                            try:
+                                profit = float(execution.get('profit', 0) or 0)
+                                outcome_label = 'win' if profit > 0 else ('loss' if profit < 0 else 'neutral')
+                                run_id = position.get('raw', {}).get('clientId')
+                                if run_id:
+                                    if _mem_svc is None:
+                                        _mem_svc = VectorMemoryService()
+                                    _mem_svc.update_outcome_weights(db, int(run_id), outcome_label)
+                            except Exception:
+                                logger.debug('outcome backfill skipped for position %s', position['position_id'])
                 elif decision == position['side']:
                     should_update_sl = self._needs_level_update(current_sl, suggested_sl, float(settings['sl_tp_min_delta']))
                     should_update_tp = self._needs_level_update(current_tp, suggested_tp, float(settings['sl_tp_min_delta']))
                     if should_update_sl or should_update_tp:
-                        action = 'UPDATE_SL_TP'
-                        reason = f'Signal {decision} aligned; refreshing protection levels'
-                        if not dry_run:
-                            execution = await self.metaapi.modify_position(
-                                position_id=position['position_id'],
-                                stop_loss=suggested_sl if should_update_sl else current_sl,
-                                take_profit=suggested_tp if should_update_tp else current_tp,
-                                account_id=account_id,
-                                region=region,
-                            )
-                            executed = bool(execution.get('executed'))
+                        # --- RiskEngine validation gate ---
+                        market_price = analysis_bundle.get('market', {}).get('last_price') if isinstance(analysis_bundle, dict) else None
+                        ref_price = float(market_price or 0) or float(position.get('raw', {}).get('openPrice', 0) or 0)
+                        if ref_price <= 0:
+                            logger.warning("No valid price for SL/TP validation on %s, skipping", position['symbol'])
+                            continue
+                        risk_check = self.risk_engine.validate_sl_tp_update(
+                            mode='live',
+                            side=position['side'],
+                            current_price=ref_price,
+                            new_stop_loss=suggested_sl if should_update_sl else None,
+                            new_take_profit=suggested_tp if should_update_tp else None,
+                            pair=position['symbol'],
+                        )
+                        if not risk_check.accepted:
+                            action = 'HOLD'
+                            reason = f'SL/TP update blocked by RiskEngine: {"; ".join(risk_check.reasons)}'
+                        else:
+                            action = 'UPDATE_SL_TP'
+                            reason = f'Signal {decision} aligned; refreshing protection levels (risk validated)'
+                            if not dry_run:
+                                execution = await self.metaapi.modify_position(
+                                    position_id=position['position_id'],
+                                    stop_loss=suggested_sl if should_update_sl else current_sl,
+                                    take_profit=suggested_tp if should_update_tp else current_tp,
+                                    account_id=account_id,
+                                    region=region,
+                                )
+                                executed = bool(execution.get('executed'))
 
                 if executed:
                     executed_count += 1
@@ -550,7 +591,7 @@ class OrderGuardianService:
                         'side': position['side'],
                         'decision': 'HOLD',
                         'action': 'HOLD',
-                        'reason': f'Analysis error: {exc}',
+                        'reason': f'Analysis error: {type(exc).__name__}',
                         'current_stop_loss': position['current_stop_loss'],
                         'current_take_profit': position['current_take_profit'],
                         'suggested_stop_loss': None,

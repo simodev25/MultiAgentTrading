@@ -1,18 +1,29 @@
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api/client';
+import { ButtonSpinner, ChartSkeleton, TableSkeleton, SectionSkeleton } from '../components/LoadingIndicators';
 import { runtimeConfig } from '../config/runtime';
 import { useAuth } from '../hooks/useAuth';
 import { useMetaTradingData } from '../hooks/useMetaTradingData';
 import { useOpenOrdersMarketChart } from '../hooks/useOpenOrdersMarketChart';
 import { usePlatformOrders } from '../hooks/usePlatformOrders';
-import { OpenOrdersChart } from '../components/OpenOrdersChart';
 import { DEFAULT_TIMEFRAMES } from '../constants/markets';
-import { OpenPositionsTable } from '../components/orders/OpenPositionsTable';
-import { OpenPendingOrdersTable } from '../components/orders/OpenPendingOrdersTable';
-import { DealsTable } from '../components/orders/DealsTable';
-import { PlatformOrdersTable } from '../components/orders/PlatformOrdersTable';
 import type { OrderGuardianEvaluation, OrderGuardianStatus } from '../types';
 
+const OpenOrdersChart = lazy(() =>
+  import('../components/OpenOrdersChart').then((module) => ({ default: module.OpenOrdersChart })),
+);
+const OpenPositionsTable = lazy(() =>
+  import('../components/orders/OpenPositionsTable').then((module) => ({ default: module.OpenPositionsTable })),
+);
+const OpenPendingOrdersTable = lazy(() =>
+  import('../components/orders/OpenPendingOrdersTable').then((module) => ({ default: module.OpenPendingOrdersTable })),
+);
+const DealsTable = lazy(() =>
+  import('../components/orders/DealsTable').then((module) => ({ default: module.DealsTable })),
+);
+const PlatformOrdersTable = lazy(() =>
+  import('../components/orders/PlatformOrdersTable').then((module) => ({ default: module.PlatformOrdersTable })),
+);
 const RealTradesCharts = lazy(() =>
   import('../components/RealTradesCharts').then((module) => ({ default: module.RealTradesCharts })),
 );
@@ -160,6 +171,7 @@ export function OrdersPage() {
     bootstrapLoading: metaBootstrapLoading,
     loadMetaTrading,
     liveExposurePollMs,
+    lastPositionUpdate,
   } = useMetaTradingData(token);
 
   const {
@@ -169,7 +181,7 @@ export function OrdersPage() {
     setChartTimeframeOverride,
     chartSelection,
     marketCandles,
-    marketProvider,
+    marketProvider: _marketProvider,
     marketError,
     marketLoading,
     chartCountdownLabel,
@@ -574,22 +586,22 @@ export function OrdersPage() {
   }, [platformOrdersPage, platformOrdersTotalPages]);
 
   return (
-    <div className="dashboard-grid orders-page">
+    <div className="flex flex-col gap-5">
       {pageError && (
-        <section className="card">
+        <section className="hw-surface p-5">
           <p className="alert">{pageError}</p>
         </section>
       )}
-      <section className="card primary orders-top-toolbar">
+      <section className="hw-surface p-5">
         <form
-          className="form-grid inline orders-top-controls"
+          className="grid grid-cols-2 md:grid-cols-4 gap-3 items-end"
           onSubmit={(e) => {
             e.preventDefault();
             void loadMetaTrading(accountRef, 'manual');
           }}
         >
-          <label>
-            Compte
+          <div>
+            <label className="micro-label block mb-1.5">Compte</label>
             <select value={accountRef ?? ''} onChange={(e) => setAccountRef(e.target.value ? Number(e.target.value) : null)}>
               {accounts.length === 0 && <option value="">Default</option>}
               {accounts.map((account) => (
@@ -598,9 +610,9 @@ export function OrdersPage() {
                 </option>
               ))}
             </select>
-          </label>
-          <label>
-            Fenêtre
+          </div>
+          <div>
+            <label className="micro-label block mb-1.5">Fenêtre</label>
             <select value={days} onChange={(e) => setDays(Number(e.target.value))}>
               {runtimeConfig.metaApiRealTradesDaysOptions.map((daysOption) => (
                 <option key={daysOption} value={daysOption}>
@@ -608,10 +620,12 @@ export function OrdersPage() {
                 </option>
               ))}
             </select>
-          </label>
-          <button className="btn-primary" disabled={metaLoading}>{metaLoading ? 'Rafraîchir...' : 'Rafraîchir'}</button>
-          <label className="orders-guardian-toggle">
-            Guardian MT5
+          </div>
+          <div>
+            <button className="btn-primary w-full" disabled={metaLoading}>{metaLoading ? 'Rafraîchir...' : 'Rafraîchir'}</button>
+          </div>
+          <div className="flex items-center gap-3">
+            <label className="micro-label">Guardian MT5</label>
             <input
               className="ui-switch"
               type="checkbox"
@@ -619,32 +633,37 @@ export function OrdersPage() {
               onChange={(e) => void setGuardianEnabled(e.target.checked)}
               disabled={guardianLoading || guardianActioning || !canOperateGuardian}
             />
-          </label>
-          <button
-            type="button"
-            className="btn-ghost"
-            disabled={!guardianStatus?.enabled || guardianActioning || !canOperateGuardian}
-            onClick={() => void runGuardianNow('manual')}
-          >
-            {guardianActioning ? 'Analyse...' : 'Analyser positions'}
-          </button>
-          <button
-            type="button"
-            className="btn-ghost"
-            disabled={!hasGuardianReport}
-            onClick={() => setGuardianReportVisible((previous) => !previous)}
-          >
-            {guardianReportVisible ? 'Masquer dernier rapport' : 'Afficher dernier rapport'}
-          </button>
-          <p className="orders-top-meta">
+          </div>
+          <div>
+            <button
+              type="button"
+              className="btn-ghost w-full"
+              disabled={!guardianStatus?.enabled || guardianActioning || !canOperateGuardian}
+              onClick={() => void runGuardianNow('manual')}
+            >
+              {guardianActioning && <ButtonSpinner />}
+              {guardianActioning ? 'Analyse en cours' : 'Analyser positions'}
+            </button>
+          </div>
+          <div>
+            <button
+              type="button"
+              className="btn-ghost w-full"
+              disabled={!hasGuardianReport}
+              onClick={() => setGuardianReportVisible((previous) => !previous)}
+            >
+              {guardianReportVisible ? 'Masquer rapport' : 'Voir rapport'}
+            </button>
+          </div>
+          <p className="model-source col-span-2">
             Provider: <code>{provider || 'unknown'}</code> | Sync: <code>{syncing ? 'yes' : 'no'}</code>
           </p>
-          <p className="orders-top-meta">
+          <p className="model-source col-span-2">
             Guardian: <code>{guardianStatus?.enabled ? 'on' : 'off'}</code> | Dernier scan:{' '}
             <code>{formatNullableDateTime(guardianStatus?.last_run_at ?? guardianLastRun?.generated_at)}</code>
           </p>
           {!canOperateGuardian && (
-            <p className="orders-top-meta">
+            <p className="model-source col-span-2">
               Droits requis pour agir: <code>trader-operator/admin</code>
             </p>
           )}
@@ -657,30 +676,30 @@ export function OrdersPage() {
           </p>
         )}
         {guardianReportVisible && guardianReportStats && (
-          <section className="orders-guardian-report">
+          <section className="hw-surface-alt p-4 mt-3">
             <p className="model-source">
               Rapport guardian du <code>{formatNullableDateTime(guardianReportDate)}</code>
             </p>
-            <div className="orders-guardian-report-grid">
-              <article className="orders-guardian-report-stat">
-                <span>Positions vues</span>
-                <strong>{guardianReportStats.positionsSeen}</strong>
+            <div className="grid grid-cols-5 gap-3 mt-2">
+              <article className="hw-surface-alt p-3 text-center">
+                <span className="micro-label">Positions vues</span>
+                <strong className="block text-lg font-bold font-mono text-text mt-1">{guardianReportStats.positionsSeen}</strong>
               </article>
-              <article className="orders-guardian-report-stat">
-                <span>Positions analysées</span>
-                <strong>{guardianReportStats.positionsAnalyzed}</strong>
+              <article className="hw-surface-alt p-3 text-center">
+                <span className="micro-label">Positions analysées</span>
+                <strong className="block text-lg font-bold font-mono text-text mt-1">{guardianReportStats.positionsAnalyzed}</strong>
               </article>
-              <article className="orders-guardian-report-stat">
-                <span>Actions proposées</span>
-                <strong>{guardianReportStats.actionsTotal}</strong>
+              <article className="hw-surface-alt p-3 text-center">
+                <span className="micro-label">Actions proposées</span>
+                <strong className="block text-lg font-bold font-mono text-text mt-1">{guardianReportStats.actionsTotal}</strong>
               </article>
-              <article className="orders-guardian-report-stat">
-                <span>Actions exécutées</span>
-                <strong>{guardianReportStats.actionsExecuted}</strong>
+              <article className="hw-surface-alt p-3 text-center">
+                <span className="micro-label">Actions exécutées</span>
+                <strong className="block text-lg font-bold font-mono text-text mt-1">{guardianReportStats.actionsExecuted}</strong>
               </article>
-              <article className="orders-guardian-report-stat">
-                <span>Mode</span>
-                <strong>{guardianReportStats.dryRun ? 'dry-run' : 'live'}</strong>
+              <article className="hw-surface-alt p-3 text-center">
+                <span className="micro-label">Mode</span>
+                <strong className="block text-lg font-bold font-mono text-text mt-1">{guardianReportStats.dryRun ? 'dry-run' : 'live'}</strong>
               </article>
             </div>
             {guardianReportText && (
@@ -722,15 +741,13 @@ export function OrdersPage() {
         )}
       </section>
 
-      <section className="card orders-signal-card" id="orders-summary">
-        <div className="orders-signal-head">
-          <h3>Analyses Trading</h3>
-        </div>
-        <div className="orders-summary-grid">
+      <section className="hw-surface p-5" id="orders-summary">
+        <div className="section-header"><span className="section-title">TRADE_ANALYTICS</span></div>
+        <div className="grid grid-cols-3 md:grid-cols-5 gap-3">
           {tradingSummaryCards.map((card) => (
-            <article key={card.label} className={`orders-summary-card ${card.tone}`}>
-              <span>{card.label}</span>
-              <strong>
+            <article key={card.label} className="hw-surface-alt p-3 text-center">
+              <span className="micro-label">{card.label}</span>
+              <strong className={`block text-lg font-bold font-mono mt-1 ${card.tone === 'up' ? 'text-success' : card.tone === 'down' ? 'text-danger' : 'text-text'}`}>
                 {card.value}
                 {card.suffix}
               </strong>
@@ -739,115 +756,156 @@ export function OrdersPage() {
         </div>
       </section>
 
-      <section className="orders-layout">
-        <aside className="card orders-left-rail">
-          <h3>Navigation</h3>
-          <nav className="orders-nav-menu" aria-label="Navigation ordres">
+      <section className="grid grid-cols-[200px_1fr] gap-5">
+        <aside className="hw-surface p-4">
+          <div className="section-header"><span className="section-title">NAV_PANEL</span></div>
+          <nav className="flex flex-col gap-1" aria-label="Navigation ordres">
             <button
-              className={`orders-nav-item ${activePanel === 'analysis' ? 'active' : ''}`}
+              className={`flex items-center gap-2 px-3 py-2 rounded-lg text-[11px] font-medium transition-all ${activePanel === 'analysis' ? 'bg-accent/10 text-accent border border-accent/20' : 'text-text-muted hover:text-text border border-transparent'}`}
               type="button"
               onClick={() => quickNavigate('orders-summary', 'analysis')}
             >
-              <span className="orders-nav-icon" aria-hidden>A</span>
-              <span className="orders-nav-label">Analyses Trading</span>
-              <span className="orders-nav-arrow" aria-hidden>&gt;</span>
+              <span className="w-5 h-5 rounded bg-surface-alt border border-border flex items-center justify-center text-[9px] font-bold">A</span>
+              <span>Analyses Trading</span>
             </button>
             <button
-              className={`orders-nav-item ${activePanel === 'metaapi' ? 'active' : ''}`}
+              className={`flex items-center gap-2 px-3 py-2 rounded-lg text-[11px] font-medium transition-all ${activePanel === 'metaapi' ? 'bg-accent/10 text-accent border border-accent/20' : 'text-text-muted hover:text-text border border-transparent'}`}
               type="button"
               onClick={() => quickNavigate('orders-metaapi', 'metaapi')}
             >
-              <span className="orders-nav-icon" aria-hidden>M</span>
-              <span className="orders-nav-label">Trades MT5</span>
-              <span className="orders-nav-arrow" aria-hidden>&gt;</span>
-            </button>
-            <button
-              className={`orders-nav-item ${activePanel === 'queue' ? 'active' : ''}`}
-              type="button"
-              onClick={() => quickNavigate('orders-platform', 'queue')}
-            >
-              <span className="orders-nav-icon" aria-hidden>F</span>
-              <span className="orders-nav-label">File ordres</span>
-              <span className="orders-nav-arrow" aria-hidden>&gt;</span>
+              <span className="w-5 h-5 rounded bg-surface-alt border border-border flex items-center justify-center text-[9px] font-bold">M</span>
+              <span>Trades MT5</span>
             </button>
           </nav>
-          <div className="orders-left-rail-meta">
-            <p>BUY: <strong>{buyCount}</strong></p>
-            <p>SELL: <strong>{sellCount}</strong></p>
-            <p>Pending: <strong>{openOrders.length}</strong></p>
+          <div className="mt-4 pt-3 border-t border-border space-y-1">
+            <p className="text-[10px] font-mono text-text-muted">BUY: <strong className="text-success">{buyCount}</strong></p>
+            <p className="text-[10px] font-mono text-text-muted">SELL: <strong className="text-danger">{sellCount}</strong></p>
+            <p className="text-[10px] font-mono text-text-muted">Pending: <strong className="text-text">{openOrders.length}</strong></p>
+          </div>
+          <div className="mt-4 pt-3 border-t border-border">
+            <div className="section-header"><span className="section-title">ORDER_QUEUE</span></div>
+            <p className="model-source">
+              MAJ live: {Math.max(1, Math.round(liveExposurePollMs / 1000))}s (onglet visible)
+            </p>
+            <div className="space-y-2">
+              {watchlist.rows.length === 0 ? (
+                <p className="model-source">Aucun symbole actif.</p>
+              ) : (
+                <>
+                  {watchlist.rows.map((row) => (
+                    <div key={row.symbol} className="flex items-center justify-between text-[10px] font-mono">
+                      <span className="text-text">{row.symbol}</span>
+                      <span className="text-text-muted">{row.last > 0 ? row.last.toFixed(5) : '-'}</span>
+                      <strong className={row.pnl >= 0 ? 'text-success' : 'text-danger'}>{formatSigned(row.pnl)}</strong>
+                    </div>
+                  ))}
+                  <div className="flex items-center justify-between text-[10px] font-mono pt-2 border-t border-border">
+                    <span className="text-text font-semibold">Total</span>
+                    <span className="text-text-muted">{watchlist.totalOrders} ordres</span>
+                    <strong className={watchlist.totalPnl >= 0 ? 'text-success' : 'text-danger'}>
+                      {formatSigned(watchlist.totalPnl)}
+                    </strong>
+                  </div>
+                </>
+              )}
+            </div>
           </div>
         </aside>
 
-        <div className="orders-main-column">
-          <section className="card open-orders-card orders-chart-card" id="orders-chart">
-            <h2>Ordres ouverts (TradingView)</h2>
+        <div className="flex flex-col gap-5">
+          <section className="hw-surface overflow-hidden" id="orders-chart">
+            {/* ── Chart header bar ── */}
+            <div className="flex items-center justify-between px-5 py-3 border-b border-border">
+              <div className="flex items-center gap-3">
+                <span className="text-sm font-bold tracking-wide text-text" data-testid="open-orders-chart-context">
+                  {chartSelection.displaySymbol ?? 'OPEN_ORDERS'}
+                </span>
+                <span className="terminal-tag">LIVE_FEED</span>
+                <span className="text-[10px] font-mono text-text-muted">
+                  Sources: <code>{openPositionsProvider || '-'}</code> | <code>{openOrdersProvider || '-'}</code>
+                </span>
+              </div>
+              <div className="flex items-center gap-4">
+                <div className="flex items-center gap-1.5 text-[10px] font-mono" data-testid="open-orders-chart-timer">
+                  <span className="text-text-muted">Timer ({chartSelection.timeframe ?? '-'}):</span>
+                  <code className="text-accent">{chartCountdownLabel}</code>
+                  <span className="text-text-muted ml-2">MAJ:</span>
+                  <code className="text-accent">{chartNextRefreshAtLabel}</code>
+                </div>
+              </div>
+            </div>
+
             {metaFeatureDisabled ? (
-              <>
+              <div className="p-5">
                 <p className="model-source">
                   Vue désactivée côté UI. Activer <code>VITE_ENABLE_METAAPI_REAL_TRADES_DASHBOARD=true</code>.
                 </p>
                 {metaError && <p className="alert">{metaError}</p>}
-              </>
+              </div>
             ) : (
               <>
-                <p className="model-source open-orders-source">
-                  Sources: positions <code>{openPositionsProvider || 'unknown'}</code> | ordres <code>{openOrdersProvider || 'unknown'}</code>
-                </p>
-                <div className="form-grid inline open-orders-filter-row">
-                  <div className="open-orders-meta-stack">
-                    <p className="model-source open-orders-meta" data-testid="open-orders-chart-filter">
-                      Filtre actif: <code>{selectedChartTicket ?? 'Tous les ordres'}</code>
-                    </p>
-                    <p className="model-source open-orders-meta" data-testid="open-orders-chart-context">
-                      Symbole: <code>{chartSelection.displaySymbol ?? '-'}</code> | Timeframe: <code>{chartSelection.timeframe ?? '-'}</code>{' '}
-                      {chartTimeframeOverride ? '' : `(auto: ${chartSelection.autoTimeframe ?? '-'})`} | Provider marché: <code>{marketProvider || 'unknown'}</code>
-                    </p>
+                {/* ── Controls bar ── */}
+                <div className="flex items-center justify-between px-5 py-2 border-b border-border bg-surface-alt/30">
+                  <div className="flex items-center gap-3">
+                    <span className="micro-label">FILTER</span>
+                    <code className="text-[10px] text-text" data-testid="open-orders-chart-filter">{selectedChartTicket ?? 'Tous les ordres'}</code>
+                    <span className="text-border">|</span>
+                    <span className="micro-label">TF</span>
+                    <code className="text-[10px] text-text">{chartSelection.timeframe ?? '-'}</code>
+                    {!chartTimeframeOverride && <span className="text-[9px] text-text-muted">(auto: {chartSelection.autoTimeframe ?? '-'})</span>}
                   </div>
-                  <div className="open-orders-meta-stack open-orders-meta-stack--right">
-                    <p className="model-source open-orders-meta" data-testid="open-orders-chart-timer">
-                      Timer bougie ({chartSelection.timeframe ?? '-'}): <code>{chartCountdownLabel}</code> | Prochaine MAJ: <code>{chartNextRefreshAtLabel}</code>
-                    </p>
-                    <label className="open-orders-timeframe-control">
-                      Timeframe graphique
-                      <select
-                        aria-label="Timeframe graphique"
-                        value={chartTimeframeOverride}
-                        onChange={(e) => setChartTimeframeOverride(e.target.value)}
-                        disabled={!chartSelection.symbol}
-                      >
-                        <option value="">Auto (TF ouverture)</option>
-                        {DEFAULT_TIMEFRAMES.map((item) => (
-                          <option key={item} value={item}>{item}</option>
-                        ))}
-                      </select>
-                    </label>
+                  <div className="flex items-center gap-2">
+                    <span className="micro-label">TIME_SCALE</span>
+                    <div className="flex items-center gap-1" role="group" aria-label="Timeframe graphique">
+                      {DEFAULT_TIMEFRAMES.map((item) => (
+                        <button
+                          key={item}
+                          type="button"
+                          disabled={!chartSelection.symbol}
+                          onClick={() => setChartTimeframeOverride(chartTimeframeOverride === item ? '' : item)}
+                          className={`px-3 py-1.5 rounded-md text-[11px] font-mono font-semibold border transition-all ${
+                            (chartTimeframeOverride || chartSelection.autoTimeframe) === item
+                              ? 'border-accent text-accent bg-accent/10'
+                              : 'border-border text-text-muted bg-surface-alt hover:text-text hover:border-text-muted'
+                          } disabled:opacity-40 disabled:cursor-not-allowed`}
+                        >
+                          {item}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
-                {marketLoading && marketCandles.length > 0 && <p className="model-source open-orders-status">Mise à jour de la courbe...</p>}
-                {marketError && <p className="alert">{marketError}</p>}
-                {marketLoading && marketCandles.length === 0 ? (
-                  <div className="open-orders-chart-skeleton" data-testid="open-orders-chart-skeleton" aria-label="Chargement graphique ordres ouverts">
-                    <div className="open-orders-chart-skeleton-meta">
-                      <span className="skeleton-block skeleton-line skeleton-w-35" />
-                      <span className="skeleton-block skeleton-line skeleton-w-55" />
-                    </div>
-                    <div className="skeleton-block open-orders-chart-skeleton-canvas" />
-                  </div>
-                ) : (
-                  <OpenOrdersChart
-                    openPositions={openPositions}
-                    openOrders={openOrders}
-                    marketCandles={marketCandles}
-                    selectedTicket={selectedChartTicket}
-                    selectedSymbol={chartSelection.symbol}
-                  />
-                )}
+
+                {/* ── Chart area ── */}
+                <div className="p-3">
+                  {marketLoading && marketCandles.length > 0 && (
+                    <p className="text-[10px] font-mono text-accent mb-2 px-2 flex items-center gap-1.5">
+                      <span className="loading-spinner loading-spinner-sm" style={{ borderTopColor: 'var(--color-accent)' }} />
+                      <span className="loading-dots">Mise à jour de la courbe</span>
+                    </p>
+                  )}
+                  {marketError && <p className="alert mb-2">{marketError}</p>}
+                  {marketLoading && marketCandles.length === 0 ? (
+                    <ChartSkeleton height={520} />
+                  ) : (
+                    <Suspense fallback={<ChartSkeleton height={520} />}>
+                      <OpenOrdersChart
+                        openPositions={openPositions}
+                        openOrders={openOrders}
+                        marketCandles={marketCandles}
+                        selectedTicket={selectedChartTicket}
+                        selectedSymbol={chartSelection.symbol}
+                        displaySymbol={chartSelection.displaySymbol}
+                      />
+                    </Suspense>
+                  )}
+                </div>
               </>
             )}
           </section>
 
-          <section className="card" id="orders-metaapi">
-            <h2>Trades réels MT5 (MetaApi)</h2>
+          <section className="hw-surface p-5" id="orders-metaapi">
+            <div className="section-header"><span className="section-title">REAL_TRADES // MT5_METAAPI</span></div>
             {metaFeatureDisabled ? (
               <>
                 <p className="model-source">
@@ -862,94 +920,75 @@ export function OrdersPage() {
                 </p>
                 {metaError && <p className="alert">{metaError}</p>}
 
-                <h3>Ordres ouverts MT5 (MetaApi)</h3>
+                <span className="text-[10px] font-semibold tracking-[0.12em] text-text-muted uppercase block mt-4 mb-2">OPEN_POSITIONS_MT5</span>
                 <p className="model-source">
                   Provider positions: <code>{openPositionsProvider || 'unknown'}</code>
+                  {lastPositionUpdate && (
+                    <> | MAJ: <code>{lastPositionUpdate.toLocaleTimeString()}</code></>
+                  )}
                 </p>
                 {openPositionsError && <p className="alert">{openPositionsError}</p>}
-                <OpenPositionsTable
-                  metaLoading={metaLoading}
-                  openPositions={openPositions}
-                  selectedChartTicket={selectedChartTicket}
-                  onToggleTicket={(ticket) => setSelectedChartTicket((prev) => (prev === ticket ? null : ticket))}
-                />
+                <Suspense fallback={<TableSkeleton columns={8} rows={3} />}>
+                  <OpenPositionsTable
+                    metaLoading={metaLoading}
+                    openPositions={openPositions}
+                    selectedChartTicket={selectedChartTicket}
+                    onToggleTicket={(ticket) => setSelectedChartTicket((prev) => (prev === ticket ? null : ticket))}
+                  />
+                </Suspense>
 
-                <h3>Ordres en attente MT5 MetaApi</h3>
+                <span className="text-[10px] font-semibold tracking-[0.12em] text-text-muted uppercase block mt-4 mb-2">PENDING_ORDERS_MT5</span>
                 <p className="model-source">
                   Provider ordres: <code>{openOrdersProvider || 'unknown'}</code>
                 </p>
                 {openOrdersError && <p className="alert">{openOrdersError}</p>}
-                <OpenPendingOrdersTable
-                  metaLoading={metaLoading}
-                  openOrders={openOrders}
-                  selectedChartTicket={selectedChartTicket}
-                  onToggleTicket={(ticket) => setSelectedChartTicket((prev) => (prev === ticket ? null : ticket))}
-                />
+                <Suspense fallback={<TableSkeleton columns={9} rows={3} />}>
+                  <OpenPendingOrdersTable
+                    metaLoading={metaLoading}
+                    openOrders={openOrders}
+                    selectedChartTicket={selectedChartTicket}
+                    onToggleTicket={(ticket) => setSelectedChartTicket((prev) => (prev === ticket ? null : ticket))}
+                  />
+                </Suspense>
 
-                <Suspense fallback={<p className="model-source">Chargement des graphiques...</p>}>
+                <Suspense fallback={<SectionSkeleton rows={5} />}>
                   <RealTradesCharts deals={deals} historyOrders={historyOrders} />
                 </Suspense>
 
-                <h3>Deals exécutés</h3>
-                <DealsTable
-                  metaLoading={metaLoading}
-                  deals={deals}
-                  pagedDeals={pagedDeals}
-                  dealsPage={dealsPage}
-                  dealsTotalPages={dealsTotalPages}
-                  dealsPerPage={DEALS_PER_PAGE}
-                  onPreviousPage={() => setDealsPage((prev) => Math.max(1, prev - 1))}
-                  onNextPage={() => setDealsPage((prev) => Math.min(dealsTotalPages, prev + 1))}
-                />
+                <span className="text-[10px] font-semibold tracking-[0.12em] text-text-muted uppercase block mt-4 mb-2">EXECUTED_DEALS</span>
+                <Suspense fallback={<TableSkeleton columns={7} rows={4} />}>
+                  <DealsTable
+                    metaLoading={metaLoading}
+                    deals={deals}
+                    pagedDeals={pagedDeals}
+                    dealsPage={dealsPage}
+                    dealsTotalPages={dealsTotalPages}
+                    dealsPerPage={DEALS_PER_PAGE}
+                    onPreviousPage={() => setDealsPage((prev) => Math.max(1, prev - 1))}
+                    onNextPage={() => setDealsPage((prev) => Math.min(dealsTotalPages, prev + 1))}
+                  />
+                </Suspense>
               </>
             )}
           </section>
 
-          <section className="card" id="orders-platform">
-            <h2>Ordres plateforme</h2>
-            <PlatformOrdersTable
-              bootstrapLoading={bootstrapLoading}
-              orders={orders}
-              pagedOrders={pagedPlatformOrders}
-              ordersPage={platformOrdersPage}
-              ordersTotalPages={platformOrdersTotalPages}
-              ordersPerPage={PLATFORM_ORDERS_PER_PAGE}
-              onPreviousPage={() => setPlatformOrdersPage((prev) => Math.max(1, prev - 1))}
-              onNextPage={() => setPlatformOrdersPage((prev) => Math.min(platformOrdersTotalPages, prev + 1))}
-            />
+          <section className="hw-surface p-5" id="orders-platform">
+            <div className="section-header"><span className="section-title">PLATFORM_ORDERS</span></div>
+            <Suspense fallback={<TableSkeleton columns={11} rows={5} />}>
+              <PlatformOrdersTable
+                bootstrapLoading={bootstrapLoading}
+                orders={orders}
+                pagedOrders={pagedPlatformOrders}
+                ordersPage={platformOrdersPage}
+                ordersTotalPages={platformOrdersTotalPages}
+                ordersPerPage={PLATFORM_ORDERS_PER_PAGE}
+                onPreviousPage={() => setPlatformOrdersPage((prev) => Math.max(1, prev - 1))}
+                onNextPage={() => setPlatformOrdersPage((prev) => Math.min(platformOrdersTotalPages, prev + 1))}
+              />
+            </Suspense>
           </section>
         </div>
 
-        <aside className="orders-right-column">
-          <section className="card orders-side-card">
-            <h3>File ordres</h3>
-            <p className="model-source">
-              MAJ live: {Math.max(1, Math.round(liveExposurePollMs / 1000))}s (onglet visible)
-            </p>
-            <div className="orders-watchlist">
-              {watchlist.rows.length === 0 ? (
-                <p className="model-source">Aucun symbole actif.</p>
-              ) : (
-                <>
-                  {watchlist.rows.map((row) => (
-                    <p key={row.symbol}>
-                      <span>{row.symbol}</span>
-                      <span>{row.last > 0 ? row.last.toFixed(5) : '-'}</span>
-                      <strong className={row.pnl >= 0 ? 'ok-text' : 'danger-text'}>{formatSigned(row.pnl)}</strong>
-                    </p>
-                  ))}
-                  <p className="orders-watchlist-total">
-                    <span>Total</span>
-                    <span>{watchlist.totalOrders} ordres</span>
-                    <strong className={watchlist.totalPnl >= 0 ? 'ok-text' : 'danger-text'}>
-                      {formatSigned(watchlist.totalPnl)}
-                    </strong>
-                  </p>
-                </>
-              )}
-            </div>
-          </section>
-        </aside>
       </section>
     </div>
   );

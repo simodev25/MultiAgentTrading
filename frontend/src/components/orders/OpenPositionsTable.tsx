@@ -74,7 +74,7 @@ export function OpenPositionsTable({
       {openPositions.length > 0 && (
         <p className="model-source">
           Total: <code>{totals.count}</code> positions | Volume: <code>{totals.volume.toFixed(2)}</code> | PnL:{' '}
-          <strong className={totals.pnl >= 0 ? 'ok-text' : 'danger-text'}>{formatSigned(totals.pnl)}</strong>
+          <strong className={totals.pnl >= 0 ? 'text-success' : 'text-danger'}>{formatSigned(totals.pnl)}</strong>
         </p>
       )}
       <table>
@@ -119,7 +119,7 @@ export function OpenPositionsTable({
                   <td>{formatPrice(current)}</td>
                   <td>{formatPrice(stopLoss)}</td>
                   <td>{formatPrice(takeProfit)}</td>
-                  <td>{typeof position.profit === 'number' ? position.profit.toFixed(2) : '-'}</td>
+                  <td className={typeof position.profit === 'number' ? (position.profit >= 0 ? 'text-success' : 'text-danger') : ''}>{typeof position.profit === 'number' ? position.profit.toFixed(2) : '-'}</td>
                   <td>
                     <button
                       type="button"

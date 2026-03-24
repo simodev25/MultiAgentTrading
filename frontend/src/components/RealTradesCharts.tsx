@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { BarChart, LineChart, PieChart } from '@mui/x-charts';
+import { TrendingUp, Target, Activity, TrendingDown, BarChart3, PieChart as PieChartIcon, Globe, ShieldCheck, AlertCircle } from 'lucide-react';
 import type { MetaApiDeal, MetaApiHistoryOrder } from '../types';
 
 interface DealPoint {
@@ -67,21 +68,27 @@ const REPORT_TABS: Array<{ id: ReportTab; label: string }> = [
 ];
 
 const CHART_HEIGHT = 260;
-const CHART_MARGIN = { top: 16, right: 16, bottom: 40, left: 52 };
+const CHART_MARGIN = { top: 16, right: 16, bottom: 40, left: 60 };
 const CHART_SX = {
   '& .MuiChartsAxis-line, & .MuiChartsAxis-tick': {
-    stroke: '#2f3f5a',
+    stroke: '#1F2023',
   },
   '& .MuiChartsAxis-tickLabel, & .MuiChartsAxis-label': {
-    fill: '#a7b9d6',
-    fontSize: 12,
+    fill: '#4A4B50',
+    fontSize: 10,
+    fontFamily: "'JetBrains Mono', monospace",
+    fontWeight: 600,
   },
   '& .MuiChartsLegend-label': {
-    fill: '#d7e4fb',
-    fontSize: 12,
+    fill: '#8E9299',
+    fontSize: 10,
+    fontFamily: "'JetBrains Mono', monospace",
+    fontWeight: 700,
+    textTransform: 'uppercase',
   },
   '& .MuiChartsGrid-line': {
-    stroke: 'rgba(74, 102, 145, 0.35)',
+    stroke: '#1F2023',
+    strokeDasharray: '3 3',
   },
 };
 
@@ -486,12 +493,12 @@ export function RealTradesCharts({
   }, [historyOrders]);
 
   if (analytics.points.length === 0 && orderAnalytics.points.length === 0) {
-    return <p className="chart-empty">Pas assez de donnees pour generer des graphes.</p>;
+    return <p className="text-text-muted text-xs font-mono py-8 text-center">Pas assez de donnees pour generer des graphes.</p>;
   }
 
   const tradeIndexLabels = analytics.cumulative.map((_, idx) => String(idx + 1));
   const tradeBarsLabels = analytics.perTrade.map((_, idx) => String(idx + 1));
-  const executionIndexLabels = orderAnalytics.pricePoints.map((_, idx) => String(idx + 1));
+
 
   const directionalCount = analytics.longSide.count + analytics.shortSide.count + analytics.unknownSide.count;
   const longPct = directionalCount > 0 ? (analytics.longSide.count / directionalCount) * 100 : 0;
@@ -510,13 +517,18 @@ export function RealTradesCharts({
   ];
 
   return (
-    <>
-      <div className="report-tabs" role="tablist" aria-label="MT5 report tabs">
+    <div className="space-y-6">
+      {/* ── Tab switcher ── */}
+      <div className="flex bg-[#0D0D0F] rounded p-0.5 border border-[#2A2B2F] w-fit" role="tablist" aria-label="MT5 report tabs">
         {REPORT_TABS.map((tab) => (
           <button
             key={tab.id}
             type="button"
-            className={`report-tab ${activeTab === tab.id ? 'active' : ''}`}
+            className={`px-3 py-1.5 text-[10px] font-bold rounded transition-all ${
+              activeTab === tab.id
+                ? 'bg-[#3B82F6] text-white'
+                : 'text-[#8E9299] hover:text-white'
+            }`}
             onClick={() => setActiveTab(tab.id)}
           >
             {tab.label}
@@ -524,316 +536,459 @@ export function RealTradesCharts({
         ))}
       </div>
 
+      {/* ════════════════ SUMMARY ════════════════ */}
       {activeTab === 'summary' && (
-        <>
-          <div className="stats-grid">
-            <div>
-              <span>Net total</span>
-              <strong>{formatMoney(analytics.totalNet)}</strong>
-            </div>
-            <div>
-              <span>Deals (raw)</span>
-              <strong>{analytics.rawDealsCount}</strong>
-            </div>
-            <div>
-              <span>Trades fermes</span>
-              <strong>{analytics.closedTradesCount}</strong>
-            </div>
-            <div>
-              <span>Orders</span>
-              <strong>{orderAnalytics.points.length}</strong>
-            </div>
-            <div>
-              <span>Win rate</span>
-              <strong>{formatPercent(analytics.winRate)}</strong>
-            </div>
-            <div>
-              <span>Profit factor</span>
-              <strong>{formatRatio(analytics.profitFactor)}</strong>
-            </div>
-            <div>
-              <span>Max drawdown</span>
-              <strong>{formatMoney(analytics.maxDrawdown)}</strong>
-            </div>
-            <div>
-              <span>Trades / semaine</span>
-              <strong>{analytics.tradesPerWeek.toFixed(1)}</strong>
-            </div>
-            <div>
-              <span>Avg hold</span>
-              <strong>{analytics.avgHoldHours != null ? `${analytics.avgHoldHours.toFixed(1)}h` : '-'}</strong>
-            </div>
+        <div className="space-y-6">
+          {/* KPI row */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+            {[
+              { label: 'Total_P&L', value: formatMoney(analytics.totalNet), icon: TrendingUp, color: analytics.totalNet >= 0 ? 'text-green-500' : 'text-red-500' },
+              { label: 'Win_Rate', value: formatPercent(analytics.winRate), icon: Target, color: 'text-[#3B82F6]' },
+              { label: 'Avg_Trade', value: formatMoney(analytics.avgTrade), icon: Activity, color: analytics.avgTrade >= 0 ? 'text-green-500' : 'text-red-500' },
+              { label: 'Max_Drawdown', value: formatMoney(analytics.maxDrawdown), icon: TrendingDown, color: 'text-red-500' },
+              { label: 'Profit_Factor', value: formatRatio(analytics.profitFactor), icon: BarChart3, color: 'text-white' },
+            ].map((stat, i) => (
+              <div key={i} className="bg-[#151619] border border-[#2A2B2F] p-4 rounded-lg flex items-center justify-between">
+                <div>
+                  <div className="text-[9px] font-bold text-[#4A4B50] uppercase tracking-widest mb-1">{stat.label}</div>
+                  <div className={`text-lg font-bold tabular-nums ${stat.color}`}>{stat.value}</div>
+                </div>
+                <div className="w-9 h-9 bg-[#1A1B1E] rounded border border-[#2A2B2F] flex items-center justify-center">
+                  <stat.icon className={`w-4 h-4 ${stat.color}`} />
+                </div>
+              </div>
+            ))}
           </div>
 
-          <div className="charts-grid">
+          {/* Secondary stats */}
+          <div className="grid grid-cols-4 gap-4">
+            {[
+              { label: 'Deals_Raw', value: String(analytics.rawDealsCount) },
+              { label: 'Trades_Closed', value: String(analytics.closedTradesCount) },
+              { label: 'Orders', value: String(orderAnalytics.points.length) },
+              { label: 'Trades_Week', value: analytics.tradesPerWeek.toFixed(1) },
+            ].map((stat, i) => (
+              <div key={i} className="bg-[#151619] border border-[#2A2B2F] p-3 rounded-lg text-center">
+                <div className="text-[9px] font-bold text-[#4A4B50] uppercase tracking-widest mb-1">{stat.label}</div>
+                <div className="text-sm font-bold text-white tabular-nums">{stat.value}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Charts */}
+          <div className="grid grid-cols-12 gap-6">
             {analytics.cumulative.length > 0 && (
-              <div className="chart-card">
-                <h4 className="chart-title">Courbe PnL cumulee</h4>
+              <div className="col-span-12 lg:col-span-8 bg-[#151619] border border-[#2A2B2F] rounded-lg p-6">
+                <div className="flex items-center justify-between mb-6 border-b border-[#2A2B2F] pb-4">
+                  <div className="flex items-center gap-3">
+                    <BarChart3 className="w-4 h-4 text-[#3B82F6]" />
+                    <h4 className="text-[10px] font-bold text-[#8E9299] uppercase tracking-[0.2em]">Cumulative_PnL</h4>
+                  </div>
+                  <div className="text-[9px] font-bold text-[#4A4B50] uppercase">
+                    Wins: {analytics.wins} | Losses: {analytics.losses}
+                  </div>
+                </div>
                 <LineChart
                   sx={CHART_SX}
                   hideLegend
-                  height={CHART_HEIGHT}
+                  height={350}
                   margin={CHART_MARGIN}
                   grid={{ horizontal: true, vertical: false }}
                   xAxis={[{ data: tradeIndexLabels, scaleType: 'point', label: 'Trade #', tickLabelInterval: 'auto' }]}
-                  series={[{ data: analytics.cumulative, label: 'Cumulative PnL', color: '#53a3ff', showMark: false }]}
+                  yAxis={[{ valueFormatter: (v: number) => `$${v.toLocaleString()}` }]}
+                  series={[{ data: analytics.cumulative, label: 'Cumulative PnL', color: '#3B82F6', showMark: false, area: true }]}
                 />
-                <p className="chart-caption">
-                  Dernier cumul: <code>{formatMoney(analytics.cumulative[analytics.cumulative.length - 1] ?? analytics.totalNet)}</code>
-                  {' | '}Wins: <code>{analytics.wins}</code>
-                  {' | '}Losses: <code>{analytics.losses}</code>
-                </p>
               </div>
             )}
 
-            {orderAnalytics.pricePoints.length > 0 && (
-              <div className="chart-card">
-                <h4 className="chart-title">Prix d'execution (orders)</h4>
-                <LineChart
-                  sx={CHART_SX}
-                  hideLegend
-                  height={CHART_HEIGHT}
-                  margin={CHART_MARGIN}
-                  grid={{ horizontal: true, vertical: false }}
-                  xAxis={[{ data: executionIndexLabels, scaleType: 'point', label: 'Order #', tickLabelInterval: 'auto' }]}
-                  series={[{
-                    data: orderAnalytics.pricePoints.map((item) => item.donePrice),
-                    label: 'Done price',
-                    color: '#30d2b3',
-                    showMark: false,
-                  }]}
-                />
-                <p className="chart-caption">
-                  Avg done price: <code>{orderAnalytics.avgDonePrice > 0 ? orderAnalytics.avgDonePrice.toFixed(5) : '-'}</code>
-                  {' | '}Total volume: <code>{orderAnalytics.totalVolume.toFixed(2)}</code>
-                </p>
+            <div className="col-span-12 lg:col-span-4 bg-[#151619] border border-[#2A2B2F] rounded-lg p-6">
+              <div className="flex items-center justify-between mb-6 border-b border-[#2A2B2F] pb-4">
+                <div className="flex items-center gap-3">
+                  <PieChartIcon className="w-4 h-4 text-[#3B82F6]" />
+                  <h4 className="text-[10px] font-bold text-[#8E9299] uppercase tracking-[0.2em]">Position_Distribution</h4>
+                </div>
               </div>
-            )}
-
-            <div className="chart-card">
-              <h4 className="chart-title">Indicateurs de risque</h4>
-              <BarChart
+              <PieChart
                 sx={CHART_SX}
-                hideLegend
-                height={CHART_HEIGHT}
-                margin={CHART_MARGIN}
-                grid={{ horizontal: true, vertical: false }}
-                xAxis={[{ data: riskLabels, scaleType: 'band' }]}
-                series={[{ data: riskValues, label: 'Score', color: '#86a7ff' }]}
+                height={250}
+                series={[{
+                  data: [
+                    { id: 0, value: analytics.longSide.count || 1, label: 'LONG', color: '#22C55E' },
+                    { id: 1, value: analytics.shortSide.count || 1, label: 'SHORT', color: '#EF4444' },
+                  ],
+                  innerRadius: 60,
+                  outerRadius: 90,
+                  paddingAngle: 4,
+                  cornerRadius: 4,
+                }]}
               />
+              <div className="mt-6 space-y-4">
+                <div>
+                  <div className="flex justify-between items-center text-[10px] font-bold mb-1.5">
+                    <span className="text-green-500">LONG_BIAS</span>
+                    <span className="text-white">{formatPercent(longPct)}</span>
+                  </div>
+                  <div className="w-full bg-[#0D0D0F] h-1.5 rounded-full overflow-hidden border border-[#2A2B2F]">
+                    <div className="bg-green-500 h-full rounded-full transition-all" style={{ width: `${longPct}%` }} />
+                  </div>
+                </div>
+                <div>
+                  <div className="flex justify-between items-center text-[10px] font-bold mb-1.5">
+                    <span className="text-red-500">SHORT_BIAS</span>
+                    <span className="text-white">{formatPercent(shortPct)}</span>
+                  </div>
+                  <div className="w-full bg-[#0D0D0F] h-1.5 rounded-full overflow-hidden border border-[#2A2B2F]">
+                    <div className="bg-red-500 h-full rounded-full transition-all" style={{ width: `${shortPct}%` }} />
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
-        </>
+        </div>
       )}
 
+      {/* ════════════════ PROFIT & LOSS ════════════════ */}
       {activeTab === 'profit' && (
-        <>
-          <div className="stats-grid">
-            <div>
-              <span>Gross profit</span>
-              <strong>{formatMoney(analytics.grossProfit)}</strong>
-            </div>
-            <div>
-              <span>Gross loss</span>
-              <strong>{formatMoney(analytics.grossLoss)}</strong>
-            </div>
-            <div>
-              <span>Swaps</span>
-              <strong>{formatMoney(analytics.totalSwap)}</strong>
-            </div>
-            <div>
-              <span>Commissions</span>
-              <strong>{formatMoney(analytics.totalCommission)}</strong>
-            </div>
-            <div>
-              <span>Fees</span>
-              <strong>{formatMoney(analytics.totalFee)}</strong>
-            </div>
-            <div>
-              <span>Avg trade</span>
-              <strong>{formatMoney(analytics.avgTrade)}</strong>
-            </div>
+        <div className="space-y-6">
+          <div className="grid grid-cols-3 md:grid-cols-6 gap-4">
+            {[
+              { label: 'Gross_Profit', value: formatMoney(analytics.grossProfit), color: 'text-green-500' },
+              { label: 'Gross_Loss', value: formatMoney(analytics.grossLoss), color: 'text-red-500' },
+              { label: 'Swaps', value: formatMoney(analytics.totalSwap), color: 'text-white' },
+              { label: 'Commissions', value: formatMoney(analytics.totalCommission), color: 'text-white' },
+              { label: 'Fees', value: formatMoney(analytics.totalFee), color: 'text-white' },
+              { label: 'Avg_Trade', value: formatMoney(analytics.avgTrade), color: analytics.avgTrade >= 0 ? 'text-green-500' : 'text-red-500' },
+            ].map((stat, i) => (
+              <div key={i} className="bg-[#151619] border border-[#2A2B2F] p-4 rounded-lg">
+                <div className="text-[9px] font-bold text-[#4A4B50] uppercase tracking-widest mb-1">{stat.label}</div>
+                <div className={`text-sm font-bold tabular-nums ${stat.color}`}>{stat.value}</div>
+              </div>
+            ))}
           </div>
 
-          <div className="charts-grid">
+          <div className="grid grid-cols-12 gap-6">
             {analytics.perTrade.length > 0 && (
-              <div className="chart-card">
-                <h4 className="chart-title">PnL par trade ferme (dernieres positions)</h4>
+              <div className="col-span-12 lg:col-span-8 bg-[#151619] border border-[#2A2B2F] rounded-lg p-6">
+                <div className="flex items-center justify-between mb-6 border-b border-[#2A2B2F] pb-4">
+                  <div className="flex items-center gap-3">
+                    <BarChart3 className="w-4 h-4 text-[#3B82F6]" />
+                    <h4 className="text-[10px] font-bold text-[#8E9299] uppercase tracking-[0.2em]">PnL_Per_Trade</h4>
+                  </div>
+                  <div className="text-[9px] font-bold text-[#4A4B50] uppercase">Last {analytics.perTrade.length} trades</div>
+                </div>
                 <BarChart
                   sx={CHART_SX}
                   hideLegend
-                  height={CHART_HEIGHT}
+                  height={300}
                   margin={CHART_MARGIN}
                   grid={{ horizontal: true, vertical: false }}
                   xAxis={[{ data: tradeBarsLabels, scaleType: 'band', tickLabelInterval: 'auto' }]}
-                  series={[{ data: analytics.perTrade.map((item) => item.pnl), label: 'PnL', color: '#53a3ff' }]}
+                  series={[{ data: analytics.perTrade.map((item) => item.pnl), label: 'PnL', color: '#3B82F6' }]}
                 />
               </div>
             )}
 
             {analytics.cumulative.length > 0 && (
-              <div className="chart-card">
-                <h4 className="chart-title">PnL cumule</h4>
+              <div className={`bg-[#151619] border border-[#2A2B2F] rounded-lg p-6 ${analytics.perTrade.length > 0 ? 'col-span-12 lg:col-span-4' : 'col-span-12'}`}>
+                <div className="flex items-center justify-between mb-6 border-b border-[#2A2B2F] pb-4">
+                  <div className="flex items-center gap-3">
+                    <TrendingUp className="w-4 h-4 text-[#3B82F6]" />
+                    <h4 className="text-[10px] font-bold text-[#8E9299] uppercase tracking-[0.2em]">Cumulative_PnL</h4>
+                  </div>
+                </div>
                 <LineChart
                   sx={CHART_SX}
                   hideLegend
-                  height={CHART_HEIGHT}
+                  height={300}
                   margin={CHART_MARGIN}
                   grid={{ horizontal: true, vertical: false }}
                   xAxis={[{ data: tradeIndexLabels, scaleType: 'point', tickLabelInterval: 'auto' }]}
-                  series={[{ data: analytics.cumulative, label: 'Cumulative', color: '#53a3ff', showMark: false }]}
+                  yAxis={[{ valueFormatter: (v: number) => `$${v.toLocaleString()}` }]}
+                  series={[{ data: analytics.cumulative, label: 'Cumulative', color: '#3B82F6', showMark: false, area: true }]}
                 />
               </div>
             )}
           </div>
-        </>
+        </div>
       )}
 
+      {/* ════════════════ LONG & SHORT ════════════════ */}
       {activeTab === 'direction' && (
-        <>
-          <div className="stats-grid">
-            <div>
-              <span>Long trades</span>
-              <strong>{analytics.longSide.count}</strong>
-            </div>
-            <div>
-              <span>Short trades</span>
-              <strong>{analytics.shortSide.count}</strong>
-            </div>
-            <div>
-              <span>Long PnL</span>
-              <strong>{formatMoney(analytics.longSide.pnl)}</strong>
-            </div>
-            <div>
-              <span>Short PnL</span>
-              <strong>{formatMoney(analytics.shortSide.pnl)}</strong>
-            </div>
+        <div className="space-y-6">
+          {/* Stats row — full width */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {[
+              { label: 'Long_Trades', value: String(analytics.longSide.count), color: 'text-green-500' },
+              { label: 'Short_Trades', value: String(analytics.shortSide.count), color: 'text-red-500' },
+              { label: 'Long_PnL', value: formatMoney(analytics.longSide.pnl), color: analytics.longSide.pnl >= 0 ? 'text-green-500' : 'text-red-500' },
+              { label: 'Short_PnL', value: formatMoney(analytics.shortSide.pnl), color: analytics.shortSide.pnl >= 0 ? 'text-green-500' : 'text-red-500' },
+            ].map((stat, i) => (
+              <div key={i} className="bg-[#151619] border border-[#2A2B2F] p-4 rounded-lg flex items-center justify-between">
+                <div>
+                  <div className="text-[9px] font-bold text-[#4A4B50] uppercase tracking-widest mb-1">{stat.label}</div>
+                  <div className={`text-xl font-bold tabular-nums ${stat.color}`}>{stat.value}</div>
+                </div>
+              </div>
+            ))}
           </div>
 
-          <div className="charts-grid">
-            <div className="chart-card">
-              <h4 className="chart-title">Repartition directionnelle</h4>
+          <div className="grid grid-cols-12 gap-6">
+            {/* Pie chart + bias bars */}
+            <div className="col-span-12 lg:col-span-4 bg-[#151619] border border-[#2A2B2F] rounded-lg p-6">
+              <div className="flex items-center justify-between mb-6 border-b border-[#2A2B2F] pb-4">
+                <div className="flex items-center gap-3">
+                  <PieChartIcon className="w-4 h-4 text-[#3B82F6]" />
+                  <h4 className="text-[10px] font-bold text-[#8E9299] uppercase tracking-[0.2em]">Position_Distribution</h4>
+                </div>
+              </div>
               <PieChart
                 sx={CHART_SX}
-                height={CHART_HEIGHT}
+                height={250}
                 series={[{
                   data: [
-                    { id: 0, value: analytics.longSide.count, label: `Long ${formatPercent(longPct)}`, color: '#1dbf8f' },
-                    { id: 1, value: analytics.shortSide.count, label: `Short ${formatPercent(shortPct)}`, color: '#ff5c6a' },
-                    { id: 2, value: analytics.unknownSide.count, label: `Unknown ${formatPercent(unknownPct)}`, color: '#7a8ba8' },
+                    { id: 0, value: analytics.longSide.count, label: `LONG ${formatPercent(longPct)}`, color: '#22C55E' },
+                    { id: 1, value: analytics.shortSide.count, label: `SHORT ${formatPercent(shortPct)}`, color: '#EF4444' },
+                    ...(analytics.unknownSide.count > 0 ? [{ id: 2, value: analytics.unknownSide.count, label: `N/A ${formatPercent(unknownPct)}`, color: '#4A4B50' }] : []),
                   ],
-                  innerRadius: 55,
+                  innerRadius: 60,
                   outerRadius: 95,
-                  paddingAngle: 2,
+                  paddingAngle: 4,
                   cornerRadius: 4,
                 }]}
               />
+              {/* Bias bars */}
+              <div className="mt-6 space-y-4">
+                <div>
+                  <div className="flex justify-between items-center text-[10px] font-bold mb-1.5">
+                    <span className="text-green-500">LONG_BIAS</span>
+                    <span className="text-white">{formatPercent(longPct)}</span>
+                  </div>
+                  <div className="w-full bg-[#0D0D0F] h-1.5 rounded-full overflow-hidden border border-[#2A2B2F]">
+                    <div className="bg-green-500 h-full rounded-full transition-all" style={{ width: `${longPct}%` }} />
+                  </div>
+                </div>
+                <div>
+                  <div className="flex justify-between items-center text-[10px] font-bold mb-1.5">
+                    <span className="text-red-500">SHORT_BIAS</span>
+                    <span className="text-white">{formatPercent(shortPct)}</span>
+                  </div>
+                  <div className="w-full bg-[#0D0D0F] h-1.5 rounded-full overflow-hidden border border-[#2A2B2F]">
+                    <div className="bg-red-500 h-full rounded-full transition-all" style={{ width: `${shortPct}%` }} />
+                  </div>
+                </div>
+              </div>
             </div>
 
-            <div className="chart-card">
-              <h4 className="chart-title">Win rate par direction</h4>
+            {/* Win rate chart */}
+            <div className="col-span-12 lg:col-span-8 bg-[#151619] border border-[#2A2B2F] rounded-lg p-6">
+              <div className="flex items-center justify-between mb-6 border-b border-[#2A2B2F] pb-4">
+                <div className="flex items-center gap-3">
+                  <Target className="w-4 h-4 text-[#3B82F6]" />
+                  <h4 className="text-[10px] font-bold text-[#8E9299] uppercase tracking-[0.2em]">Win_Rate_By_Direction</h4>
+                </div>
+              </div>
               <BarChart
                 sx={CHART_SX}
                 hideLegend
-                height={CHART_HEIGHT}
+                height={320}
                 margin={CHART_MARGIN}
                 grid={{ horizontal: true, vertical: false }}
-                xAxis={[{ data: ['Long', 'Short', 'Unknown'], scaleType: 'band' }]}
-                series={[{ data: [longWinRate, shortWinRate, unknownWinRate], label: 'Win rate %', color: '#86a7ff' }]}
+                xAxis={[{ data: ['Long', 'Short', ...(analytics.unknownSide.count > 0 ? ['Unknown'] : [])], scaleType: 'band' }]}
+                series={[{ data: [longWinRate, shortWinRate, ...(analytics.unknownSide.count > 0 ? [unknownWinRate] : [])], label: 'Win rate %', color: '#3B82F6' }]}
               />
             </div>
           </div>
-        </>
+        </div>
       )}
 
+      {/* ════════════════ SYMBOLS ════════════════ */}
       {activeTab === 'symbols' && (
-        <div className="charts-grid">
-          <div className="chart-card">
-            <h4 className="chart-title">PnL par symbole</h4>
-            {analytics.symbols.length === 0 ? (
-              <p className="chart-empty">Aucun symbole exploitable.</p>
-            ) : (
-              <BarChart
-                sx={CHART_SX}
-                hideLegend
-                height={CHART_HEIGHT}
-                margin={CHART_MARGIN}
-                grid={{ horizontal: true, vertical: false }}
-                xAxis={[{ data: analytics.symbols.map((item) => item.symbol), scaleType: 'band', tickLabelInterval: 'auto' }]}
-                series={[{ data: analytics.symbols.map((item) => item.pnl), label: 'PnL', color: '#53a3ff' }]}
-              />
-            )}
-          </div>
+        <div className="space-y-6">
+          <div className="grid grid-cols-12 gap-6">
+            {/* Symbol table */}
+            <div className="col-span-12 lg:col-span-8 bg-[#151619] border border-[#2A2B2F] rounded-lg p-6">
+              <div className="flex items-center justify-between mb-6 border-b border-[#2A2B2F] pb-4">
+                <div className="flex items-center gap-3">
+                  <Globe className="w-4 h-4 text-[#3B82F6]" />
+                  <h4 className="text-[10px] font-bold text-[#8E9299] uppercase tracking-[0.2em]">Symbol_Performance</h4>
+                </div>
+              </div>
+              {analytics.symbols.length === 0 ? (
+                <p className="text-[#4A4B50] text-xs font-mono py-8 text-center">Aucun symbole exploitable.</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left">
+                    <thead>
+                      <tr className="text-[9px] font-bold text-[#4A4B50] uppercase tracking-widest border-b border-[#1F2023]">
+                        <th className="pb-3">Symbol</th>
+                        <th className="pb-3">Trades</th>
+                        <th className="pb-3">PnL</th>
+                        <th className="pb-3">Win_Rate</th>
+                        <th className="pb-3">Volume</th>
+                        <th className="pb-3">Trend</th>
+                      </tr>
+                    </thead>
+                    <tbody className="text-[11px] font-bold">
+                      {analytics.symbols.map((item, i) => {
+                        const winRate = item.trades > 0 ? (item.wins / item.trades) * 100 : 0;
+                        return (
+                          <tr key={i} className="border-b border-[#1F2023]/50 hover:bg-white/[0.02] transition-colors">
+                            <td className="py-3.5 text-white">{item.symbol}</td>
+                            <td className="py-3.5 text-[#8E9299]">{item.trades}</td>
+                            <td className={`py-3.5 tabular-nums ${item.pnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+                              {formatMoney(item.pnl)}
+                            </td>
+                            <td className="py-3.5 text-[#3B82F6] tabular-nums">{formatPercent(winRate)}</td>
+                            <td className="py-3.5 text-[#8E9299] tabular-nums">{item.volume.toFixed(2)}</td>
+                            <td className="py-3.5">
+                              {item.pnl >= 0 ? (
+                                <TrendingUp className="w-3 h-3 text-green-500" />
+                              ) : (
+                                <TrendingDown className="w-3 h-3 text-red-500" />
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
 
-          <div className="chart-card">
-            <h4 className="chart-title">Ordres par symbole</h4>
-            {orderAnalytics.symbolCounts.length === 0 ? (
-              <p className="chart-empty">Aucune donnee d'ordres.</p>
-            ) : (
-              <BarChart
-                sx={CHART_SX}
-                hideLegend
-                height={CHART_HEIGHT}
-                margin={CHART_MARGIN}
-                grid={{ horizontal: true, vertical: false }}
-                xAxis={[{ data: orderAnalytics.symbolCounts.map((item) => item.symbol), scaleType: 'band', tickLabelInterval: 'auto' }]}
-                series={[{ data: orderAnalytics.symbolCounts.map((item) => item.count), label: 'Orders', color: '#30d2b3' }]}
-              />
-            )}
+            {/* Orders by symbol chart */}
+            <div className="col-span-12 lg:col-span-4 bg-[#151619] border border-[#2A2B2F] rounded-lg p-6">
+              <div className="flex items-center justify-between mb-6 border-b border-[#2A2B2F] pb-4">
+                <div className="flex items-center gap-3">
+                  <BarChart3 className="w-4 h-4 text-[#3B82F6]" />
+                  <h4 className="text-[10px] font-bold text-[#8E9299] uppercase tracking-[0.2em]">Orders_By_Symbol</h4>
+                </div>
+              </div>
+              {orderAnalytics.symbolCounts.length === 0 ? (
+                <p className="text-[#4A4B50] text-xs font-mono py-8 text-center">Aucune donnee d&apos;ordres.</p>
+              ) : (
+                <BarChart
+                  sx={CHART_SX}
+                  hideLegend
+                  height={300}
+                  margin={CHART_MARGIN}
+                  grid={{ horizontal: true, vertical: false }}
+                  xAxis={[{ data: orderAnalytics.symbolCounts.map((item) => item.symbol), scaleType: 'band', tickLabelInterval: 'auto' }]}
+                  series={[{ data: orderAnalytics.symbolCounts.map((item) => item.count), label: 'Orders', color: '#22C55E' }]}
+                />
+              )}
+            </div>
           </div>
         </div>
       )}
 
+      {/* ════════════════ RISKS ════════════════ */}
       {activeTab === 'risks' && (
-        <div className="charts-grid">
-          <div className="chart-card">
-            <h4 className="chart-title">Scores de risque</h4>
-            <BarChart
-              sx={CHART_SX}
-              hideLegend
-              height={CHART_HEIGHT}
-              margin={CHART_MARGIN}
-              grid={{ horizontal: true, vertical: false }}
-              xAxis={[{ data: riskLabels, scaleType: 'band' }]}
-              series={[{ data: riskValues, label: 'Score', color: '#86a7ff' }]}
-            />
-          </div>
+        <div className="space-y-6">
+          <div className="grid grid-cols-12 gap-6">
+            {/* Risk metrics list */}
+            <div className="col-span-12 lg:col-span-4 bg-[#151619] border border-[#2A2B2F] rounded-lg p-6">
+              <div className="flex items-center justify-between mb-6 border-b border-[#2A2B2F] pb-4">
+                <div className="flex items-center gap-3">
+                  <ShieldCheck className="w-4 h-4 text-[#3B82F6]" />
+                  <h4 className="text-[10px] font-bold text-[#8E9299] uppercase tracking-[0.2em]">Risk_Metrics</h4>
+                </div>
+              </div>
+              <div className="space-y-5">
+                {[
+                  { label: 'Sharpe_Ratio', value: formatRatio(analytics.sharpe), status: analytics.sharpe > 1 ? 'Optimal' : analytics.sharpe > 0 ? 'Stable' : 'Low', color: analytics.sharpe > 1 ? 'text-green-500' : analytics.sharpe > 0 ? 'text-[#3B82F6]' : 'text-red-500' },
+                  { label: 'Profit_Factor', value: formatRatio(analytics.profitFactor), status: analytics.profitFactor > 1.5 ? 'Optimal' : analytics.profitFactor > 1 ? 'Stable' : 'Low', color: analytics.profitFactor > 1.5 ? 'text-green-500' : analytics.profitFactor > 1 ? 'text-[#3B82F6]' : 'text-red-500' },
+                  { label: 'Win_Rate', value: formatPercent(analytics.winRate), status: analytics.winRate > 55 ? 'High' : analytics.winRate > 40 ? 'Monitored' : 'Low', color: analytics.winRate > 55 ? 'text-green-500' : analytics.winRate > 40 ? 'text-orange-500' : 'text-red-500' },
+                  { label: 'Max_DD_%', value: formatPercent(analytics.maxDrawdownPct), status: analytics.maxDrawdownPct < 10 ? 'Safe' : analytics.maxDrawdownPct < 25 ? 'Monitored' : 'Critical', color: analytics.maxDrawdownPct < 10 ? 'text-green-500' : analytics.maxDrawdownPct < 25 ? 'text-orange-500' : 'text-red-500' },
+                  { label: 'Max_Drawdown', value: formatMoney(analytics.maxDrawdown), status: 'Tracked', color: 'text-white' },
+                ].map((risk, i) => (
+                  <div key={i} className="flex items-center justify-between border-b border-[#1F2023] pb-3 last:border-0">
+                    <div>
+                      <div className="text-[9px] font-bold text-[#4A4B50] uppercase tracking-wider mb-1">{risk.label}</div>
+                      <div className="text-sm font-bold text-white tabular-nums">{risk.value}</div>
+                    </div>
+                    <div className={`text-[8px] font-bold uppercase px-2 py-0.5 rounded border border-current opacity-70 ${risk.color}`}>
+                      {risk.status}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {analytics.maxDrawdownPct > 15 && (
+                <div className="mt-6 p-4 bg-red-500/5 border border-red-500/20 rounded">
+                  <div className="flex items-center gap-2 mb-2">
+                    <AlertCircle className="w-3 h-3 text-red-500" />
+                    <span className="text-[9px] font-bold text-red-500 uppercase tracking-widest">Risk_Alert</span>
+                  </div>
+                  <p className="text-[10px] text-[#8E9299] leading-relaxed">
+                    Max drawdown {formatPercent(analytics.maxDrawdownPct)} exceeds 15% threshold. Review position sizing.
+                  </p>
+                </div>
+              )}
+            </div>
 
-          <div className="chart-card">
-            <h4 className="chart-title">Types d'ordre</h4>
-            {orderAnalytics.typeCounts.length === 0 ? (
-              <p className="chart-empty">Aucun type d'ordre.</p>
-            ) : (
-              <BarChart
-                sx={CHART_SX}
-                hideLegend
-                height={CHART_HEIGHT}
-                margin={CHART_MARGIN}
-                grid={{ horizontal: true, vertical: false }}
-                xAxis={[{ data: orderAnalytics.typeCounts.map((item) => item.type), scaleType: 'band' }]}
-                series={[{ data: orderAnalytics.typeCounts.map((item) => item.count), label: 'Count', color: '#4de2b7' }]}
-              />
-            )}
-          </div>
+            {/* Charts column */}
+            <div className="col-span-12 lg:col-span-8 space-y-6">
+              <div className="bg-[#151619] border border-[#2A2B2F] rounded-lg p-6">
+                <div className="flex items-center justify-between mb-6 border-b border-[#2A2B2F] pb-4">
+                  <div className="flex items-center gap-3">
+                    <BarChart3 className="w-4 h-4 text-[#3B82F6]" />
+                    <h4 className="text-[10px] font-bold text-[#8E9299] uppercase tracking-[0.2em]">Risk_Scores</h4>
+                  </div>
+                </div>
+                <BarChart
+                  sx={CHART_SX}
+                  hideLegend
+                  height={260}
+                  margin={CHART_MARGIN}
+                  grid={{ horizontal: true, vertical: false }}
+                  xAxis={[{ data: riskLabels, scaleType: 'band' }]}
+                  series={[{ data: riskValues, label: 'Score', color: '#3B82F6' }]}
+                />
+              </div>
 
-          <div className="chart-card">
-            <h4 className="chart-title">Etats d'ordre</h4>
-            {orderAnalytics.stateCounts.length === 0 ? (
-              <p className="chart-empty">Aucun etat d'ordre.</p>
-            ) : (
-              <BarChart
-                sx={CHART_SX}
-                hideLegend
-                height={CHART_HEIGHT}
-                margin={CHART_MARGIN}
-                grid={{ horizontal: true, vertical: false }}
-                xAxis={[{ data: orderAnalytics.stateCounts.map((item) => item.state), scaleType: 'band' }]}
-                series={[{ data: orderAnalytics.stateCounts.map((item) => item.count), label: 'Count', color: '#9eb1cf' }]}
-              />
-            )}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="bg-[#151619] border border-[#2A2B2F] rounded-lg p-6">
+                  <div className="flex items-center gap-3 mb-4 border-b border-[#2A2B2F] pb-3">
+                    <h4 className="text-[10px] font-bold text-[#8E9299] uppercase tracking-[0.2em]">Order_Types</h4>
+                  </div>
+                  {orderAnalytics.typeCounts.length === 0 ? (
+                    <p className="text-[#4A4B50] text-xs font-mono py-8 text-center">Aucun type d&apos;ordre.</p>
+                  ) : (
+                    <BarChart
+                      sx={CHART_SX}
+                      hideLegend
+                      height={CHART_HEIGHT}
+                      margin={CHART_MARGIN}
+                      grid={{ horizontal: true, vertical: false }}
+                      xAxis={[{ data: orderAnalytics.typeCounts.map((item) => item.type), scaleType: 'band' }]}
+                      series={[{ data: orderAnalytics.typeCounts.map((item) => item.count), label: 'Count', color: '#22C55E' }]}
+                    />
+                  )}
+                </div>
+
+                <div className="bg-[#151619] border border-[#2A2B2F] rounded-lg p-6">
+                  <div className="flex items-center gap-3 mb-4 border-b border-[#2A2B2F] pb-3">
+                    <h4 className="text-[10px] font-bold text-[#8E9299] uppercase tracking-[0.2em]">Order_States</h4>
+                  </div>
+                  {orderAnalytics.stateCounts.length === 0 ? (
+                    <p className="text-[#4A4B50] text-xs font-mono py-8 text-center">Aucun etat d&apos;ordre.</p>
+                  ) : (
+                    <BarChart
+                      sx={CHART_SX}
+                      hideLegend
+                      height={CHART_HEIGHT}
+                      margin={CHART_MARGIN}
+                      grid={{ horizontal: true, vertical: false }}
+                      xAxis={[{ data: orderAnalytics.stateCounts.map((item) => item.state), scaleType: 'band' }]}
+                      series={[{ data: orderAnalytics.stateCounts.map((item) => item.count), label: 'Count', color: '#8E9299' }]}
+                    />
+                  )}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       )}
-    </>
+    </div>
   );
 }

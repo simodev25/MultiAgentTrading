@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.core.config import get_settings
 from app.db.models.scheduled_run import ScheduledRun
@@ -21,7 +21,7 @@ def dispatch_due_schedules() -> dict:
         return {'enabled': False, 'processed': 0, 'triggered': 0, 'failed': 0}
 
     db = SessionLocal()
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     processed = 0
     triggered = 0
     failed = 0
@@ -65,7 +65,7 @@ def dispatch_due_schedules() -> dict:
                         'schedule_name': row.name,
                     },
                 )
-                row.last_run_at = datetime.utcnow()
+                row.last_run_at = datetime.now(timezone.utc)
                 if run.status == 'queued':
                     triggered += 1
                 else:
@@ -77,7 +77,7 @@ def dispatch_due_schedules() -> dict:
 
             row.last_error = run_error
             try:
-                row.next_run_at = next_run_after(row.cron_expression, datetime.utcnow())
+                row.next_run_at = next_run_after(row.cron_expression, datetime.now(timezone.utc))
             except Exception as exc:  # pragma: no cover
                 row.is_active = False
                 row.next_run_at = None

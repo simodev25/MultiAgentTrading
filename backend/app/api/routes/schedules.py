@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
@@ -63,7 +63,7 @@ def create_schedule(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     next_run_at = next_run_after(normalized_cron, now) if payload.is_active else None
     row = ScheduledRun(
         name=payload.name.strip(),
@@ -129,7 +129,7 @@ def update_schedule(
     row.is_active = bool(next_active)
 
     if row.is_active:
-        row.next_run_at = next_run_after(row.cron_expression, datetime.utcnow())
+        row.next_run_at = next_run_after(row.cron_expression, datetime.now(timezone.utc))
     else:
         row.next_run_at = None
 
@@ -191,10 +191,10 @@ def run_schedule_now(
         },
     )
 
-    row.last_run_at = datetime.utcnow()
+    row.last_run_at = datetime.now(timezone.utc)
     row.last_error = run.error if run.status == 'failed' else None
     if row.is_active:
-        row.next_run_at = next_run_after(row.cron_expression, datetime.utcnow())
+        row.next_run_at = next_run_after(row.cron_expression, datetime.now(timezone.utc))
     db.commit()
 
     return RunOut.model_validate(run)
@@ -240,7 +240,7 @@ def regenerate_active_schedules(
             row.next_run_at = None
         replaced_count = len(current_active)
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     created_rows: list[ScheduledRun] = []
     for plan in generated_plans:
         row = ScheduledRun(

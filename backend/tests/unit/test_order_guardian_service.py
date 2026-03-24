@@ -92,6 +92,7 @@ def test_order_guardian_evaluate_executes_exit_and_update_actions() -> None:
     ):
         if symbol == 'EURUSD':
             return {
+                'market': {'last_price': 1.1050},
                 'trader_decision': {
                     'decision': 'SELL',
                     'stop_loss': 1.1100,
@@ -101,6 +102,7 @@ def test_order_guardian_evaluate_executes_exit_and_update_actions() -> None:
                 }
             }
         return {
+            'market': {'last_price': 1.3100},
             'trader_decision': {
                 'decision': 'SELL',
                 'stop_loss': 1.3150,

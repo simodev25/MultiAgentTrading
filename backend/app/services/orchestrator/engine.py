@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import json
 import math
@@ -19,9 +20,10 @@ from app.db.models.agent_step import AgentStep
 from app.db.models.run import AnalysisRun
 from app.db.session import SessionLocal
 from app.observability.metrics import analysis_runs_total, orchestrator_step_duration_seconds
+from app.observability.trace_context import trace_ctx
 from app.services.execution.executor import ExecutionService
 from app.services.llm.model_selector import AgentModelSelector
-from app.services.market.yfinance_provider import YFinanceMarketProvider
+from app.services.market.news_provider import MarketProvider
 from app.services.memory.memori_memory import MemoriMemoryService
 from app.services.memory.vector_memory import VectorMemoryService
 from app.services.orchestrator.agents import (
@@ -42,7 +44,7 @@ from app.services.trading.metaapi_client import MetaApiClient
 logger = logging.getLogger(__name__)
 
 
-class ForexOrchestrator:
+class TradingOrchestrator:
     WORKFLOW_STEPS = (
         'technical-analyst',
         'news-analyst',
@@ -58,7 +60,7 @@ class ForexOrchestrator:
 
     def __init__(self) -> None:
         self.settings = get_settings()
-        self.market_provider = YFinanceMarketProvider()
+        self.market_provider = MarketProvider()
         self.metaapi = MetaApiClient()
         self.account_selector = MetaApiAccountSelector()
         self.memory_service = VectorMemoryService()
@@ -91,8 +93,8 @@ class ForexOrchestrator:
             run_id=run.id,
             agent_name=agent_name,
             status='completed',
-            input_payload=input_payload,
-            output_payload=output_payload,
+            input_payload=self._json_safe(input_payload),
+            output_payload=self._json_safe(output_payload),
         )
         db.add(step)
         db.flush()
@@ -123,14 +125,20 @@ class ForexOrchestrator:
         orchestrator_step_duration_seconds.labels(agent=agent_name).observe(elapsed)
         return output
 
+    _JSON_SAFE_DROP_KEYS: frozenset[str] = frozenset({'_raw_candles'})
+
     @staticmethod
     def _json_safe(value: Any) -> Any:
         if value is None or isinstance(value, (str, int, float, bool)):
             return value
         if isinstance(value, dict):
-            return {str(key): ForexOrchestrator._json_safe(item) for key, item in value.items()}
+            return {
+                str(key): TradingOrchestrator._json_safe(item)
+                for key, item in value.items()
+                if key not in TradingOrchestrator._JSON_SAFE_DROP_KEYS
+            }
         if isinstance(value, (list, tuple, set)):
-            return [ForexOrchestrator._json_safe(item) for item in value]
+            return [TradingOrchestrator._json_safe(item) for item in value]
         if hasattr(value, 'isoformat'):
             try:
                 return value.isoformat()
@@ -138,7 +146,7 @@ class ForexOrchestrator:
                 pass
         if hasattr(value, 'item'):
             try:
-                return ForexOrchestrator._json_safe(value.item())
+                return TradingOrchestrator._json_safe(value.item())
             except Exception:
                 pass
         return str(value)
@@ -298,7 +306,7 @@ class ForexOrchestrator:
         if decision not in {'BUY', 'SELL'}:
             return False
 
-        execution_allowed = bool(trader_decision.get('execution_allowed', decision in {'BUY', 'SELL'}))
+        execution_allowed = bool(trader_decision.get('execution_allowed', False))
         if not execution_allowed or not bool(risk_output.get('accepted')):
             return False
 
@@ -562,7 +570,7 @@ class ForexOrchestrator:
                 'timeframe': timeframe,
             }
 
-        pct_change = ((latest - prev) / prev) * 100 if prev else 0.0
+        pct_change = ((latest - prev) / prev) * 100 if prev != 0 else 0.0
         trend = 'bullish' if ema_fast_raw > ema_slow_raw else 'bearish'
         if abs(ema_fast_raw - ema_slow_raw) < latest * 0.0003:
             trend = 'neutral'
@@ -666,6 +674,7 @@ class ForexOrchestrator:
                 },
             )
 
+        snapshot['_raw_candles'] = metaapi_market.get('candles', []) if isinstance(metaapi_market.get('candles'), list) else []
         snapshot['market_data_source'] = 'metaapi'
         snapshot['market_data_provider'] = metaapi_market.get('provider')
         snapshot['requested_symbol'] = metaapi_market.get('requested_symbol')
@@ -677,6 +686,48 @@ class ForexOrchestrator:
             selected_account.account_id if selected_account is not None else str(self.settings.metaapi_account_id or '').strip() or None
         )
         return snapshot
+
+    async def _fetch_multi_tf_snapshots(
+        self,
+        db: Session,
+        *,
+        pair: str,
+        current_timeframe: str,
+        symbol: str,
+        metaapi_account_ref: int | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        from app.services.orchestrator.agents import _higher_timeframes
+
+        higher_tfs = _higher_timeframes(current_timeframe, max_count=2)
+        if not higher_tfs:
+            return {}
+
+        async def _fetch_one(tf: str) -> tuple[str, dict[str, Any]]:
+            try:
+                candles = await self.resolve_recent_candles(
+                    db,
+                    pair=pair,
+                    timeframe=tf,
+                    limit=200,
+                    metaapi_account_ref=metaapi_account_ref,
+                )
+                if not candles:
+                    return tf, {'degraded': True, 'error': 'no candles', 'timeframe': tf}
+                raw = [
+                    {'open': c.get('open'), 'high': c.get('high'), 'low': c.get('low'), 'close': c.get('close'), 'time': c.get('ts', c.get('time', ''))}
+                    for c in candles if isinstance(c, dict)
+                ]
+                snapshot = self._build_snapshot_from_market_candles(
+                    pair=pair, timeframe=tf, candles=raw, symbol=symbol,
+                )
+                snapshot['timeframe'] = tf
+                return tf, snapshot
+            except Exception as exc:
+                logger.warning('multi_tf fetch failed tf=%s pair=%s: %s', tf, pair, exc)
+                return tf, {'degraded': True, 'error': str(exc), 'timeframe': tf}
+
+        results = await asyncio.gather(*[_fetch_one(tf) for tf in higher_tfs])
+        return dict(results)
 
     async def resolve_recent_candles(
         self,
@@ -755,7 +806,7 @@ class ForexOrchestrator:
         macd_state = str(context.get('macd_state', 'unknown') or 'unknown')
         volatility_regime = str(context.get('volatility_regime', 'unknown') or 'unknown')
         contradiction_level = str(context.get('contradiction_level', 'unknown') or 'unknown')
-        resolved_mode = str(decision_mode or context.get('decision_mode', 'conservative') or 'conservative')
+        resolved_mode = str(decision_mode or context.get('decision_mode', 'balanced') or 'balanced')
         return (
             f'{pair} {timeframe} trend {trend} technical_signal {technical_signal} '
             f'rsi_bucket {rsi_bucket} macd_state {macd_state} volatility {volatility_regime} '
@@ -920,7 +971,7 @@ class ForexOrchestrator:
         needs_follow_up = bool(trader_decision.get('needs_follow_up', False))
         follow_up_reason = str(trader_decision.get('follow_up_reason') or '').strip().lower() or None
         strong_conflict = bool(trader_decision.get('strong_conflict', False))
-        execution_allowed = bool(trader_decision.get('execution_allowed', decision in {'BUY', 'SELL'}))
+        execution_allowed = bool(trader_decision.get('execution_allowed', False))
         risk_accepted = bool(risk_output.get('accepted', False))
         degraded_agents = self._collect_bundle_degraded_agents(analysis_bundle)
         should_second_pass, second_pass_reason = self._should_trigger_second_pass(trader_decision)
@@ -1140,7 +1191,12 @@ class ForexOrchestrator:
                 }
                 for future in as_completed(future_map):
                     agent_name, _ = future_map[future]
-                    output, elapsed = future.result()
+                    try:
+                        output, elapsed = future.result()
+                    except Exception as exc:
+                        logger.warning("Parallel agent %s failed: %s", agent_name, exc, exc_info=True)
+                        output = {'error': f'{type(exc).__name__}: agent execution failed', 'agent': agent_name}
+                        elapsed = 0.0
                     finished[agent_name] = (output, elapsed)
 
             ordered: dict[str, dict[str, Any]] = {}
@@ -1240,6 +1296,7 @@ class ForexOrchestrator:
         metaapi_account_ref: int | None = None,
     ) -> AnalysisRun:
         run_id = run.id
+        trace_ctx.set(correlation_id=f'run-{run_id}', causation_id=f'execute-{run_id}')
         run.status = 'running'
         db.commit()
         db.refresh(run)
@@ -1272,6 +1329,14 @@ class ForexOrchestrator:
             limit=memory_limit,
         )
 
+        raw_candles = market.pop('_raw_candles', [])
+        multi_tf_snapshots = await self._fetch_multi_tf_snapshots(
+            db,
+            pair=run.pair,
+            current_timeframe=run.timeframe,
+            symbol=str(market.get('symbol') or run.pair),
+            metaapi_account_ref=metaapi_account_ref,
+        )
         context = AgentContext(
             pair=run.pair,
             timeframe=run.timeframe,
@@ -1282,19 +1347,23 @@ class ForexOrchestrator:
             memory_context=memory_context,
             memory_signal=memory_signal,
             llm_model_overrides={},
+            price_history=raw_candles,
+            multi_tf_snapshots=multi_tf_snapshots,
         )
-        price_history: list[dict[str, Any]] = []
+        price_history: list[dict[str, Any]] = list(raw_candles) if raw_candles else []
         if self.settings.debug_trade_json_enabled and self.settings.debug_trade_json_include_price_history:
-            try:
-                price_history = await self.resolve_recent_candles(
-                    db,
-                    pair=run.pair,
-                    timeframe=run.timeframe,
-                    limit=self.settings.debug_trade_json_price_history_limit,
-                    metaapi_account_ref=metaapi_account_ref,
-                )
-            except Exception:
-                logger.exception('debug price history fetch failed run_id=%s', run_id)
+            debug_limit = self.settings.debug_trade_json_price_history_limit
+            if len(price_history) < debug_limit:
+                try:
+                    price_history = await self.resolve_recent_candles(
+                        db,
+                        pair=run.pair,
+                        timeframe=run.timeframe,
+                        limit=debug_limit,
+                        metaapi_account_ref=metaapi_account_ref,
+                    )
+                except Exception:
+                    logger.exception('debug price history fetch failed run_id=%s', run_id)
 
         try:
             autonomy_enabled = bool(self.settings.orchestrator_autonomy_enabled)
@@ -1546,7 +1615,8 @@ class ForexOrchestrator:
             }
             run.status = 'completed'
             trace_payload = {
-                'market': market,
+                'trace_ids': trace_ctx.as_dict(),
+                'market': self._json_safe(market),
                 'news': news,
                 'analysis_outputs': analysis_outputs,
                 'bullish': bullish,
@@ -1609,7 +1679,7 @@ class ForexOrchestrator:
                     vector_memory_meta['entry_id'] = getattr(vector_entry, 'id', None)
             except Exception as exc:
                 logger.exception('vector memory persistence failed run_id=%s', run.id)
-                vector_memory_meta['error'] = str(exc)
+                vector_memory_meta['error'] = f'{type(exc).__name__}: vector memory persistence failed'
 
             memori_store_meta = self.memori_memory_service.store_run_memory(run)
             memory_persistence_meta = {
@@ -1638,8 +1708,12 @@ class ForexOrchestrator:
             if failed_run is None:
                 raise
             failed_run.status = 'failed'
-            failed_run.error = str(exc)
+            failed_run.error = f'{type(exc).__name__}: analysis failed'
             db.commit()
             db.refresh(failed_run)
             analysis_runs_total.labels(status='failed').inc()
             return failed_run
+
+
+# Backward-compatible alias
+ForexOrchestrator = TradingOrchestrator

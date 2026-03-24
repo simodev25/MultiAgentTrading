@@ -23,6 +23,7 @@ interface OpenOrdersChartProps {
   marketCandles: MarketCandle[];
   selectedTicket?: string | null;
   selectedSymbol?: string | null;
+  displaySymbol?: string | null;
 }
 
 interface CandlePoint {
@@ -179,6 +180,7 @@ export function OpenOrdersChart({
   marketCandles,
   selectedTicket = null,
   selectedSymbol = null,
+  displaySymbol = null,
 }: OpenOrdersChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [chartRenderError, setChartRenderError] = useState<string | null>(null);
@@ -217,7 +219,7 @@ export function OpenOrdersChart({
       points.push({
         time: time as UTCTimestamp,
         value: volume,
-        color: close >= open ? 'rgba(0, 255, 80, 0.60)' : 'rgba(0, 180, 60, 0.45)',
+        color: close >= open ? 'rgba(38, 166, 154, 0.50)' : 'rgba(239, 83, 80, 0.50)',
       });
     }
     return sortHistogramData(points);
@@ -417,6 +419,28 @@ export function OpenOrdersChart({
     || pendingStopLossLevels.length > 0
     || pendingTakeProfitLevels.length > 0;
 
+  const priceOverlay = useMemo(() => {
+    if (marketCandleData.length === 0) return null;
+    const lastCandle = marketCandleData[marketCandleData.length - 1];
+    const livePrice = lastCandle.close;
+
+    // Find the candle closest to ~24h ago for delta calculation
+    const lastTime = Number(lastCandle.time);
+    const targetTime = lastTime - 86400;
+    let refCandle = marketCandleData[0];
+    for (const candle of marketCandleData) {
+      if (Number(candle.time) <= targetTime) {
+        refCandle = candle;
+      } else {
+        break;
+      }
+    }
+    const refPrice = refCandle.close;
+    const delta24h = refPrice > 0 ? ((livePrice - refPrice) / refPrice) * 100 : 0;
+
+    return { livePrice, delta24h };
+  }, [marketCandleData]);
+
   useEffect(() => {
     if (!hasRenderableData) return;
     const container = containerRef.current;
@@ -429,28 +453,28 @@ export function OpenOrdersChart({
         autoSize: true,
         layout: {
           background: { type: ColorType.Solid, color: '#000000' },
-          textColor: '#d5dfef',
+          textColor: '#787b86',
           attributionLogo: false,
         },
         grid: {
-          vertLines: { color: 'rgba(91, 126, 173, 0.45)', style: LineStyle.Dotted },
-          horzLines: { color: 'rgba(91, 126, 173, 0.45)', style: LineStyle.Dotted },
+          vertLines: { color: 'rgba(42, 46, 57, 0.8)', style: LineStyle.Solid },
+          horzLines: { color: 'rgba(42, 46, 57, 0.8)', style: LineStyle.Solid },
         },
         rightPriceScale: {
-          borderColor: 'rgba(138, 154, 182, 0.5)',
+          borderColor: 'rgba(42, 46, 57, 1)',
           scaleMargins: {
             top: 0.06,
             bottom: 0.13,
           },
         },
         timeScale: {
-          borderColor: 'rgba(138, 154, 182, 0.5)',
+          borderColor: 'rgba(42, 46, 57, 1)',
           timeVisible: true,
           secondsVisible: false,
         },
         crosshair: {
-          vertLine: { color: 'rgba(205, 219, 238, 0.3)', style: LineStyle.Solid },
-          horzLine: { color: 'rgba(205, 219, 238, 0.3)', style: LineStyle.Solid },
+          vertLine: { color: 'rgba(150, 160, 185, 0.4)', style: LineStyle.Dashed, labelBackgroundColor: '#2a2e39' },
+          horzLine: { color: 'rgba(150, 160, 185, 0.4)', style: LineStyle.Dashed, labelBackgroundColor: '#2a2e39' },
         },
         localization: {
           locale: 'fr-FR',
@@ -458,16 +482,16 @@ export function OpenOrdersChart({
       });
 
       const marketSeries = chart.addSeries(CandlestickSeries, {
-        upColor: 'rgba(0, 0, 0, 0)',
-        downColor: '#f7fbff',
+        upColor: '#26a69a',
+        downColor: '#ef5350',
         borderVisible: true,
-        borderUpColor: '#00ff3f',
-        borderDownColor: '#00ff3f',
-        wickUpColor: '#00ff3f',
-        wickDownColor: '#00ff3f',
-        priceLineColor: '#00ff3f',
+        borderUpColor: '#26a69a',
+        borderDownColor: '#ef5350',
+        wickUpColor: '#26a69a',
+        wickDownColor: '#ef5350',
+        priceLineColor: '#26a69a',
         lastValueVisible: true,
-        title: 'Prix symbole',
+        title: '',
         priceFormat: {
           type: 'price',
           precision: chartPriceFormat.precision,
@@ -587,6 +611,31 @@ export function OpenOrdersChart({
 
       if (marketCandleData.length > 0) marketSeries.setData(marketCandleData);
       if (marketVolumeData.length > 0) volumeSeries.setData(marketVolumeData);
+
+      // ── Opening price reference line (dotted green, like TradingView) ──
+      if (marketCandleData.length > 0) {
+        const openRefPrice = marketCandleData[0].open;
+        const refLineSeries = chart.addSeries(LineSeries, {
+          color: 'rgba(38, 166, 154, 0.5)',
+          lineWidth: 1,
+          lineStyle: LineStyle.Dotted,
+          lineVisible: true,
+          pointMarkersVisible: false,
+          priceLineVisible: false,
+          lastValueVisible: false,
+          crosshairMarkerVisible: false,
+          title: '',
+          priceFormat: {
+            type: 'price',
+            precision: chartPriceFormat.precision,
+            minMove: chartPriceFormat.minMove,
+          },
+        });
+        refLineSeries.setData([
+          { time: marketCandleData[0].time, value: openRefPrice },
+          { time: marketCandleData[marketCandleData.length - 1].time, value: openRefPrice },
+        ]);
+      }
       if (positionOpenData.length > 0) positionOpenSeries.setData(positionOpenData);
       if (positionCurrentData.length > 0) positionCurrentSeries.setData(positionCurrentData);
       if (pendingOpenData.length > 0) pendingOpenSeries.setData(pendingOpenData);
@@ -669,22 +718,57 @@ export function OpenOrdersChart({
     positionOpenData,
   ]);
 
+  const formatPrice = (price: number): string => {
+    return price.toFixed(chartPriceFormat.precision);
+  };
+
   return (
-    <div className="open-orders-chart open-orders-chart--mt5">
-      <p className="model-source open-orders-legend">
-        Bougies MT5: haussière contour vert, baissière corps blanc | Volume: histogramme vert | Bleu: prix d&apos;entrée positions | Vert: prix courant positions | Orange: prix d&apos;entrée ordres | Rouge: prix courant ordres | S/L: ligne rouge pointillée | T/P: ligne verte pointillée
-      </p>
+    <div className="flex flex-col">
       {chartRenderError ? (
-        <p className="chart-empty">Erreur graphique: {chartRenderError}</p>
+        <p className="text-text-muted text-xs font-mono py-8 text-center">Erreur graphique: {chartRenderError}</p>
       ) : hasRenderableData ? (
-        <div
-          aria-label="Graphique TradingView des ordres ouverts"
-          className="open-orders-chart-canvas open-orders-chart-canvas--mt5"
-          ref={containerRef}
-        />
+        <div className="relative w-full rounded-lg overflow-hidden" style={{ height: '520px' }}>
+          {/* ── TradingView-style price overlay ── */}
+          {priceOverlay && (
+            <div className="absolute top-3 left-4 z-10 flex items-center gap-4 pointer-events-none select-none">
+              <div className="flex items-center gap-2.5">
+                {displaySymbol && (
+                  <span className="text-[15px] font-bold tracking-wide text-white/90">
+                    {displaySymbol.replace('.PRO', '').replace('.pro', '').replace(/([A-Z]{3})([A-Z]{3})/, '$1/$2')}
+                  </span>
+                )}
+                <span className="text-[9px] font-bold tracking-wider px-2 py-0.5 rounded bg-[#26a69a] text-white">
+                  LIVE_FEED
+                </span>
+              </div>
+              <div className="flex items-center gap-6 text-[13px] font-mono">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-[#787b86] uppercase tracking-wider">Price</span>
+                  <span className="text-[#26a69a] font-semibold">
+                    {formatPrice(priceOverlay.livePrice)}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-[#787b86] uppercase tracking-wider">Delta_24H</span>
+                  <span className={`font-semibold ${priceOverlay.delta24h >= 0 ? 'text-[#26a69a]' : 'text-[#ef5350]'}`}>
+                    {priceOverlay.delta24h >= 0 ? '+' : ''}{priceOverlay.delta24h.toFixed(2)}%
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+          <div
+            aria-label="Graphique TradingView des ordres ouverts"
+            className="w-full h-full"
+            ref={containerRef}
+          />
+        </div>
       ) : (
-        <p className="chart-empty">Aucune donnée de prix exploitable pour les ordres ouverts.</p>
+        <p className="text-text-muted text-xs font-mono py-8 text-center">Aucune donnée de prix exploitable pour les ordres ouverts.</p>
       )}
+      <p className="text-[8px] font-mono text-[#787b86] leading-relaxed px-1 mt-1">
+        Bleu: prix d&apos;entrée | Vert: prix courant | Orange: ordres pending | S/L: rouge pointillé | T/P: vert pointillé
+      </p>
     </div>
   );
 }

@@ -311,27 +311,8 @@ def build_instrument_prompt_variables(
     }
 
 
-def build_provider_resolution_trace(
-    pair: str | None,
-    provider: str,
-) -> dict[str, Any]:
-    context = build_instrument_context(pair, provider=provider)
-    return {
-        'requested_symbol': str(pair or ''),
-        'instrument': context['instrument_dict'],
-        'provider_resolution': context['provider_resolution'],
-        'news_candidates': get_news_candidates_for_instrument(context['instrument'], provider=provider),
-    }
-
-
 def instrument_aware_asset_class(pair: str | None) -> str:
     return get_instrument_for_pair(pair).asset_class.value
-
-
-def instrument_aware_components(pair: str | None) -> tuple[str | None, str | None, str]:
-    instrument = get_instrument_for_pair(pair)
-    primary, secondary = get_instrument_direction_assets(instrument)
-    return primary, secondary, instrument.asset_class.value
 
 
 def instrument_aware_effects_for_item(
@@ -372,8 +353,8 @@ def instrument_aware_effects_for_item(
         'impacted_assets': impacted_assets,
         'regime_context': str(analysis_result.get('regime_context') or 'unknown'),
         'impacted_currencies': impacted_assets if is_instrument_fx_like(instrument) else [],
-        'impact_on_base': primary_effect if is_instrument_fx_like(instrument) else 'unknown',
-        'impact_on_quote': secondary_effect if is_instrument_fx_like(instrument) else 'unknown',
+        'impact_on_base': primary_effect,
+        'impact_on_quote': secondary_effect,
         'base_currency_effect': primary_effect if is_instrument_fx_like(instrument) else 'unknown',
         'quote_currency_effect': secondary_effect if is_instrument_fx_like(instrument) else 'unknown',
         'pair_directional_effect': directional_effect if is_instrument_fx_like(instrument) else None,
@@ -403,8 +384,10 @@ def instrument_aware_evidence_profile(
     base_relevance = _clamp(_safe_float(item.get('base_currency_relevance'), 0.0), 0.0, 1.0)
     quote_relevance = _clamp(_safe_float(item.get('quote_currency_relevance'), 0.0), 0.0, 1.0)
     macro_relevance = _clamp(_safe_float(item.get('macro_relevance'), 0.0), 0.0, 1.0)
-    freshness = _clamp(_safe_float(item.get('freshness_score'), 0.0), 0.0, 1.0)
-    credibility = _clamp(_safe_float(item.get('credibility_score'), 0.0), 0.0, 1.0)
+    freshness_raw = item.get('freshness_score')
+    credibility_raw = item.get('credibility_score')
+    freshness = _clamp(_safe_float(freshness_raw, 0.5 if freshness_raw is None else 0.0), 0.0, 1.0)
+    credibility = _clamp(_safe_float(credibility_raw, 0.5 if credibility_raw is None else 0.0), 0.0, 1.0)
     source_symbol = str(item.get('source_symbol') or provider_symbol or '').strip()
 
     primary_hits = _hit_count(text, _asset_aliases(primary_asset, instrument))
@@ -471,7 +454,7 @@ def instrument_aware_evidence_profile(
     category_floor = {
         'direct_pair': 0.84,
         'direct_primary_asset': 0.72,
-        'direct_secondary_asset': 0.68,
+        'direct_secondary_asset': 0.72,
         'direct_instrument': 0.80,
         'relevant_macro': 0.56,
         'sector_related': 0.36,

@@ -9,18 +9,105 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.services.llm.provider_client import LlmClient
 from app.services.llm.model_selector import AGENT_TOOL_DEFINITIONS, AgentModelSelector, normalize_decision_mode
-from app.services.orchestrator.langchain_tools import build_llm_tool_specs, get_langchain_agent_tool
+from app.services.orchestrator.langchain_tools import build_llm_tool_specs
 from app.services.orchestrator.instrument_helpers import (
     build_instrument_context,
     build_instrument_prompt_variables,
     instrument_aware_asset_class,
-    instrument_aware_components,
     instrument_aware_effects_for_item,
     instrument_aware_evidence_profile,
     instrument_aware_headline_sentiment,
 )
 from app.services.prompts.registry import PromptTemplateService
 from app.services.risk.rules import RiskEngine
+from app.observability.metrics import (
+    contradiction_detection_total,
+    debate_impact_abs,
+    decision_gate_blocks_total,
+)
+
+_TIMEFRAME_ORDER = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1', 'W1', 'MN']
+_MAX_USEFUL_TF = 'D1'
+
+
+def _higher_timeframes(current_tf: str, max_count: int = 2) -> list[str]:
+    """Return up to *max_count* timeframes above *current_tf*, capped at D1.
+
+    W1/MN are excluded because MetaAPI rarely has enough weekly/monthly
+    candles for reliable indicator computation (EMA, RSI need 60+ bars).
+    """
+    upper = current_tf.strip().upper()
+    try:
+        idx = _TIMEFRAME_ORDER.index(upper)
+    except ValueError:
+        return []
+    ceiling = _TIMEFRAME_ORDER.index(_MAX_USEFUL_TF)
+    candidates = [tf for tf in _TIMEFRAME_ORDER[idx + 1:] if _TIMEFRAME_ORDER.index(tf) <= ceiling]
+    return candidates[:max_count]
+
+
+def _compute_multi_timeframe_context(
+    *,
+    ctx: 'AgentContext',
+    current_trend: str,
+    current_rsi: float,
+) -> dict[str, Any]:
+    from app.services.agent_runtime.mcp_trading_server import (
+        multi_timeframe_context as _mcp_multi_tf,
+    )
+
+    snapshots = ctx.multi_tf_snapshots or {}
+    valid = {
+        tf: snap for tf, snap in snapshots.items()
+        if isinstance(snap, dict) and not snap.get('degraded')
+    }
+
+    if not valid:
+        return {
+            'timeframe': ctx.timeframe,
+            'availability': 'single_timeframe_only',
+            'alignment': current_trend,
+            'higher_tf_data': {},
+        }
+
+    sorted_tfs = sorted(
+        valid.keys(),
+        key=lambda t: _TIMEFRAME_ORDER.index(t.upper()) if t.upper() in _TIMEFRAME_ORDER else 99,
+    )
+
+    first_snap = valid[sorted_tfs[0]]
+    second_snap = valid[sorted_tfs[1]] if len(sorted_tfs) > 1 else {}
+
+    higher_trend = str(first_snap.get('trend', 'neutral')).lower()
+    higher_rsi = _safe_float(first_snap.get('rsi'), 50.0)
+    second_trend = str(second_snap.get('trend', 'neutral')).lower() if second_snap else 'neutral'
+    second_rsi = _safe_float(second_snap.get('rsi'), 50.0) if second_snap else 50.0
+
+    result = _mcp_multi_tf(
+        current_tf_trend=current_trend,
+        current_tf_rsi=current_rsi,
+        higher_tf_trend=higher_trend,
+        higher_tf_rsi=higher_rsi,
+        second_higher_tf_trend=second_trend,
+        second_higher_tf_rsi=second_rsi,
+    )
+
+    result['timeframe'] = ctx.timeframe
+    result['availability'] = 'multi_timeframe'
+    result['higher_tf_data'] = {
+        tf: {
+            'timeframe': tf,
+            'trend': snap.get('trend'),
+            'rsi': snap.get('rsi'),
+            'ema_fast': snap.get('ema_fast'),
+            'ema_slow': snap.get('ema_slow'),
+            'macd_diff': snap.get('macd_diff'),
+            'atr': snap.get('atr'),
+            'last_price': snap.get('last_price'),
+        }
+        for tf, snap in valid.items()
+    }
+    return result
 
 
 @dataclass
@@ -34,6 +121,8 @@ class AgentContext:
     memory_context: list[dict[str, Any]]
     memory_signal: dict[str, Any] = field(default_factory=dict)
     llm_model_overrides: dict[str, str] = field(default_factory=dict)
+    price_history: list[dict[str, Any]] = field(default_factory=list)
+    multi_tf_snapshots: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def _parse_signal_from_text(text: str) -> str:
@@ -499,22 +588,13 @@ def _run_agent_tool(
     started = time.perf_counter()
     try:
         tool_input = executor()
-        langchain_tool = get_langchain_agent_tool(tool_id)
-        if langchain_tool is not None:
-            if isinstance(tool_input, dict):
-                payload = langchain_tool.invoke({'payload': tool_input})
-            else:
-                payload = langchain_tool.invoke({'payload': {'value': tool_input}})
-        else:
-            payload = tool_input
-        if not isinstance(payload, dict):
-            payload = {'value': payload}
+        payload = tool_input if isinstance(tool_input, dict) else {'value': tool_input}
         return {
             'tool_id': tool_id,
             'label': _tool_label(tool_id),
             'enabled': True,
             'status': 'ok',
-            'runtime': 'langchain_core.tool' if langchain_tool is not None else 'internal_executor',
+            'runtime': 'internal_executor',
             'latency_ms': round((time.perf_counter() - started) * 1000.0, 2),
             'error': None,
             'data': payload,
@@ -525,7 +605,7 @@ def _run_agent_tool(
             'label': _tool_label(tool_id),
             'enabled': True,
             'status': 'error',
-            'runtime': 'langchain_core.tool',
+            'runtime': 'internal_executor',
             'latency_ms': round((time.perf_counter() - started) * 1000.0, 2),
             'error': str(exc),
             'data': {},
@@ -846,7 +926,8 @@ def _chat_with_runtime_tools(
             return llm_res, executed_tool_calls
 
         llm_text, _ = _normalize_llm_text_and_degraded(llm_res, require_text=False)
-        assistant_message: dict[str, Any] = {'role': 'assistant', 'content': llm_text}
+        assistant_content = llm_text if llm_text.strip() else None
+        assistant_message: dict[str, Any] = {'role': 'assistant', 'content': assistant_content}
         assistant_tool_calls: list[dict[str, Any]] = []
         for call in tool_calls:
             assistant_tool_calls.append(
@@ -1076,69 +1157,85 @@ class DecisionGatingPolicy:
 
 
 DECISION_POLICIES: dict[str, DecisionGatingPolicy] = {
+    # ── Conservative ──────────────────────────────────────────────────
+    # Mode strict : convergence forte exigée, setups marginaux bloqués.
+    # Au moins 2 sources alignées, seuils élevés, aucun override technique,
+    # pénalités de contradiction sévères.
     'conservative': DecisionGatingPolicy(
         mode='conservative',
-        min_combined_score=0.30,
-        min_confidence=0.35,
+        min_combined_score=0.32,
+        min_confidence=0.38,
         min_aligned_sources=2,
-        technical_neutral_exception_min_sources=2,
-        technical_neutral_exception_min_strength=0.22,
-        technical_neutral_exception_min_combined=0.30,
+        technical_neutral_exception_min_sources=3,
+        technical_neutral_exception_min_strength=0.28,
+        technical_neutral_exception_min_combined=0.35,
         allow_low_edge_technical_override=False,
         allow_technical_single_source_override=False,
         technical_single_source_min_score=0.0,
         contradiction_weak_penalty=0.0,
         contradiction_weak_confidence_multiplier=1.0,
         contradiction_weak_volume_multiplier=1.0,
-        contradiction_moderate_penalty=0.06,
-        contradiction_moderate_confidence_multiplier=0.85,
-        contradiction_moderate_volume_multiplier=0.75,
-        contradiction_major_penalty=0.12,
-        contradiction_major_confidence_multiplier=0.70,
-        contradiction_major_volume_multiplier=0.55,
+        contradiction_moderate_penalty=0.08,
+        contradiction_moderate_confidence_multiplier=0.80,
+        contradiction_moderate_volume_multiplier=0.65,
+        contradiction_major_penalty=0.14,
+        contradiction_major_confidence_multiplier=0.60,
+        contradiction_major_volume_multiplier=0.45,
         block_major_contradiction=True,
     ),
+    # ── Balanced ──────────────────────────────────────────────────────
+    # Mode intermédiaire : autorise davantage de setups techniques
+    # (single-source tech OK si score suffisant, low-edge override OK)
+    # sans relâcher les garde-fous majeurs (contradictions bloquées,
+    # pénalités modérées).
     'balanced': DecisionGatingPolicy(
         mode='balanced',
-        min_combined_score=0.25,
-        min_confidence=0.30,
+        min_combined_score=0.22,
+        min_confidence=0.28,
         min_aligned_sources=1,
         technical_neutral_exception_min_sources=2,
         technical_neutral_exception_min_strength=0.20,
         technical_neutral_exception_min_combined=0.25,
         allow_low_edge_technical_override=True,
-        allow_technical_single_source_override=False,
-        technical_single_source_min_score=0.0,
+        allow_technical_single_source_override=True,
+        technical_single_source_min_score=0.25,
         contradiction_weak_penalty=0.0,
         contradiction_weak_confidence_multiplier=1.0,
         contradiction_weak_volume_multiplier=1.0,
-        contradiction_moderate_penalty=0.05,
-        contradiction_moderate_confidence_multiplier=0.88,
+        contradiction_moderate_penalty=0.06,
+        contradiction_moderate_confidence_multiplier=0.85,
         contradiction_moderate_volume_multiplier=0.70,
-        contradiction_major_penalty=0.10,
-        contradiction_major_confidence_multiplier=0.75,
+        contradiction_major_penalty=0.11,
+        contradiction_major_confidence_multiplier=0.70,
         contradiction_major_volume_multiplier=0.50,
         block_major_contradiction=True,
     ),
+    # ── Permissive ────────────────────────────────────────────────────
+    # Mode opportuniste encadré : seuils plus souples pour capter des
+    # setups que les autres modes rejettent, MAIS reste prudent :
+    # - neutral technique quasi toujours bloqué (3 sources, strength élevée)
+    # - contradictions majeures toujours bloquées
+    # - pénalités de contradiction significatives
+    # - confidence plancher maintenu à un niveau raisonnable
     'permissive': DecisionGatingPolicy(
         mode='permissive',
-        min_combined_score=0.12,
-        min_confidence=0.22,
+        min_combined_score=0.13,
+        min_confidence=0.25,
         min_aligned_sources=1,
-        technical_neutral_exception_min_sources=1,
-        technical_neutral_exception_min_strength=0.10,
-        technical_neutral_exception_min_combined=0.20,
+        technical_neutral_exception_min_sources=3,
+        technical_neutral_exception_min_strength=0.26,
+        technical_neutral_exception_min_combined=0.30,
         allow_low_edge_technical_override=True,
         allow_technical_single_source_override=True,
-        technical_single_source_min_score=0.18,
+        technical_single_source_min_score=0.20,
         contradiction_weak_penalty=0.02,
-        contradiction_weak_confidence_multiplier=0.96,
-        contradiction_weak_volume_multiplier=0.90,
-        contradiction_moderate_penalty=0.05,
-        contradiction_moderate_confidence_multiplier=0.90,
+        contradiction_weak_confidence_multiplier=0.95,
+        contradiction_weak_volume_multiplier=0.88,
+        contradiction_moderate_penalty=0.06,
+        contradiction_moderate_confidence_multiplier=0.85,
         contradiction_moderate_volume_multiplier=0.60,
-        contradiction_major_penalty=0.10,
-        contradiction_major_confidence_multiplier=0.75,
+        contradiction_major_penalty=0.11,
+        contradiction_major_confidence_multiplier=0.68,
         contradiction_major_volume_multiplier=0.45,
         block_major_contradiction=True,
     ),
@@ -1146,8 +1243,8 @@ DECISION_POLICIES: dict[str, DecisionGatingPolicy] = {
 
 
 def _resolve_decision_policy(mode: object) -> DecisionGatingPolicy:
-    resolved = normalize_decision_mode(mode, fallback='conservative')
-    return DECISION_POLICIES.get(resolved, DECISION_POLICIES['conservative'])
+    resolved = normalize_decision_mode(mode, fallback='balanced')
+    return DECISION_POLICIES.get(resolved, DECISION_POLICIES['balanced'])
 
 
 FIAT_NEWS_ASSETS = {'USD', 'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'NZD'}
@@ -1552,13 +1649,15 @@ def _validate_news_output(
             return False
         asset_class = str(item.get('asset_class') or '').strip().lower()
         directional_effect = _directional_effect(item)
-        impact_on_base = str(item.get('impact_on_base') or item.get('base_currency_effect') or 'unknown').strip().lower()
-        impact_on_quote = str(item.get('impact_on_quote') or item.get('quote_currency_effect') or 'unknown').strip().lower()
+        if directional_effect not in {'bullish', 'bearish'}:
+            return False
         if asset_class in {'fx', 'forex'}:
-            return directional_effect in {'bullish', 'bearish'} and (
-                impact_on_base != 'unknown' or impact_on_quote != 'unknown'
-            )
-        return directional_effect in {'bullish', 'bearish'}
+            impact_on_base = str(item.get('impact_on_base') or item.get('base_currency_effect') or 'unknown').strip().lower()
+            impact_on_quote = str(item.get('impact_on_quote') or item.get('quote_currency_effect') or 'unknown').strip().lower()
+            has_asset_impact = impact_on_base != 'unknown' or impact_on_quote != 'unknown'
+            has_strong_relevance = _safe_float(item.get('final_pair_relevance'), 0.0) >= 0.60
+            return has_asset_impact or has_strong_relevance
+        return True
 
     fx_neutral_only = bool(selected_evidence) and all(
         str(item.get('asset_class') or '').strip().lower() not in {'fx', 'forex'}
@@ -1566,6 +1665,7 @@ def _validate_news_output(
             _directional_effect(item) == 'neutral'
             and str(item.get('impact_on_base') or item.get('base_currency_effect') or 'unknown').strip().lower() == 'unknown'
             and str(item.get('impact_on_quote') or item.get('quote_currency_effect') or 'unknown').strip().lower() == 'unknown'
+            and _safe_float(item.get('final_pair_relevance'), 0.0) < 0.60
         )
         for item in selected_evidence
     )
@@ -1575,33 +1675,55 @@ def _validate_news_output(
 
     if no_signal_summary and output.get('signal') != 'neutral':
         actions.append('summary_forced_neutral')
-    if no_signal_summary or not selected_evidence or directional_evidence_count == 0 or strongest_relevance < min_directional_relevance:
+    # LLM semantic override: when the LLM has semantically disambiguated direction,
+    # trust its signal even if rule-based directional_evidence_count is 0.
+    is_llm_semantic = str(output.get('decision_mode') or '') == 'llm_semantic_override'
+    rule_based_block = (
+        no_signal_summary
+        or not selected_evidence
+        or (directional_evidence_count == 0 and not is_llm_semantic)
+        or (strongest_relevance < min_directional_relevance and not is_llm_semantic)
+    )
+    if rule_based_block:
         output['signal'] = 'neutral'
         output['score'] = 0.0 if (no_signal_summary or not selected_evidence) else round(_clamp(score * 0.20, -0.05, 0.05), 3)
-        output['confidence'] = round(min(float(output.get('confidence', 0.08) or 0.08), 0.18 if not selected_evidence else 0.22), 3)
-        output['coverage'] = 'none' if not selected_evidence else 'low'
-        output['decision_mode'] = 'no_evidence' if not selected_evidence else 'neutral_from_low_relevance'
-        output['information_state'] = 'no_recent_news' if not selected_evidence else 'insufficient_relevance'
+        if not selected_evidence:
+            output['confidence'] = round(min(float(output.get('confidence', 0.08) or 0.08), 0.18), 3)
+            output['coverage'] = 'none'
+            output['decision_mode'] = 'no_evidence'
+            output['information_state'] = 'no_recent_news'
+        else:
+            # Confidence cap scales with strongest relevance instead of hard 0.22
+            cap = _clamp(0.18 + strongest_relevance * 0.20, 0.22, 0.40)
+            output['confidence'] = round(min(float(output.get('confidence', 0.08) or 0.08), cap), 3)
+            output['decision_mode'] = 'neutral_from_low_relevance'
+            output['information_state'] = 'insufficient_relevance'
         output['summary'] = _format_news_summary(
             'neutral',
-            'Aucune news pertinente exploitable n’a été retenue pour cet instrument.'
+            "Aucune news pertinente exploitable n'a été retenue pour cet instrument."
             if not selected_evidence or no_signal_summary
-            else 'Les évidences retenues restent trop indirectes pour confirmer un biais directionnel fiable sur cet instrument.',
+            else "Les évidences retenues restent trop indirectes pour confirmer un biais directionnel fiable sur cet instrument.",
         )
         actions.append('directional_signal_blocked')
     elif output.get('decision_mode') == 'neutral_from_mixed_news' and abs(score) < signal_threshold:
         output['signal'] = 'neutral'
-        output['summary'] = _format_news_summary('neutral', 'Les évidences news sont mixtes; aucun biais directionnel fiable n’est retenu pour cet instrument.')
+        output['summary'] = _format_news_summary('neutral', "Les évidences news sont mixtes; aucun biais directionnel fiable n'est retenu pour cet instrument.")
         actions.append('mixed_news_neutralized')
     elif parsed_summary_signal == 'neutral' and output.get('signal') != 'neutral' and abs(score) < max(signal_threshold, 0.12):
         output['signal'] = 'neutral'
         output['score'] = round(_clamp(score * 0.25, -0.05, 0.05), 3)
         actions.append('summary_signal_aligned_to_neutral')
 
+    # Cap confidence for LLM semantic override — meaningful but conservative
+    if is_llm_semantic and output.get('signal') in {'bullish', 'bearish'}:
+        llm_sem_cap = _clamp(0.30 + strongest_relevance * 0.30, 0.35, 0.60)
+        output['confidence'] = round(min(float(output.get('confidence', 0.08) or 0.08), llm_sem_cap), 3)
+        actions.append('llm_semantic_confidence_cap')
+
+    # Single consolidated confidence cap for neutral signals (no more triple overwrite)
     if output.get('signal') == 'neutral':
         if fx_neutral_only:
             output['score'] = 0.0
-            output['confidence'] = round(min(float(output.get('confidence', 0.08) or 0.08), 0.18 if selected_evidence else 0.08), 3)
             output['decision_mode'] = 'neutral_from_low_relevance' if selected_evidence else 'no_evidence'
             output['information_state'] = 'insufficient_relevance' if selected_evidence else 'no_recent_news'
             output['reason'] = 'Retained FX evidence did not produce any directional pair effect.'
@@ -1610,7 +1732,6 @@ def _validate_news_output(
             if abs(float(output.get('score', 0.0) or 0.0)) > max(signal_threshold, 0.12):
                 output['score'] = round(_clamp(float(output.get('score', 0.0) or 0.0) * 0.20, -0.05, 0.05), 3)
                 actions.append('neutral_score_compressed')
-            output['confidence'] = round(min(float(output.get('confidence', 0.08) or 0.08), 0.45 if directional_evidence_count > 0 else 0.22), 3)
             if output.get('decision_mode') == 'directional' or 'directional edge' in str(output.get('reason') or '').lower():
                 output['decision_mode'] = 'neutral_from_mixed_news' if directional_evidence_count > 0 else 'neutral_from_low_relevance'
                 output['information_state'] = 'mixed_signals' if directional_evidence_count > 0 else 'insufficient_relevance'
@@ -1620,6 +1741,17 @@ def _validate_news_output(
                     else 'Retained evidence did not confirm a reliable directional effect on the instrument.'
                 )
                 actions.append('neutral_reason_aligned')
+        # Apply a single confidence cap based on evidence quality
+        conf = float(output.get('confidence', 0.08) or 0.08)
+        if not selected_evidence:
+            max_conf = 0.08
+        elif fx_neutral_only:
+            max_conf = _clamp(0.15 + strongest_relevance * 0.25, 0.18, 0.35)
+        elif directional_evidence_count > 0:
+            max_conf = 0.50
+        else:
+            max_conf = _clamp(0.18 + strongest_relevance * 0.20, 0.22, 0.40)
+        output['confidence'] = round(min(conf, max_conf), 3)
 
     if output.get('signal') == 'bullish' and float(output.get('score', 0.0) or 0.0) <= 0.0:
         output['score'] = round(max(abs(float(output.get('score', 0.0) or 0.0)), 0.01), 3)
@@ -1649,19 +1781,35 @@ class TechnicalAnalystAgent:
         self.prompt_service = PromptTemplateService()
 
     def run(self, ctx: AgentContext, db: Session | None = None) -> dict[str, Any]:
+        from app.services.agent_runtime.mcp_trading_server import (
+            divergence_detector as _mcp_divergence_detector,
+            pattern_detector as _mcp_pattern_detector,
+            support_resistance_detector as _mcp_support_resistance_detector,
+        )
+
         enabled_tools = _resolve_enabled_tools(self.model_selector, db, self.name)
         tool_invocations: dict[str, dict[str, Any]] = {}
+
+        # Extract OHLC arrays from raw candle data for MCP tool dispatchers
+        _candles = list(ctx.price_history or [])
+        _opens = [_safe_float(c.get('open'), 0.0) for c in _candles if isinstance(c, dict)]
+        _highs = [_safe_float(c.get('high'), 0.0) for c in _candles if isinstance(c, dict)]
+        _lows = [_safe_float(c.get('low'), 0.0) for c in _candles if isinstance(c, dict)]
+        _closes = [_safe_float(c.get('close'), 0.0) for c in _candles if isinstance(c, dict)]
+        _has_candles = len(_closes) >= 30
 
         market_snapshot_tool = _run_agent_tool(
             tool_id='market_snapshot',
             enabled_tools=enabled_tools,
-            executor=lambda: dict(ctx.market_snapshot or {}),
+            executor=lambda: {k: v for k, v in (ctx.market_snapshot or {}).items() if k != '_raw_candles'},
         )
         tool_invocations['market_snapshot'] = market_snapshot_tool
 
         m = dict(ctx.market_snapshot or {})
+        m.pop('_raw_candles', None)
         if market_snapshot_tool.get('status') == 'ok' and isinstance(market_snapshot_tool.get('data'), dict):
             m = dict(market_snapshot_tool.get('data') or {})
+            m.pop('_raw_candles', None)
 
         if m.get('degraded'):
             return {
@@ -1719,30 +1867,35 @@ class TechnicalAnalystAgent:
             score -= 0.2
 
         signal = 'bullish' if score > 0.15 else 'bearish' if score < -0.15 else 'neutral'
+        _sr_fallback = {
+            'validation': (
+                f"Conserver un biais {signal} tant que le prix reste dans la direction du trend ({trend})."
+                if trend in {'bullish', 'bearish'}
+                else 'Validation conditionnelle: attendre une reprise de momentum.'
+            ),
+            'invalidation': (
+                f"Invalider si RSI passe en zone opposée (rsi={round(rsi, 2)}) "
+                f"et MACD diff inverse durablement ({round(macd_diff, 6)})."
+            ),
+        }
         structure_tool = _run_agent_tool(
             tool_id='support_resistance_or_structure_detector',
             enabled_tools=enabled_tools,
-            executor=lambda: {
-                'validation': (
-                    f"Conserver un biais {signal} tant que le prix reste dans la direction du trend ({trend})."
-                    if trend in {'bullish', 'bearish'}
-                    else 'Validation conditionnelle: attendre une reprise de momentum.'
-                ),
-                'invalidation': (
-                    f"Invalider si RSI passe en zone opposée (rsi={round(rsi, 2)}) "
-                    f"et MACD diff inverse durablement ({round(macd_diff, 6)})."
-                ),
-            },
+            executor=lambda: (
+                _mcp_support_resistance_detector(highs=_highs, lows=_lows, closes=_closes)
+                if _has_candles
+                else _sr_fallback
+            ),
         )
         tool_invocations['support_resistance_or_structure_detector'] = structure_tool
         multi_timeframe_tool = _run_agent_tool(
             tool_id='multi_timeframe_context',
             enabled_tools=enabled_tools,
-            executor=lambda: {
-                'timeframe': ctx.timeframe,
-                'availability': 'single_timeframe_snapshot',
-                'alignment': trend,
-            },
+            executor=lambda: _compute_multi_timeframe_context(
+                ctx=ctx,
+                current_trend=trend,
+                current_rsi=rsi,
+            ),
         )
         tool_invocations['multi_timeframe_context'] = multi_timeframe_tool
 
@@ -1763,6 +1916,8 @@ class TechnicalAnalystAgent:
                 'enabled_tools': enabled_tools,
                 'invocations': tool_invocations,
                 'llm_tool_calls': _finalize_llm_tool_calls([], tool_invocations=tool_invocations),
+                'mcp_candles_available': _has_candles,
+                'mcp_candles_count': len(_closes),
             },
         }
         if structure_tool.get('status') == 'ok':
@@ -1862,12 +2017,26 @@ class TechnicalAnalystAgent:
                 'ema_fast': m_effective.get('ema_fast'),
                 'ema_slow': m_effective.get('ema_slow'),
             },
-            'support_resistance_or_structure_detector': lambda _args: dict(structure_tool.get('data') or {}),
-            'multi_timeframe_context': lambda _args: {
-                'timeframe': ctx.timeframe,
-                'availability': 'single_timeframe_snapshot',
-                'alignment': trend,
-            },
+            'divergence_detector': lambda _args: (
+                _mcp_divergence_detector(closes=_closes)
+                if _has_candles
+                else {'divergences': [], 'note': 'Raw OHLC candles not available; use indicator_bundle.'}
+            ),
+            'pattern_detector': lambda _args: (
+                _mcp_pattern_detector(opens=_opens, highs=_highs, lows=_lows, closes=_closes)
+                if _has_candles
+                else {'patterns': [], 'note': 'Raw OHLC candles not available; use indicator_bundle.'}
+            ),
+            'support_resistance_or_structure_detector': lambda _args: (
+                _mcp_support_resistance_detector(highs=_highs, lows=_lows, closes=_closes)
+                if _has_candles
+                else dict(structure_tool.get('data') or {})
+            ),
+            'multi_timeframe_context': lambda _args: _compute_multi_timeframe_context(
+                ctx=ctx,
+                current_trend=trend,
+                current_rsi=rsi,
+            ),
         }
         llm_res, llm_tool_calls = _chat_with_runtime_tools(
             llm_client=self.llm,
@@ -2323,7 +2492,9 @@ class NewsAnalystAgent:
             if mixed_signals:
                 confidence = _clamp(confidence * 0.75, 0.08, 0.92)
             if directional_evidence_count == 0:
-                confidence = min(confidence, 0.22)
+                # Scale cap with relevance quality instead of hard 0.22
+                no_dir_cap = _clamp(0.18 + strongest_relevance * 0.25, 0.22, 0.45)
+                confidence = min(confidence, no_dir_cap)
         confidence = round(confidence, 3)
 
         if fetch_status == 'error' and relevant_total == 0:
@@ -2331,13 +2502,13 @@ class NewsAnalystAgent:
             information_state = 'provider_failure'
             decision_mode = 'source_degraded'
             reason = 'All enabled news providers failed to return usable evidence'
-            summary = _format_news_summary('neutral', 'Les providers news ont échoué; aucun signal directionnel exploitable n’est retenu pour cet instrument.')
+            summary = _format_news_summary('neutral', "Les providers news ont échoué; aucun signal directionnel exploitable n'est retenu pour cet instrument.")
         elif relevant_total == 0:
             degraded = False
             information_state = 'no_recent_news'
             decision_mode = 'no_evidence'
             reason = 'No recent relevant news or macro events were available from enabled providers'
-            summary = _format_news_summary('neutral', 'Aucune news pertinente exploitable n’a été retenue pour cet instrument.')
+            summary = _format_news_summary('neutral', "Aucune news pertinente exploitable n'a été retenue pour cet instrument.")
             score = 0.0
             signal = 'neutral'
         elif mixed_signals:
@@ -2345,7 +2516,7 @@ class NewsAnalystAgent:
             information_state = 'mixed_signals'
             decision_mode = 'neutral_from_mixed_news'
             reason = 'Enabled providers returned mixed directional catalysts with no dominant instrument effect'
-            summary = _format_news_summary('neutral', 'Les évidences news sont mixtes; aucun biais directionnel fiable n’est retenu pour cet instrument.')
+            summary = _format_news_summary('neutral', "Les évidences news sont mixtes; aucun biais directionnel fiable n'est retenu pour cet instrument.")
             signal = 'neutral'
             score = round(score * 0.35, 3)
         elif (
@@ -2416,23 +2587,37 @@ class NewsAnalystAgent:
             and (has_compelling_single_evidence or directional_evidence_count >= 2)
             and abs(score) >= 0.25
         )
+        # Semantic disambiguation: call LLM when rule-based system can't determine
+        # direction but we have articles with decent relevance. The LLM can understand
+        # nuanced headlines that keyword matching misses.
+        llm_semantic_mode = bool(
+            relevant_total > 0
+            and decision_mode in {'neutral_from_low_relevance', 'neutral_from_mixed_news'}
+            and strongest_relevance >= 0.55
+        )
         should_call_llm = (
             llm_enabled
             and not degraded
-            and decision_mode in {'directional', 'neutral_from_mixed_news'}
-            and (coverage in {'medium', 'high'} or llm_low_coverage_mode)
-            and (evidence_strength >= llm_min_evidence_strength or llm_tie_breaker_mode)
-            and directional_evidence_count > 0
+            and relevant_total > 0
+            and (
+                (decision_mode in {'directional', 'neutral_from_mixed_news'}
+                 and (coverage in {'medium', 'high'} or llm_low_coverage_mode)
+                 and (evidence_strength >= llm_min_evidence_strength or llm_tie_breaker_mode)
+                 and directional_evidence_count > 0)
+                or llm_semantic_mode
+            )
             and not self._is_llm_circuit_open()
         )
         if llm_enabled and not should_call_llm and llm_skipped_reason is None:
             if degraded:
                 llm_skipped_reason = 'source_degraded'
-            elif coverage not in {'medium', 'high'} and not llm_low_coverage_mode:
-                llm_skipped_reason = f'coverage_{coverage}'
             elif self._is_llm_circuit_open():
                 llm_skipped_reason = 'llm_circuit_open'
-            elif evidence_strength < llm_min_evidence_strength:
+            elif relevant_total == 0:
+                llm_skipped_reason = 'no_evidence'
+            elif strongest_relevance < 0.55 and coverage not in {'medium', 'high'}:
+                llm_skipped_reason = f'coverage_{coverage}_low_relevance'
+            elif evidence_strength < llm_min_evidence_strength and not llm_semantic_mode:
                 llm_skipped_reason = 'evidence_strength_below_threshold'
             else:
                 llm_skipped_reason = f'decision_mode_{decision_mode}'
@@ -2616,14 +2801,31 @@ class NewsAnalystAgent:
             llm_summary = llm_text
             if not llm_degraded and llm_text.strip():
                 llm_signal = _parse_signal_from_text(llm_text)
-                llm_bias = {'bullish': 0.08, 'bearish': -0.08, 'neutral': 0.0}[llm_signal]
-                score = round(_clamp(score * 0.9 + llm_bias * 0.1, -1.0, 1.0), 3)
+                # LLM influence weight: stronger when rule-based system was uncertain
+                if llm_semantic_mode:
+                    # Semantic mode: LLM is the primary signal source since rule-based failed
+                    llm_weight = 0.6
+                    deterministic_weight = 0.4
+                else:
+                    # Standard mode: LLM refines the rule-based signal
+                    llm_weight = 0.3
+                    deterministic_weight = 0.7
+                llm_score = {'bullish': 0.15, 'bearish': -0.15, 'neutral': 0.0}[llm_signal]
+                score = round(_clamp(score * deterministic_weight + llm_score * llm_weight, -1.0, 1.0), 3)
                 if llm_signal == 'neutral':
                     signal = 'neutral'
-                elif llm_signal in {'bullish', 'bearish'} and signal == 'neutral' and strongest_relevance >= min_directional_relevance:
-                    signal = llm_signal
-                    if decision_mode == 'neutral_from_mixed_news' and directional_evidence_count >= 2:
-                        score = 0.12 if llm_signal == 'bullish' else -0.12
+                elif llm_signal in {'bullish', 'bearish'} and signal == 'neutral':
+                    if strongest_relevance >= min_directional_relevance or llm_semantic_mode:
+                        signal = llm_signal
+                        if llm_semantic_mode:
+                            decision_mode = 'llm_semantic_override'
+                            information_state = 'llm_disambiguated'
+                            reason = 'LLM semantic analysis resolved directional bias that rule-based scoring could not determine'
+                        elif decision_mode == 'neutral_from_mixed_news' and directional_evidence_count >= 2:
+                            pass  # score already set by weighted blend above
+                    # Set minimum meaningful score when LLM gives a directional signal
+                    if signal in {'bullish', 'bearish'} and abs(score) < 0.10:
+                        score = 0.12 if signal == 'bullish' else -0.12
                 # Keep the reported signal and score directionally coherent for traceability.
                 if signal == 'bullish' and score <= 0.0:
                     score = round(max(abs(score), 0.01), 3)
@@ -2693,6 +2895,9 @@ class NewsAnalystAgent:
                         'asset_symbols_detected': item.get('asset_symbols_detected'),
                         'macro_tags': item.get('macro_tags'),
                         'sentiment_hint': item.get('sentiment_hint'),
+                        'asset_class': item.get('asset_class'),
+                        'directional_eligible': item.get('directional_eligible'),
+                        'signal_case': item.get('signal_case'),
                         'instrument_directional_effect': item.get('instrument_directional_effect'),
                         'instrument_bias_score': item.get('instrument_bias_score'),
                         'impacted_assets': item.get('impacted_assets'),
@@ -2742,6 +2947,7 @@ class NewsAnalystAgent:
             'llm_fallback_used': llm_fallback_used,
             'llm_retry_used': llm_retry_used,
             'llm_call_attempted': llm_call_attempted,
+            'llm_semantic_mode': llm_semantic_mode,
             'llm_skipped_reason': llm_skipped_reason,
             'llm_summary': llm_summary,
             'llm_circuit_open': self._is_llm_circuit_open(),
@@ -3940,10 +4146,10 @@ class TraderAgent:
         single_directional_source_penalty_applied = False
         if single_directional_source:
             confidence_cap = {
-                'conservative': 0.42,
-                'balanced': 0.48,
-                'permissive': 0.44,
-            }.get(policy.mode, 0.48)
+                'conservative': 0.38,
+                'balanced': 0.46,
+                'permissive': 0.42,
+            }.get(policy.mode, 0.46)
             confidence_cap = max(min_confidence, round(confidence_cap * confidence_multiplier, 3))
             if confidence > confidence_cap:
                 confidence = confidence_cap
@@ -4028,6 +4234,29 @@ class TraderAgent:
 
         decision = candidate_decision if decision_ready else 'HOLD'
         execution_allowed = decision in {'BUY', 'SELL'} and minimum_evidence_ok and not major_contradiction_block and not memory_risk_block
+
+        # Build human-readable reason for the decision
+        if decision in {'BUY', 'SELL'}:
+            reason = (
+                f'{decision} with combined_score={combined_score}, confidence={round(confidence, 3)}, '
+                f'{aligned_source_count} aligned source(s).'
+            )
+        elif strong_conflict:
+            reason = 'HOLD: strong conflict between bullish and bearish signals.'
+        elif not score_gate_ok:
+            reason = f'HOLD: combined_score={combined_score} below minimum threshold.'
+        elif not confidence_gate_ok:
+            reason = f'HOLD: confidence={round(confidence, 3)} below minimum threshold.'
+        elif not source_gate_ok:
+            reason = f'HOLD: insufficient aligned sources ({aligned_source_count}).'
+        elif major_contradiction_block:
+            reason = 'HOLD: major trend-momentum contradiction blocks execution.'
+        elif memory_risk_block:
+            reason = f'HOLD: memory risk block ({memory_block_reason}).'
+        elif technical_neutral_block:
+            reason = 'HOLD: technical-analyst neutral gate active.'
+        else:
+            reason = f'HOLD: quality gates not met (combined_score={combined_score}).'
 
         gate_reasons: list[str] = []
         if technical_neutral_block:
@@ -4146,6 +4375,7 @@ class TraderAgent:
 
         output = {
             'decision': decision,
+            'reason': reason,
             'confidence': confidence,
             'decision_confidence': confidence,
             'consensus_strength': consensus_strength,
@@ -4295,6 +4525,32 @@ class TraderAgent:
                 'memory_refs': [m.get('summary', '') for m in ctx.memory_context[:3]],
             },
         }
+        # --- Empirical metrics: debate impact, contradictions, gate blocks ---
+        try:
+            debate_impact_abs.labels(
+                decision=decision,
+                strong_conflict=str(strong_conflict).lower(),
+            ).observe(abs(debate_score))
+
+            if contradiction_level != 'none':
+                contradiction_detection_total.labels(level=contradiction_level).inc()
+
+            if decision == 'HOLD':
+                for gate in gate_reasons:
+                    if gate in {
+                        'combined_score_below_minimum',
+                        'confidence_below_minimum',
+                        'insufficient_aligned_sources',
+                        'major_contradiction_execution_block',
+                        'strong_conflict',
+                        'technical_neutral_gate',
+                        'memory_risk_block',
+                        'low_edge',
+                    }:
+                        decision_gate_blocks_total.labels(gate=gate).inc()
+        except Exception:
+            pass  # metrics must never break the trading pipeline
+
         llm_model = _resolve_llm_model(ctx, self.model_selector, db, self.name)
         output['prompt_meta'] = {
             'prompt_id': None,
@@ -4503,8 +4759,12 @@ class RiskManagerAgent:
         runtime_skills = _resolve_runtime_skills(self.model_selector, db, self.name)
         llm_model = _resolve_llm_model(ctx, self.model_selector, db, self.name) if llm_enabled else None
 
+        risk_reason = '; '.join(deterministic_reasons) if deterministic_reasons else (
+            'Risk approved.' if risk.accepted else 'Risk rejected.'
+        )
         output: dict[str, Any] = {
             'accepted': risk.accepted,
+            'reason': risk_reason,
             'reasons': deterministic_reasons,
             'suggested_volume': adjusted_suggested_volume,
             'prompt_meta': {
@@ -4589,6 +4849,7 @@ class RiskManagerAgent:
         output.update(
             {
                 'accepted': final_accept,
+                'reason': '; '.join(reasons) if reasons else ('Risk approved.' if final_accept else 'Risk rejected.'),
                 'reasons': reasons,
                 'suggested_volume': adjusted_suggested_volume if final_accept else 0.0,
                 'llm_summary': llm_text,
@@ -4664,7 +4925,7 @@ class ExecutionManagerAgent:
 
         fallback_system = (
             'Tu es un execution manager multi-actifs. '
-            'Tu confirmes BUY/SELL ou imposes HOLD si la prudence l’exige. '
+            "Tu confirmes BUY/SELL ou imposes HOLD si la prudence l'exige. "
             'Tu ne peux jamais inverser la direction sans justification stricte.'
         )
         fallback_user = (

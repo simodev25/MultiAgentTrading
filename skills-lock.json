@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "skills": {
+    "ai-agents-architect": {
+      "source": "sickn33/antigravity-awesome-skills",
+      "sourceType": "github",
+      "computedHash": "b777efa8f5e3e692aba522b097ee378228de62f5ac1aec2cb92e642ed4ddfb27"
+    },
+    "architecture-designer": {
+      "source": "jeffallan/claude-skills",
+      "sourceType": "github",
+      "computedHash": "6ee492443a9f78f232d744498d70faffe26ce268ec2b8657953dfc69f33fcd4e"
+    },
+    "architecture-patterns": {
+      "source": "wshobson/agents",
+      "sourceType": "github",
+      "computedHash": "b92f11750a7cf9a6e5fa005ff72b0ae4f6aa45adc684193537d82ecb6e4eefd8"
+    },
+    "review-and-refactor": {
+      "source": "github/awesome-copilot",
+      "sourceType": "github",
+      "computedHash": "9236d06a1500089ddb46975b866e9a63478e502afe7095b1980c618678a7c7fe"
+    },
+    "test-driven-development": {
+      "source": "obra/superpowers",
+      "sourceType": "github",
+      "computedHash": "126f1ebf6ccd414f42544f6e83d8cc5adb089e1108eaffb7c400701e37eecd9f"
+    },
+    "vibe-security": {
+      "source": "raroque/vibe-security-skill",
+      "sourceType": "github",
+      "computedHash": "b9599a66355f44cff8082d89e1ea3891a2d2fa43dfdc890f435ea786fd66bcdf"
+    }
+  }
+}

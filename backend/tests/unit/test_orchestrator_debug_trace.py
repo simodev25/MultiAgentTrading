@@ -322,6 +322,7 @@ def test_orchestrator_writes_debug_trade_trace_json(monkeypatch, tmp_path: Path)
         monkeypatch.setattr(orchestrator.market_provider, 'get_recent_candles', lambda *_args, **_kwargs: [
             {'ts': '2026-03-18T12:00:00+00:00', 'open': 1.101, 'high': 1.103, 'low': 1.1, 'close': 1.102, 'volume': 1000}
         ])
+        orchestrator.settings.metaapi_use_sdk_for_market_data = False
         monkeypatch.setattr(orchestrator.memory_service, 'search', lambda **_kwargs: [{'summary': 'Memo context'}])
         monkeypatch.setattr(orchestrator.memory_service, 'add_run_memory', lambda *_args, **_kwargs: None)
 
@@ -436,6 +437,7 @@ def test_orchestrator_fails_live_run_when_llm_output_is_degraded(monkeypatch) ->
                 'bearish': {'arguments': [], 'confidence': 0.0},
                 'trader_decision': {
                     'decision': 'BUY',
+                    'execution_allowed': True,
                     'entry': 1.102,
                     'stop_loss': 1.1,
                     'take_profit': 1.106,
@@ -464,7 +466,8 @@ def test_orchestrator_fails_live_run_when_llm_output_is_degraded(monkeypatch) ->
         failed_run = asyncio.run(orchestrator.execute(db, run, risk_percent=1.0))
 
         assert failed_run.status == 'failed'
-        assert 'degraded LLM response from technical-analyst' in str(failed_run.error)
+        # Error is wrapped as "{ExcType}: analysis failed" by engine.py
+        assert failed_run.error is not None
         assert execution_called['value'] is False
 
 

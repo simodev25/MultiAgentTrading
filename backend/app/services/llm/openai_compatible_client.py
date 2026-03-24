@@ -11,8 +11,6 @@ from sqlalchemy.orm import Session
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.core.config import get_settings
-from app.db.models.llm_call_log import LlmCallLog
-from app.db.session import SessionLocal
 from app.observability.metrics import (
     external_provider_failures_total,
     llm_calls_total,
@@ -22,6 +20,12 @@ from app.observability.metrics import (
     llm_prompt_tokens_total,
 )
 from app.services.connectors.runtime_settings import RuntimeConnectorSettings
+from app.services.llm.base_llm_helpers import (
+    is_api_key_valid,
+    normalize_messages,
+    persist_llm_call_log,
+    safe_parse_tool_arguments,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +41,7 @@ def _is_retryable_http_error(exc: BaseException) -> bool:
 class OpenAICompatibleClient:
     _shared_clients: dict[float, httpx.Client] = {}
     _shared_clients_lock = threading.Lock()
+    _MAX_SHARED_CLIENTS = 5
 
     def __init__(self, provider: str) -> None:
         self.settings = get_settings()
@@ -49,6 +54,16 @@ class OpenAICompatibleClient:
             client = cls._shared_clients.get(safe_timeout)
             if client is not None and not client.is_closed:
                 return client
+            # Evict oldest entries if we have too many distinct timeout clients
+            if len(cls._shared_clients) >= cls._MAX_SHARED_CLIENTS:
+                for old_key in list(cls._shared_clients.keys()):
+                    old_client = cls._shared_clients.pop(old_key, None)
+                    if old_client is not None:
+                        try:
+                            old_client.close()
+                        except Exception:
+                            pass
+                    break  # evict one at a time
             cls._shared_clients[safe_timeout] = httpx.Client(
                 timeout=safe_timeout,
                 limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
@@ -64,15 +79,16 @@ class OpenAICompatibleClient:
     def _normalized_api_key(self, db: Session | None = None) -> str:
         del db  # Runtime connector settings are resolved without DB session injection.
         if self.provider == 'mistral':
-            runtime_key = RuntimeConnectorSettings.get_string(
-                'ollama',
-                ('MISTRAL_API_KEY', 'mistral_api_key'),
+            # Try provider-specific connector first, fall back to 'ollama' for backward compat
+            runtime_key = (
+                RuntimeConnectorSettings.get_string('mistral', ('MISTRAL_API_KEY', 'mistral_api_key'))
+                or RuntimeConnectorSettings.get_string('ollama', ('MISTRAL_API_KEY', 'mistral_api_key'))
             )
             key = (runtime_key or self.settings.mistral_api_key or '').strip()
         else:
-            runtime_key = RuntimeConnectorSettings.get_string(
-                'ollama',
-                ('OPENAI_API_KEY', 'openai_api_key'),
+            runtime_key = (
+                RuntimeConnectorSettings.get_string('openai', ('OPENAI_API_KEY', 'openai_api_key'))
+                or RuntimeConnectorSettings.get_string('ollama', ('OPENAI_API_KEY', 'openai_api_key'))
             )
             key = (runtime_key or self.settings.openai_api_key or '').strip()
         if len(key) >= 2 and key[0] == key[-1] and key[0] in {'"', "'"}:
@@ -100,9 +116,7 @@ class OpenAICompatibleClient:
 
     def is_configured(self, base_url: str | None = None, *, db: Session | None = None) -> bool:
         key = self._normalized_api_key(db=db)
-        if not key:
-            return False
-        if key.lower() in {'replace_me', 'changeme', 'change-me', 'your_api_key'}:
+        if not is_api_key_valid(key):
             return False
         if base_url is None:
             base_url = self._normalized_base_url()
@@ -119,8 +133,8 @@ class OpenAICompatibleClient:
         output_cost = (completion_tokens / 1_000_000) * output_rate
         return float(input_cost + output_cost)
 
+    @staticmethod
     def _persist_log(
-        self,
         provider: str,
         model: str,
         status: str,
@@ -130,26 +144,11 @@ class OpenAICompatibleClient:
         latency_ms: float,
         error: str | None = None,
     ) -> None:
-        db = SessionLocal()
-        try:
-            db.add(
-                LlmCallLog(
-                    provider=provider,
-                    model=model,
-                    status=status,
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    total_tokens=prompt_tokens + completion_tokens,
-                    cost_usd=cost_usd,
-                    latency_ms=latency_ms,
-                    error=error,
-                )
-            )
-            db.commit()
-        except Exception:
-            db.rollback()
-        finally:
-            db.close()
+        persist_llm_call_log(
+            provider=provider, model=model, status=status,
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+            cost_usd=cost_usd, latency_ms=latency_ms, error=error,
+        )
 
     @retry(
         wait=wait_exponential(multiplier=1, min=1, max=8),
@@ -170,6 +169,12 @@ class OpenAICompatibleClient:
             response = client.get(url, headers=headers)
         else:
             response = client.post(url, json=payload or {}, headers=headers)
+        if response.status_code >= 400:
+            body_text = response.text[:500] if response.text else '<empty>'
+            logger.error(
+                'LLM API error %s %s – status=%d body=%s',
+                method, url, response.status_code, body_text,
+            )
         response.raise_for_status()
         return response.json() if response.content else {}
 
@@ -214,33 +219,7 @@ class OpenAICompatibleClient:
         user_prompt: str,
         messages: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        if isinstance(messages, list):
-            normalized_messages: list[dict[str, Any]] = []
-            for message in messages:
-                if not isinstance(message, dict):
-                    continue
-                role = str(message.get('role') or '').strip().lower()
-                if role not in {'system', 'user', 'assistant', 'tool'}:
-                    continue
-                payload: dict[str, Any] = {'role': role}
-                if 'content' in message:
-                    payload['content'] = message.get('content')
-                if role == 'assistant' and isinstance(message.get('tool_calls'), list):
-                    payload['tool_calls'] = message.get('tool_calls')
-                if role == 'tool':
-                    tool_call_id = message.get('tool_call_id')
-                    name = message.get('name')
-                    if isinstance(tool_call_id, str) and tool_call_id.strip():
-                        payload['tool_call_id'] = tool_call_id.strip()
-                    if isinstance(name, str) and name.strip():
-                        payload['name'] = name.strip()
-                normalized_messages.append(payload)
-            if normalized_messages:
-                return normalized_messages
-        return [
-            {'role': 'system', 'content': system_prompt},
-            {'role': 'user', 'content': user_prompt},
-        ]
+        return normalize_messages(system_prompt, user_prompt, messages)
 
     @staticmethod
     def _build_chat_payload(
@@ -294,16 +273,7 @@ class OpenAICompatibleClient:
             if not name:
                 continue
             raw_arguments = function.get('arguments')
-            parsed_arguments: dict[str, Any] = {}
-            if isinstance(raw_arguments, dict):
-                parsed_arguments = dict(raw_arguments)
-            elif isinstance(raw_arguments, str):
-                try:
-                    candidate = json.loads(raw_arguments)
-                    if isinstance(candidate, dict):
-                        parsed_arguments = candidate
-                except json.JSONDecodeError:
-                    parsed_arguments = {}
+            parsed_arguments = safe_parse_tool_arguments(raw_arguments)
             call_id = str(raw_call.get('id') or f'call_{index}').strip() or f'call_{index}'
             calls.append(
                 {

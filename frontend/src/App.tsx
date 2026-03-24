@@ -1,6 +1,7 @@
 import { Suspense, lazy } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { Layout } from './components/Layout';
+import { RouteLoader } from './components/LoadingIndicators';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 
 const DashboardPage = lazy(() => import('./pages/DashboardPage').then((module) => ({ default: module.DashboardPage })));
@@ -9,10 +10,6 @@ const RunDetailPage = lazy(() => import('./pages/RunDetailPage').then((module) =
 const OrdersPage = lazy(() => import('./pages/OrdersPage').then((module) => ({ default: module.OrdersPage })));
 const ConnectorsPage = lazy(() => import('./pages/ConnectorsPage').then((module) => ({ default: module.ConnectorsPage })));
 const LoginPage = lazy(() => import('./pages/LoginPage').then((module) => ({ default: module.LoginPage })));
-
-function RouteLoader() {
-  return <div className="loading-screen">Chargement...</div>;
-}
 
 function withLayout(element: React.ReactNode): React.ReactNode {
   return (
@@ -26,7 +23,7 @@ function withLayout(element: React.ReactNode): React.ReactNode {
 
 function Protected({ children }: { children: React.ReactNode }) {
   const { token, loading } = useAuth();
-  if (loading) return <div className="loading-screen">Chargement...</div>;
+  if (loading) return <RouteLoader />;
   if (!token) return <Navigate to="/login" replace />;
   return <>{children}</>;
 }

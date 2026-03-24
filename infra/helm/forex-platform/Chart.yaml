@@ -1,6 +1,6 @@
 apiVersion: v2
-name: forex-platform
-description: Forex multi-agent trading platform chart
+name: trading-platform
+description: Multi-product multi-agent trading platform chart
 type: application
 version: 0.1.0
 appVersion: '0.1.0'

@@ -104,3 +104,71 @@ metaapi_sdk_circuit_open_total = Counter(
     'Number of MetaApi SDK circuit breaker openings',
     ['region', 'operation'],
 )
+
+# ---------------------------------------------------------------------------
+# MCP Tool Layer metrics
+# ---------------------------------------------------------------------------
+mcp_tool_calls_total = Counter(
+    'mcp_tool_calls_total',
+    'Total MCP tool invocations via MCPClientAdapter',
+    ['tool', 'status'],
+)
+mcp_tool_duration_seconds = Histogram(
+    'mcp_tool_duration_seconds',
+    'MCP tool execution duration in seconds',
+    ['tool', 'status'],
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5),
+)
+
+# ---------------------------------------------------------------------------
+# Memory system metrics
+# ---------------------------------------------------------------------------
+memory_store_total = Counter(
+    'memory_store_total',
+    'Memory entries stored',
+    ['source_type', 'agent_id'],
+)
+memory_search_total = Counter(
+    'memory_search_total',
+    'Memory searches executed',
+    ['agent_id', 'outcome_filter'],
+)
+memory_outcome_backfill_total = Counter(
+    'memory_outcome_backfill_total',
+    'Outcome weight backfill operations',
+    ['outcome_label'],
+)
+
+# ---------------------------------------------------------------------------
+# Risk engine metrics
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Trading decision quality metrics
+# ---------------------------------------------------------------------------
+debate_impact_abs = Histogram(
+    'debate_impact_abs',
+    'Absolute debate_score contribution to combined_score (measures debate value)',
+    ['decision', 'strong_conflict'],
+    buckets=(0.0, 0.01, 0.02, 0.04, 0.06, 0.08, 0.10, 0.12),
+)
+contradiction_detection_total = Counter(
+    'contradiction_detection_total',
+    'Trend/momentum contradiction detections',
+    ['level'],
+)
+decision_gate_blocks_total = Counter(
+    'decision_gate_blocks_total',
+    'Decision gate blocks that forced HOLD',
+    ['gate'],
+)
+
+risk_evaluation_total = Counter(
+    'risk_evaluation_total',
+    'Risk engine evaluations',
+    ['accepted', 'asset_class', 'mode'],
+)
+order_guardian_actions_total = Counter(
+    'order_guardian_actions_total',
+    'Order guardian actions taken',
+    ['action', 'executed'],
+)

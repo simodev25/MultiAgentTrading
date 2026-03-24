@@ -27,7 +27,7 @@ from app.services.agent_runtime.planner import AgenticRuntimePlanner
 from app.services.agent_runtime.session_store import RuntimeSessionStore
 from app.services.agent_runtime.tool_registry import RuntimeToolRegistry
 from app.services.orchestrator.agents import AgentContext
-from app.services.orchestrator.engine import ForexOrchestrator
+from app.services.orchestrator.engine import TradingOrchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ class AgenticTradingRuntime:
 
     def __init__(self) -> None:
         self.settings = get_settings()
-        self.orchestrator = ForexOrchestrator()
+        self.orchestrator = TradingOrchestrator()
         self.planner = AgenticRuntimePlanner(self.orchestrator.prompt_service)
         self.session_store = RuntimeSessionStore(
             event_limit=self.settings.agentic_runtime_event_limit,
@@ -184,10 +184,57 @@ class AgenticTradingRuntime:
             section='execution',
             profiles=('agentic_v2',),
         )
+        # Register MCP tools as first-class runtime tools
+        self._register_mcp_tools()
+
         self.registry.set_policy(
             allow=[str(item.get('name') or '').strip() for item in self.registry.list_tools()],
             deny=[],
         )
+
+    def _register_mcp_tools(self) -> None:
+        """Bridge all MCP tools into the RuntimeToolRegistry."""
+        from app.services.agent_runtime.mcp_client import get_mcp_client
+        adapter = get_mcp_client()
+        mcp_section_map = {
+            'market_snapshot': 'context',
+            'indicator_bundle': 'analysis',
+            'divergence_detector': 'analysis',
+            'support_resistance_detector': 'analysis',
+            'pattern_detector': 'analysis',
+            'multi_timeframe_context': 'analysis',
+            'market_regime_detector': 'analysis',
+            'session_context': 'context',
+            'correlation_analyzer': 'analysis',
+            'volatility_analyzer': 'analysis',
+            'news_search': 'context',
+            'macro_event_feed': 'context',
+            'sentiment_parser': 'analysis',
+            'symbol_relevance_filter': 'analysis',
+            'evidence_query': 'decision',
+            'thesis_support_extractor': 'decision',
+            'scenario_validation': 'decision',
+            'position_size_calculator': 'risk',
+            'memory_query': 'memory',
+        }
+        for tool_id in adapter.tool_ids:
+            if self.registry.has(f'mcp_{tool_id}'):
+                continue
+            meta = adapter.get_tool_meta(tool_id) or {}
+
+            def _make_handler(tid: str):
+                def handler(**kwargs: Any) -> dict[str, Any]:
+                    result = adapter.call_tool(tid, kwargs)
+                    return result.data if result.status == 'ok' else {'error': result.error, 'status': result.status}
+                return handler
+
+            self.registry.register(
+                f'mcp_{tool_id}',
+                _make_handler(tool_id),
+                description=meta.get('description', f'MCP tool: {tool_id}'),
+                section=mcp_section_map.get(tool_id, 'mcp'),
+                profiles=('agentic_v2',),
+            )
 
     @staticmethod
     def _bool_label(value: bool) -> str:
@@ -220,11 +267,13 @@ class AgenticTradingRuntime:
             memory_context=state.context.get('memory_context') if isinstance(state.context.get('memory_context'), list) else [],
             memory_signal=state.context.get('memory_signal') if isinstance(state.context.get('memory_signal'), dict) else {},
             llm_model_overrides={},
+            price_history=state.context.get('_price_history') if isinstance(state.context.get('_price_history'), list) else [],
+            multi_tf_snapshots=state.context.get('_multi_tf_snapshots') if isinstance(state.context.get('_multi_tf_snapshots'), dict) else {},
         )
 
     @staticmethod
     def _json_safe(value: Any) -> Any:
-        return ForexOrchestrator._json_safe(value)
+        return TradingOrchestrator._json_safe(value)
 
     def _compact_payload(self, value: Any) -> Any:
         safe = self._json_safe(value)
@@ -1086,7 +1135,7 @@ class AgenticTradingRuntime:
             trace_payload = run.trace if isinstance(run.trace, dict) else {}
             trace_payload = {
                 **trace_payload,
-                'market': state.context.get('market', {}),
+                'market': self._json_safe(state.context.get('market', {})),
                 'news': state.context.get('news', {}),
                 'analysis_outputs': analysis_outputs,
                 'bullish': bullish,
@@ -1175,7 +1224,7 @@ class AgenticTradingRuntime:
             failed_trace = run.trace if isinstance(run.trace, dict) else {}
             failed_trace = {
                 **failed_trace,
-                'market': state.context.get('market', {}),
+                'market': self._json_safe(state.context.get('market', {})),
                 'news': state.context.get('news', {}),
                 'analysis_outputs': self._analysis_outputs(state),
                 'bullish': state.artifacts.get('bullish') if isinstance(state.artifacts.get('bullish'), dict) else {},
@@ -1238,8 +1287,18 @@ class AgenticTradingRuntime:
             metaapi_account_ref=metaapi_account_ref,
         )
         news = self.orchestrator.market_provider.get_news_context(run.pair)
+        raw_candles = market.pop('_raw_candles', [])
+        multi_tf_snapshots = await self.orchestrator._fetch_multi_tf_snapshots(
+            db,
+            pair=run.pair,
+            current_timeframe=run.timeframe,
+            symbol=str(market.get('symbol') or run.pair),
+            metaapi_account_ref=metaapi_account_ref,
+        )
         state.context['market'] = market
         state.context['news'] = news
+        state.context['_price_history'] = raw_candles
+        state.context['_multi_tf_snapshots'] = multi_tf_snapshots
         return {'market': market, 'news': news}
 
     async def _tool_load_memory_context(

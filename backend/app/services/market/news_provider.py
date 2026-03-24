@@ -25,8 +25,8 @@ from app.services.news.fx_pair_bias import infer_fx_pair_bias, map_fx_effects_to
 logger = logging.getLogger(__name__)
 
 
-class YFinanceMarketProvider:
-    _CACHE_PREFIX = 'yfinance:v1'
+class MarketProvider:
+    _CACHE_PREFIX = 'news:v1'
     interval_map = {
         'M5': ('5m', '7d'),
         'M15': ('15m', '30d'),
@@ -69,7 +69,7 @@ class YFinanceMarketProvider:
     news_provider_defaults: dict[str, dict[str, Any]] = {
         'yahoo_finance': {
             'enabled': True,
-            'priority': 100,
+            'priority': 80,
             'timeout_ms': 4000,
             'lookback_hours': 72,
         },
@@ -102,6 +102,12 @@ class YFinanceMarketProvider:
             'timeout_ms': 5000,
             'api_key_env': 'ALPHAVANTAGE_API_KEY',
             'lookback_hours': 48,
+        },
+        'llm_search': {
+            'enabled': False,
+            'priority': 100,
+            'timeout_ms': 15000,
+            'max_queries': 2,
         },
     }
     news_analysis_defaults: dict[str, Any] = {
@@ -201,7 +207,7 @@ class YFinanceMarketProvider:
                     socket_timeout=self.settings.yfinance_cache_connect_timeout_seconds,
                 )
             except Exception as exc:  # pragma: no cover
-                logger.warning('yfinance redis cache unavailable: %s', exc)
+                logger.warning('market redis cache unavailable: %s', exc)
                 self._redis = None
 
     def _cache_enabled(self) -> bool:
@@ -211,7 +217,7 @@ class YFinanceMarketProvider:
 
     def _cache_degrade(self, exc: Exception) -> None:
         self._redis_unavailable_until = time.monotonic() + 15.0
-        logger.debug('yfinance redis cache degraded temporarily: %s', exc)
+        logger.debug('market redis cache degraded temporarily: %s', exc)
 
     @classmethod
     def _cache_key(cls, *parts: Any) -> str:
@@ -308,21 +314,50 @@ class YFinanceMarketProvider:
             self._cache_degrade(exc)
             return None
 
+    def _provider_cache_key(self, provider_name: str, pair: str, max_items: int) -> str:
+        pair_key = self._normalize_pair(pair) or str(pair or '').strip().upper()
+        return self._cache_key('provider', provider_name, pair_key, max_items)
+
+    def _provider_cache_ttl(self, provider_cfg: dict[str, Any]) -> int:
+        explicit = provider_cfg.get('cache_ttl_seconds')
+        if explicit is not None:
+            return max(int(self._safe_float(explicit, 0)), 0)
+        return self.settings.news_provider_cache_ttl_seconds
+
+    def _provider_cache_get(self, provider_name: str, pair: str, max_items: int) -> list[dict[str, Any]] | None:
+        key = self._provider_cache_key(provider_name, pair, max_items)
+        cached = self._cache_get_json(key, resource='news_provider')
+        if cached is None:
+            return None
+        items = cached.get('items')
+        if isinstance(items, list):
+            logger.debug('news provider cache hit provider=%s pair=%s items=%s', provider_name, pair, len(items))
+            return items
+        return None
+
+    def _provider_cache_set(self, provider_name: str, pair: str, max_items: int, items: list[dict[str, Any]], ttl: int) -> None:
+        if ttl <= 0:
+            return
+        key = self._provider_cache_key(provider_name, pair, max_items)
+        self._cache_set_json(key, {'items': items, 'provider': provider_name, 'pair': pair}, ttl)
+        logger.debug('news provider cache set provider=%s pair=%s items=%s ttl=%ss', provider_name, pair, len(items), ttl)
+
     def clear_news_cache(self) -> int:
         if not self._cache_enabled():
             return 0
-        pattern = self._cache_key('news', '*')
         deleted = 0
         try:
-            cursor: int | str = 0
-            while True:
-                cursor, keys = self._redis.scan(cursor=cursor, match=pattern, count=200)
-                if keys:
-                    deleted += int(self._redis.delete(*keys))
-                if str(cursor) == '0':
-                    break
+            for prefix in ('news', 'provider'):
+                pattern = self._cache_key(prefix, '*')
+                cursor: int | str = 0
+                while True:
+                    cursor, keys = self._redis.scan(cursor=cursor, match=pattern, count=200)
+                    if keys:
+                        deleted += int(self._redis.delete(*keys))
+                    if str(cursor) == '0':
+                        break
             if deleted > 0:
-                logger.info('yfinance news cache invalidated keys=%s', deleted)
+                logger.info('news cache invalidated keys=%s', deleted)
         except Exception as exc:  # pragma: no cover
             self._cache_degrade(exc)
             return 0
@@ -482,11 +517,11 @@ class YFinanceMarketProvider:
 
     @staticmethod
     def _split_fx_pair(pair: str) -> tuple[str | None, str | None]:
-        normalized = YFinanceMarketProvider._normalize_pair(pair)
+        normalized = MarketProvider._normalize_pair(pair)
         if len(normalized) == 6 and normalized.isalpha():
             base = normalized[:3]
             quote = normalized[3:]
-            if base in YFinanceMarketProvider.currency_aliases and quote in YFinanceMarketProvider.currency_aliases:
+            if base in MarketProvider.currency_aliases and quote in MarketProvider.currency_aliases:
                 return base, quote
         return None, None
 
@@ -971,14 +1006,14 @@ class YFinanceMarketProvider:
         merged = dict(base)
         for key, value in (override or {}).items():
             if isinstance(value, dict) and isinstance(merged.get(key), dict):
-                merged[key] = YFinanceMarketProvider._merge_dict(merged[key], value)
+                merged[key] = MarketProvider._merge_dict(merged[key], value)
             else:
                 merged[key] = value
         return merged
 
     def _news_providers_config(self) -> dict[str, dict[str, Any]]:
         configured = self.settings.news_providers if isinstance(self.settings.news_providers, dict) else {}
-        runtime_settings = RuntimeConnectorSettings.settings('yfinance')
+        runtime_settings = RuntimeConnectorSettings.settings('news')
         runtime_configured = runtime_settings.get('news_providers') if isinstance(runtime_settings, dict) else {}
         if not isinstance(runtime_configured, dict):
             runtime_configured = {}
@@ -999,56 +1034,56 @@ class YFinanceMarketProvider:
         env_name = str(provider_cfg.get('api_key_env') or '').strip()
         if env_name == 'NEWSAPI_API_KEY':
             return RuntimeConnectorSettings.get_string(
-                'yfinance',
+                'news',
                 ('NEWSAPI_API_KEY', 'newsapi_api_key'),
                 default=str(self.settings.newsapi_api_key or '').strip(),
             )
         if env_name == 'TRADINGECONOMICS_API_KEY':
             return RuntimeConnectorSettings.get_string(
-                'yfinance',
+                'news',
                 ('TRADINGECONOMICS_API_KEY', 'tradingeconomics_api_key'),
                 default=str(self.settings.tradingeconomics_api_key or '').strip(),
             )
         if env_name == 'FINNHUB_API_KEY':
             return RuntimeConnectorSettings.get_string(
-                'yfinance',
+                'news',
                 ('FINNHUB_API_KEY', 'finnhub_api_key'),
                 default=str(self.settings.finnhub_api_key or '').strip(),
             )
         if env_name == 'ALPHAVANTAGE_API_KEY':
             return RuntimeConnectorSettings.get_string(
-                'yfinance',
+                'news',
                 ('ALPHAVANTAGE_API_KEY', 'alphavantage_api_key'),
                 default=str(self.settings.alphavantage_api_key or '').strip(),
             )
         # Backward-compatible fallback for custom env names.
         if env_name:
             return RuntimeConnectorSettings.get_string(
-                'yfinance',
+                'news',
                 (env_name, env_name.lower()),
                 default=str(provider_cfg.get('api_key') or '').strip(),
             )
         if provider_name == 'newsapi':
             return RuntimeConnectorSettings.get_string(
-                'yfinance',
+                'news',
                 ('NEWSAPI_API_KEY', 'newsapi_api_key'),
                 default=str(self.settings.newsapi_api_key or '').strip(),
             )
         if provider_name == 'tradingeconomics':
             return RuntimeConnectorSettings.get_string(
-                'yfinance',
+                'news',
                 ('TRADINGECONOMICS_API_KEY', 'tradingeconomics_api_key'),
                 default=str(self.settings.tradingeconomics_api_key or '').strip(),
             )
         if provider_name == 'finnhub':
             return RuntimeConnectorSettings.get_string(
-                'yfinance',
+                'news',
                 ('FINNHUB_API_KEY', 'finnhub_api_key'),
                 default=str(self.settings.finnhub_api_key or '').strip(),
             )
         if provider_name == 'alphavantage':
             return RuntimeConnectorSettings.get_string(
-                'yfinance',
+                'news',
                 ('ALPHAVANTAGE_API_KEY', 'alphavantage_api_key'),
                 default=str(self.settings.alphavantage_api_key or '').strip(),
             )
@@ -1135,7 +1170,7 @@ class YFinanceMarketProvider:
                 ticker = yf.Ticker(symbol)
                 news_items = ticker.news or []
             except Exception:  # pragma: no cover
-                logger.debug('yfinance news candidate failed pair=%s symbol=%s', pair, symbol, exc_info=True)
+                logger.debug('news candidate failed pair=%s symbol=%s', pair, symbol, exc_info=True)
                 continue
 
             symbol_selected: list[dict[str, Any]] = []
@@ -1515,6 +1550,261 @@ class YFinanceMarketProvider:
             'lookback_hours': lookback_hours,
         }
 
+    # ------------------------------------------------------------------
+    # LLM-powered web search provider
+    # ------------------------------------------------------------------
+
+    _LLM_SEARCH_JUNK_URL_PATTERNS: tuple[str, ...] = (
+        '.pdf', '/video', 'youtube.com', 'youtu.be', 'vimeo.com',
+        'tiktok.com', 'instagram.com', 'facebook.com', 'twitter.com',
+        '/podcast', '.mp3', '.mp4', 'slideshare.net', 'scribd.com',
+        'academia.edu', 'researchgate.net',
+    )
+
+    @classmethod
+    def _is_junk_search_url(cls, url: str | None) -> bool:
+        lowered = str(url or '').strip().lower()
+        if not lowered:
+            return False
+        return any(pattern in lowered for pattern in cls._LLM_SEARCH_JUNK_URL_PATTERNS)
+
+    def _build_llm_search_queries(self, pair: str, *, max_queries: int = 2) -> list[str]:
+        instrument = normalize_instrument(pair)
+        asset_class = instrument.asset_class.value
+        display = instrument.display_symbol or self._normalize_pair(pair)
+        base = str(instrument.base_asset or '').upper()
+        quote = str(instrument.quote_asset or '').upper()
+        date_str = datetime.now(timezone.utc).strftime('%d %B %Y')
+        queries: list[str] = []
+        if asset_class == 'forex':
+            queries.append(f'{base}/{quote} forex trading news outlook {date_str} site:reuters.com OR site:forexlive.com OR site:fxstreet.com OR site:investing.com OR site:dailyfx.com')
+            if max_queries >= 2:
+                queries.append(f'{base} {quote} central bank rate decision economic data {date_str}')
+        elif asset_class == 'crypto':
+            queries.append(f'{base} crypto news price analysis {date_str} site:coindesk.com OR site:cointelegraph.com OR site:theblock.co OR site:decrypt.co')
+            if max_queries >= 2:
+                queries.append(f'{base} cryptocurrency regulation ETF market {date_str}')
+        elif asset_class in {'index', 'equity', 'etf'}:
+            queries.append(f'{display} stock market news outlook {date_str} site:reuters.com OR site:bloomberg.com OR site:cnbc.com OR site:marketwatch.com')
+        elif asset_class in {'metal', 'energy', 'commodity'}:
+            queries.append(f'{base or display} commodity price news {date_str} site:reuters.com OR site:investing.com OR site:kitco.com')
+        else:
+            queries.append(f'{display} financial market news {date_str} site:reuters.com OR site:bloomberg.com OR site:investing.com')
+        return queries[:max(max_queries, 1)]
+
+    def _resolve_llm_search_provider(self) -> tuple[str, str, str]:
+        """Return (provider_name, base_url, api_key) for the configured LLM."""
+        from app.services.llm.model_selector import normalize_llm_provider
+
+        # Read provider from the ollama connector settings (same source as the config page).
+        ollama_settings = RuntimeConnectorSettings.settings('ollama')
+        raw_provider = ollama_settings.get('provider') if isinstance(ollama_settings, dict) else None
+        provider = normalize_llm_provider(
+            raw_provider if isinstance(raw_provider, str) else None,
+            fallback='ollama',
+        )
+
+        if provider == 'openai':
+            base_url = RuntimeConnectorSettings.get_string(
+                'openai', ('OPENAI_BASE_URL', 'openai_base_url'),
+                default=str(self.settings.openai_base_url or '').strip(),
+            ) or 'https://api.openai.com/v1'
+            api_key = RuntimeConnectorSettings.get_string(
+                'openai', ('OPENAI_API_KEY', 'openai_api_key'),
+                default=str(self.settings.openai_api_key or '').strip(),
+            )
+            return provider, base_url.rstrip('/'), api_key
+        if provider == 'mistral':
+            base_url = RuntimeConnectorSettings.get_string(
+                'mistral', ('MISTRAL_BASE_URL', 'mistral_base_url'),
+                default=str(self.settings.mistral_base_url or '').strip(),
+            ) or 'https://api.mistral.ai/v1'
+            api_key = RuntimeConnectorSettings.get_string(
+                'mistral', ('MISTRAL_API_KEY', 'mistral_api_key'),
+                default=str(self.settings.mistral_api_key or '').strip(),
+            )
+            return provider, base_url.rstrip('/'), api_key
+        # Default: ollama
+        base_url = str(self.settings.ollama_base_url or '').strip().rstrip('/')
+        api_key = RuntimeConnectorSettings.get_string(
+            'ollama', ('OLLAMA_API_KEY', 'ollama_api_key'),
+            default=str(self.settings.ollama_api_key or '').strip(),
+        )
+        return 'ollama', base_url, api_key
+
+    def _ollama_web_search(
+        self,
+        queries: list[str],
+        *,
+        base_url: str,
+        api_key: str,
+        timeout_seconds: float,
+    ) -> list[dict[str, Any]]:
+        if not base_url or not api_key:
+            return []
+        url = f'{base_url}/api/web_search'
+        headers = {
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json',
+        }
+        all_results: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
+        with httpx.Client(timeout=timeout_seconds) as client:
+            for query in queries:
+                try:
+                    response = client.post(url, json={'query': query}, headers=headers)
+                    response.raise_for_status()
+                    data = response.json() if response.content else {}
+                    results = data.get('results', [])
+                    if not isinstance(results, list):
+                        results = []
+                    for item in results:
+                        if not isinstance(item, dict):
+                            continue
+                        item_url = str(item.get('url') or '').strip()
+                        if item_url and item_url in seen_urls:
+                            continue
+                        if item_url:
+                            seen_urls.add(item_url)
+                        all_results.append(item)
+                except Exception as exc:
+                    logger.debug('ollama web_search failed query=%s: %s', query, exc)
+        return all_results
+
+    def _openai_web_search(
+        self,
+        queries: list[str],
+        *,
+        base_url: str,
+        api_key: str,
+        timeout_seconds: float,
+    ) -> list[dict[str, Any]]:
+        if not base_url or not api_key:
+            return []
+        url = f'{base_url}/responses'
+        headers = {
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json',
+        }
+        model = str(self.settings.openai_model or '').strip() or 'gpt-4o-mini'
+        all_results: list[dict[str, Any]] = []
+        seen_urls: set[str] = set()
+        with httpx.Client(timeout=timeout_seconds) as client:
+            for query in queries:
+                try:
+                    payload = {
+                        'model': model,
+                        'input': query,
+                        'tools': [{'type': 'web_search_preview'}],
+                    }
+                    response = client.post(url, json=payload, headers=headers)
+                    response.raise_for_status()
+                    data = response.json() if response.content else {}
+                    # Extract URL citations from Responses API output.
+                    output_items = data.get('output', [])
+                    if not isinstance(output_items, list):
+                        output_items = []
+                    for output_item in output_items:
+                        if not isinstance(output_item, dict):
+                            continue
+                        if output_item.get('type') != 'message':
+                            continue
+                        content_blocks = output_item.get('content', [])
+                        if not isinstance(content_blocks, list):
+                            continue
+                        for block in content_blocks:
+                            if not isinstance(block, dict):
+                                continue
+                            text = str(block.get('text') or '').strip()
+                            annotations = block.get('annotations', [])
+                            if not isinstance(annotations, list):
+                                continue
+                            for ann in annotations:
+                                if not isinstance(ann, dict):
+                                    continue
+                                if ann.get('type') != 'url_citation':
+                                    continue
+                                ann_url = str(ann.get('url') or '').strip()
+                                if ann_url and ann_url in seen_urls:
+                                    continue
+                                if ann_url:
+                                    seen_urls.add(ann_url)
+                                title = str(ann.get('title') or '').strip()
+                                if not title:
+                                    continue
+                                all_results.append({
+                                    'title': title,
+                                    'url': ann_url,
+                                    'snippet': text[:300] if text else None,
+                                    'source': title.split(' - ')[-1].strip() if ' - ' in title else None,
+                                })
+                except Exception as exc:
+                    logger.debug('openai web_search failed query=%s: %s', query, exc)
+        return all_results
+
+    def _fetch_llm_search_items(
+        self,
+        pair: str,
+        *,
+        max_items: int,
+        timeout_seconds: float,
+        provider_cfg: dict[str, Any],
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Fetch news via LLM-powered web search (Ollama or OpenAI)."""
+        max_queries = int(max(self._safe_float(provider_cfg.get('max_queries'), 2), 1))
+        queries = self._build_llm_search_queries(pair, max_queries=max_queries)
+
+        provider, base_url, api_key = self._resolve_llm_search_provider()
+        meta: dict[str, Any] = {'llm_provider': provider, 'queries': queries, 'raw_count': 0}
+
+        if not base_url or not api_key:
+            meta['error'] = 'missing_credentials'
+            return [], meta
+
+        if provider == 'openai':
+            raw_results = self._openai_web_search(
+                queries, base_url=base_url, api_key=api_key, timeout_seconds=timeout_seconds,
+            )
+        else:
+            # Default to Ollama web search (works for ollama and mistral with ollama proxy).
+            raw_results = self._ollama_web_search(
+                queries, base_url=base_url, api_key=api_key, timeout_seconds=timeout_seconds,
+            )
+
+        meta['raw_count'] = len(raw_results)
+        filtered_count = 0
+        output: list[dict[str, Any]] = []
+        for item in raw_results:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get('title') or '').strip()
+            item_url = str(item.get('url') or item.get('link') or '').strip() or None
+            # Skip PDFs, videos, social media, academic papers.
+            if self._is_junk_search_url(item_url):
+                filtered_count += 1
+                continue
+            snippet = str(item.get('snippet') or item.get('content') or item.get('description') or '').strip() or None
+            source = str(item.get('source') or item.get('source_name') or '').strip() or None
+            published = item.get('published_at') or item.get('date') or item.get('published')
+
+            normalized = self._normalize_article_item(
+                provider='llm_search',
+                pair=pair,
+                title=title,
+                summary=snippet,
+                url=item_url,
+                published_at=published,
+                source_name=source or f'llm_search:{provider}',
+            )
+            if normalized is None:
+                continue
+            output.append(normalized)
+            if len(output) >= max_items:
+                break
+
+        meta['filtered_junk_count'] = filtered_count
+        return output, meta
+
     def _fetch_history_with_fallback(
         self,
         pair: str,
@@ -1539,7 +1829,7 @@ class YFinanceMarketProvider:
                 if not frame.empty:
                     return frame, symbol
             except Exception:  # pragma: no cover
-                logger.debug('yfinance history candidate failed pair=%s symbol=%s', pair, symbol, exc_info=True)
+                logger.debug('history candidate failed pair=%s symbol=%s', pair, symbol, exc_info=True)
         return pd.DataFrame(), symbols[0]
 
     def _prepare_frame(self, pair: str, timeframe: str) -> pd.DataFrame:
@@ -1610,7 +1900,7 @@ class YFinanceMarketProvider:
                 )
                 return resolved
             except Exception as exc:  # pragma: no cover - third-party failures are expected in degraded mode
-                logger.exception('yfinance market snapshot failure pair=%s timeframe=%s', pair, timeframe)
+                logger.exception('market snapshot failure pair=%s timeframe=%s', pair, timeframe)
                 return {'degraded': True, 'error': str(exc), 'pair': pair, 'timeframe': timeframe}
         finally:
             self._cache_release_lock(snapshot_cache_key, cache_lock_token)
@@ -1649,7 +1939,7 @@ class YFinanceMarketProvider:
                 )
                 return frame
             except Exception as exc:  # pragma: no cover
-                logger.exception('yfinance historical retrieval failure pair=%s timeframe=%s', pair, timeframe)
+                logger.exception('historical retrieval failure pair=%s timeframe=%s', pair, timeframe)
                 return pd.DataFrame()
         finally:
             self._cache_release_lock(history_cache_key, cache_lock_token)
@@ -1761,8 +2051,11 @@ class YFinanceMarketProvider:
                         api_key = ''
 
                     callable_providers += 1
+                    is_api_key_provider = provider_name in {'newsapi', 'tradingeconomics', 'finnhub', 'alphavantage'}
+                    provider_ttl = self._provider_cache_ttl(cfg) if is_api_key_provider else 0
                     try:
                         fetched_count = 0
+                        cached_items: list[dict[str, Any]] | None = None
                         if provider_name == 'yahoo_finance':
                             items, meta = self._fetch_yahoo_news_items(
                                 pair,
@@ -1780,43 +2073,77 @@ class YFinanceMarketProvider:
                             aggregated_articles.extend(items)
                             fetched_count = len(items)
                         elif provider_name == 'newsapi':
-                            items, _ = self._fetch_newsapi_items(
-                                pair,
-                                max_items=max_items_per_provider,
-                                timeout_seconds=timeout_seconds,
-                                provider_cfg=cfg,
-                                api_key=api_key,
-                            )
+                            cached_items = self._provider_cache_get(provider_name, pair, max_items_per_provider)
+                            if cached_items is not None:
+                                items = cached_items
+                            else:
+                                items, _ = self._fetch_newsapi_items(
+                                    pair,
+                                    max_items=max_items_per_provider,
+                                    timeout_seconds=timeout_seconds,
+                                    provider_cfg=cfg,
+                                    api_key=api_key,
+                                )
+                                self._provider_cache_set(provider_name, pair, max_items_per_provider, items, provider_ttl)
                             aggregated_articles.extend(items)
                             fetched_count = len(items)
                         elif provider_name == 'tradingeconomics':
-                            events, _ = self._fetch_tradingeconomics_items(
-                                pair,
-                                max_items=max_items_per_provider,
-                                timeout_seconds=timeout_seconds,
-                                provider_cfg=cfg,
-                                api_key=api_key,
-                            )
+                            cached_items = self._provider_cache_get(provider_name, pair, max_items_per_provider)
+                            if cached_items is not None:
+                                events = cached_items
+                            else:
+                                events, _ = self._fetch_tradingeconomics_items(
+                                    pair,
+                                    max_items=max_items_per_provider,
+                                    timeout_seconds=timeout_seconds,
+                                    provider_cfg=cfg,
+                                    api_key=api_key,
+                                )
+                                self._provider_cache_set(provider_name, pair, max_items_per_provider, events, provider_ttl)
                             aggregated_events.extend(events)
                             fetched_count = len(events)
                         elif provider_name == 'finnhub':
-                            items, _ = self._fetch_finnhub_items(
-                                pair,
-                                max_items=max_items_per_provider,
-                                timeout_seconds=timeout_seconds,
-                                provider_cfg=cfg,
-                                api_key=api_key,
-                            )
+                            cached_items = self._provider_cache_get(provider_name, pair, max_items_per_provider)
+                            if cached_items is not None:
+                                items = cached_items
+                            else:
+                                items, _ = self._fetch_finnhub_items(
+                                    pair,
+                                    max_items=max_items_per_provider,
+                                    timeout_seconds=timeout_seconds,
+                                    provider_cfg=cfg,
+                                    api_key=api_key,
+                                )
+                                self._provider_cache_set(provider_name, pair, max_items_per_provider, items, provider_ttl)
                             aggregated_articles.extend(items)
                             fetched_count = len(items)
                         elif provider_name == 'alphavantage':
-                            items, _ = self._fetch_alphavantage_items(
-                                pair,
-                                max_items=max_items_per_provider,
-                                timeout_seconds=timeout_seconds,
-                                provider_cfg=cfg,
-                                api_key=api_key,
-                            )
+                            cached_items = self._provider_cache_get(provider_name, pair, max_items_per_provider)
+                            if cached_items is not None:
+                                items = cached_items
+                            else:
+                                items, _ = self._fetch_alphavantage_items(
+                                    pair,
+                                    max_items=max_items_per_provider,
+                                    timeout_seconds=timeout_seconds,
+                                    provider_cfg=cfg,
+                                    api_key=api_key,
+                                )
+                                self._provider_cache_set(provider_name, pair, max_items_per_provider, items, provider_ttl)
+                            aggregated_articles.extend(items)
+                            fetched_count = len(items)
+                        elif provider_name == 'llm_search':
+                            cached_items = self._provider_cache_get(provider_name, pair, max_items_per_provider)
+                            if cached_items is not None:
+                                items = cached_items
+                            else:
+                                items, _ = self._fetch_llm_search_items(
+                                    pair,
+                                    max_items=max_items_per_provider,
+                                    timeout_seconds=timeout_seconds,
+                                    provider_cfg=cfg,
+                                )
+                                self._provider_cache_set(provider_name, pair, max_items_per_provider, items, 300)
                             aggregated_articles.extend(items)
                             fetched_count = len(items)
                         else:
@@ -1824,7 +2151,8 @@ class YFinanceMarketProvider:
                             status_payload['error'] = 'unsupported_provider'
                             continue
 
-                        status_payload['status'] = 'ok' if fetched_count > 0 else 'empty'
+                        was_cached = cached_items is not None
+                        status_payload['status'] = ('cached' if was_cached else 'ok') if fetched_count > 0 else 'empty'
                         status_payload['count'] = fetched_count
                     except Exception as exc:  # pragma: no cover - external APIs are unstable by nature
                         message = str(exc)
@@ -1891,7 +2219,7 @@ class YFinanceMarketProvider:
                 self._cache_set_json(news_cache_key, resolved, self.settings.yfinance_news_cache_ttl_seconds)
                 return resolved
             except Exception as exc:  # pragma: no cover
-                logger.exception('yfinance news retrieval failure pair=%s', pair)
+                logger.exception('news retrieval failure pair=%s', pair)
                 return {
                     'degraded': True,
                     'pair': pair,
@@ -1983,6 +2311,13 @@ class YFinanceMarketProvider:
                     timeout_seconds=timeout_seconds,
                     provider_cfg=cfg,
                     api_key=api_key,
+                )
+            elif name == 'llm_search':
+                items, meta = self._fetch_llm_search_items(
+                    pair,
+                    max_items=max(max_items, 1),
+                    timeout_seconds=timeout_seconds,
+                    provider_cfg=cfg,
                 )
             else:
                 return {

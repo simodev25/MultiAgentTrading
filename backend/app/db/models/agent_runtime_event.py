@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, JSON, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -24,6 +24,6 @@ class AgentRuntimeEvent(Base):
     causation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     ts: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
 
     run = relationship('AnalysisRun', back_populates='runtime_events')

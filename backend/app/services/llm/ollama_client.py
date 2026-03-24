@@ -10,8 +10,6 @@ from sqlalchemy.orm import Session
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.core.config import get_settings
-from app.db.models.llm_call_log import LlmCallLog
-from app.db.session import SessionLocal
 from app.observability.metrics import (
     external_provider_failures_total,
     llm_calls_total,
@@ -21,6 +19,12 @@ from app.observability.metrics import (
     llm_prompt_tokens_total,
 )
 from app.services.connectors.runtime_settings import RuntimeConnectorSettings
+from app.services.llm.base_llm_helpers import (
+    is_api_key_valid,
+    normalize_messages,
+    persist_llm_call_log,
+    safe_parse_tool_arguments,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +57,10 @@ class OllamaCloudClient:
                 return cls._shared_client
 
             if cls._shared_client is not None and not cls._shared_client.is_closed:
-                cls._shared_client.close()
+                try:
+                    cls._shared_client.close()
+                except Exception:
+                    pass
 
             cls._shared_client = httpx.Client(
                 timeout=safe_timeout,
@@ -103,9 +110,7 @@ class OllamaCloudClient:
 
     def is_configured(self, base_url: str | None = None, *, db: Session | None = None) -> bool:
         key = self._normalized_api_key(db=db)
-        if not key:
-            return False
-        if key.lower() in {'replace_me', 'changeme', 'change-me', 'your_api_key'}:
+        if not is_api_key_valid(key):
             return False
         if base_url is None:
             base_url = self._normalized_base_url()
@@ -116,8 +121,8 @@ class OllamaCloudClient:
         output_cost = (completion_tokens / 1_000_000) * self.settings.ollama_output_cost_per_1m_tokens
         return float(input_cost + output_cost)
 
+    @staticmethod
     def _persist_log(
-        self,
         provider: str,
         model: str,
         status: str,
@@ -127,26 +132,11 @@ class OllamaCloudClient:
         latency_ms: float,
         error: str | None = None,
     ) -> None:
-        db = SessionLocal()
-        try:
-            db.add(
-                LlmCallLog(
-                    provider=provider,
-                    model=model,
-                    status=status,
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    total_tokens=prompt_tokens + completion_tokens,
-                    cost_usd=cost_usd,
-                    latency_ms=latency_ms,
-                    error=error,
-                )
-            )
-            db.commit()
-        except Exception:
-            db.rollback()
-        finally:
-            db.close()
+        persist_llm_call_log(
+            provider=provider, model=model, status=status,
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+            cost_usd=cost_usd, latency_ms=latency_ms, error=error,
+        )
 
     @retry(
         wait=wait_exponential(multiplier=1, min=1, max=8),
@@ -174,39 +164,13 @@ class OllamaCloudClient:
         completion_tokens = int(data.get('eval_count') or data.get('completion_tokens') or 0)
         return text, prompt_tokens, completion_tokens
 
+    @staticmethod
     def _normalize_messages(
-        self,
         system_prompt: str,
         user_prompt: str,
         messages: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        if isinstance(messages, list):
-            normalized_messages: list[dict[str, Any]] = []
-            for message in messages:
-                if not isinstance(message, dict):
-                    continue
-                role = str(message.get('role') or '').strip().lower()
-                if role not in {'system', 'user', 'assistant', 'tool'}:
-                    continue
-                payload: dict[str, Any] = {'role': role}
-                if 'content' in message:
-                    payload['content'] = message.get('content')
-                if role == 'assistant' and isinstance(message.get('tool_calls'), list):
-                    payload['tool_calls'] = message.get('tool_calls')
-                if role == 'tool':
-                    tool_call_id = message.get('tool_call_id')
-                    name = message.get('name')
-                    if isinstance(tool_call_id, str) and tool_call_id.strip():
-                        payload['tool_call_id'] = tool_call_id.strip()
-                    if isinstance(name, str) and name.strip():
-                        payload['name'] = name.strip()
-                normalized_messages.append(payload)
-            if normalized_messages:
-                return normalized_messages
-        return [
-            {'role': 'system', 'content': system_prompt},
-            {'role': 'user', 'content': user_prompt},
-        ]
+        return normalize_messages(system_prompt, user_prompt, messages)
 
     def _build_chat_payload(
         self,
@@ -257,16 +221,7 @@ class OllamaCloudClient:
             if not name:
                 continue
             raw_arguments = function.get('arguments')
-            parsed_arguments: dict[str, Any] = {}
-            if isinstance(raw_arguments, dict):
-                parsed_arguments = dict(raw_arguments)
-            elif isinstance(raw_arguments, str):
-                try:
-                    candidate = json.loads(raw_arguments)
-                    if isinstance(candidate, dict):
-                        parsed_arguments = candidate
-                except json.JSONDecodeError:
-                    parsed_arguments = {}
+            parsed_arguments = safe_parse_tool_arguments(raw_arguments)
             call_id = str(raw_call.get('id') or f'call_{index}').strip() or f'call_{index}'
             calls.append(
                 {

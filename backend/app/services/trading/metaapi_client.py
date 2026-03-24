@@ -88,6 +88,32 @@ class MetaApiClient:
                 logger.warning('metaapi redis cache unavailable: %s', exc)
                 self._redis = None
 
+    def _runtime_cache_enabled(self) -> bool:
+        """Check if cache is enabled via runtime connector settings (UI toggle)."""
+        runtime_settings = RuntimeConnectorSettings.settings('metaapi')
+        if runtime_settings and 'cache_enabled' in runtime_settings:
+            return bool(runtime_settings['cache_enabled'])
+        return self.settings.metaapi_cache_enabled
+
+    def _runtime_cache_ttl(self, resource: str) -> int:
+        """Read cache TTL from runtime connector settings, falling back to env config."""
+        key_map = {
+            'positions': ('cache_positions_ttl', self.settings.metaapi_positions_cache_ttl_seconds),
+            'open_orders': ('cache_open_orders_ttl', self.settings.metaapi_open_orders_cache_ttl_seconds),
+            'deals': ('cache_deals_ttl', self.settings.metaapi_deals_cache_ttl_seconds),
+            'history_orders': ('cache_history_orders_ttl', self.settings.metaapi_history_orders_cache_ttl_seconds),
+            'account_info': ('cache_account_info_ttl', self.settings.metaapi_account_info_cache_ttl_seconds),
+        }
+        runtime_key, env_default = key_map.get(resource, (None, 0))
+        if not self._runtime_cache_enabled():
+            return 0
+        runtime_settings = RuntimeConnectorSettings.settings('metaapi')
+        if runtime_settings and runtime_key and runtime_key in runtime_settings:
+            val = runtime_settings[runtime_key]
+            if isinstance(val, (int, float)):
+                return max(int(val), 0)
+        return env_default
+
     def _resolve_token(self) -> str:
         runtime_token = RuntimeConnectorSettings.get_string(
             'metaapi',
@@ -907,7 +933,7 @@ class MetaApiClient:
                             await self._cache_set_json(
                                 account_cache_key,
                                 result,
-                                self.settings.metaapi_account_info_cache_ttl_seconds,
+                                self._runtime_cache_ttl('account_info'),
                             )
                             self._close_sdk_circuit(resolved_account_id, resolved_region)
                             return result
@@ -951,7 +977,7 @@ class MetaApiClient:
             await self._cache_set_json(
                 account_cache_key,
                 resolved,
-                self.settings.metaapi_account_info_cache_ttl_seconds,
+                self._runtime_cache_ttl('account_info'),
             )
             return resolved
         finally:
@@ -963,84 +989,107 @@ class MetaApiClient:
             return {'degraded': True, 'positions': [], 'reason': 'MetaApi account id not configured'}
 
         resolved_region = (region or self.settings.metaapi_region or '').strip().lower() or 'default'
-        sdk = self._get_sdk(region)
-        sdk_skip_reason: str | None = None
-        if sdk:
-            circuit_remaining = self._sdk_circuit_remaining_seconds(resolved_account_id, resolved_region)
-            if circuit_remaining > 0:
-                sdk_skip_reason = (
-                    f'MetaApi SDK circuit open for {circuit_remaining:.1f}s '
-                    '(recent websocket instability, using REST fallback).'
-                )
-            else:
-                connection = None
-                try:
-                    account = await self._sdk_call_with_timeout(
-                        sdk.metatrader_account_api.get_account(resolved_account_id),
-                        timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
-                        account_id=resolved_account_id,
-                        operation='get-account',
+        cache_ttl = self._runtime_cache_ttl('positions')
+        positions_cache_key = self._cache_key('positions', resolved_account_id, resolved_region)
+        if cache_ttl > 0:
+            cached = await self._cache_get_json(positions_cache_key, resource='positions')
+            if cached is not None:
+                return cached
+            cache_lock_token = await self._cache_acquire_lock(positions_cache_key, self.settings.metaapi_cache_lock_ttl_seconds)
+            if cache_lock_token is None:
+                waited = await self._cache_wait_for_json(positions_cache_key, self.settings.metaapi_cache_wait_timeout_seconds)
+                if waited is not None:
+                    return waited
+        else:
+            cache_lock_token = None
+
+        try:
+            sdk = self._get_sdk(region)
+            sdk_skip_reason: str | None = None
+            if sdk:
+                circuit_remaining = self._sdk_circuit_remaining_seconds(resolved_account_id, resolved_region)
+                if circuit_remaining > 0:
+                    sdk_skip_reason = (
+                        f'MetaApi SDK circuit open for {circuit_remaining:.1f}s '
+                        '(recent websocket instability, using REST fallback).'
                     )
-                    sdk_skip_reason = self._account_rpc_unavailable_reason(account)
-                    if sdk_skip_reason is None:
-                        connection = account.get_rpc_connection()
-                        await self._sdk_call_with_timeout(
-                            connection.connect(),
-                            timeout_seconds=self.settings.metaapi_sdk_connect_timeout_seconds,
-                            account_id=resolved_account_id,
-                            operation='rpc-connect',
-                        )
-                        await self._sdk_call_with_timeout(
-                            connection.wait_synchronized(),
-                            timeout_seconds=self.settings.metaapi_sdk_sync_timeout_seconds,
-                            account_id=resolved_account_id,
-                            operation='rpc-wait-synchronized',
-                        )
-                        result = await self._sdk_call_with_timeout(
-                            connection.get_positions(),
+                else:
+                    connection = None
+                    try:
+                        account = await self._sdk_call_with_timeout(
+                            sdk.metatrader_account_api.get_account(resolved_account_id),
                             timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
                             account_id=resolved_account_id,
-                            operation='get-positions',
+                            operation='get-account',
                         )
-                        self._close_sdk_circuit(resolved_account_id, resolved_region)
-                        return {'degraded': False, 'positions': result, 'provider': 'sdk'}
-                    self._open_sdk_circuit(
-                        resolved_account_id,
-                        resolved_region,
-                        sdk_skip_reason,
-                        operation='positions',
-                    )
-                    logger.info('metaapi sdk positions skipped account_id=%s reason=%s', resolved_account_id, sdk_skip_reason)
-                except Exception as exc:  # pragma: no cover
-                    self._open_sdk_circuit(
-                        resolved_account_id,
-                        resolved_region,
-                        str(exc),
-                        operation='positions',
-                    )
-                    logger.warning('metaapi sdk positions failed, trying REST fallback: %s', exc)
-                finally:
-                    await self._close_connection(connection)
+                        sdk_skip_reason = self._account_rpc_unavailable_reason(account)
+                        if sdk_skip_reason is None:
+                            connection = account.get_rpc_connection()
+                            await self._sdk_call_with_timeout(
+                                connection.connect(),
+                                timeout_seconds=self.settings.metaapi_sdk_connect_timeout_seconds,
+                                account_id=resolved_account_id,
+                                operation='rpc-connect',
+                            )
+                            await self._sdk_call_with_timeout(
+                                connection.wait_synchronized(),
+                                timeout_seconds=self.settings.metaapi_sdk_sync_timeout_seconds,
+                                account_id=resolved_account_id,
+                                operation='rpc-wait-synchronized',
+                            )
+                            result = await self._sdk_call_with_timeout(
+                                connection.get_positions(),
+                                timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
+                                account_id=resolved_account_id,
+                                operation='get-positions',
+                            )
+                            self._close_sdk_circuit(resolved_account_id, resolved_region)
+                            resolved = {'degraded': False, 'positions': result, 'provider': 'sdk'}
+                            if cache_ttl > 0:
+                                await self._cache_set_json(positions_cache_key, resolved, cache_ttl)
+                            return resolved
+                        self._open_sdk_circuit(
+                            resolved_account_id,
+                            resolved_region,
+                            sdk_skip_reason,
+                            operation='positions',
+                        )
+                        logger.info('metaapi sdk positions skipped account_id=%s reason=%s', resolved_account_id, sdk_skip_reason)
+                    except Exception as exc:  # pragma: no cover
+                        self._open_sdk_circuit(
+                            resolved_account_id,
+                            resolved_region,
+                            str(exc),
+                            operation='positions',
+                        )
+                        logger.warning('metaapi sdk positions failed, trying REST fallback: %s', exc)
+                    finally:
+                        await self._close_connection(connection)
 
-        result = await self._rest_get(
-            resolved_account_id,
-            [
-                f'/users/current/accounts/{resolved_account_id}/positions',
-                f'/users/current/accounts/{resolved_account_id}/open-positions',
-            ],
-        )
-        if result.get('degraded'):
-            return {
-                'degraded': True,
-                'positions': [],
-                'reason': sdk_skip_reason or result.get('reason', 'REST fallback failed'),
-                'errors': result.get('errors', []),
-            }
+            result = await self._rest_get(
+                resolved_account_id,
+                [
+                    f'/users/current/accounts/{resolved_account_id}/positions',
+                    f'/users/current/accounts/{resolved_account_id}/open-positions',
+                ],
+            )
+            if result.get('degraded'):
+                return {
+                    'degraded': True,
+                    'positions': [],
+                    'reason': sdk_skip_reason or result.get('reason', 'REST fallback failed'),
+                    'errors': result.get('errors', []),
+                }
 
-        payload = result.get('payload', [])
-        if isinstance(payload, dict):
-            payload = payload.get('positions', payload)
-        return {'degraded': False, 'positions': payload if isinstance(payload, list) else [], 'provider': 'rest', 'endpoint': result.get('endpoint')}
+            payload = result.get('payload', [])
+            if isinstance(payload, dict):
+                payload = payload.get('positions', payload)
+            resolved = {'degraded': False, 'positions': payload if isinstance(payload, list) else [], 'provider': 'rest', 'endpoint': result.get('endpoint')}
+            if cache_ttl > 0:
+                await self._cache_set_json(positions_cache_key, resolved, cache_ttl)
+            return resolved
+        finally:
+            await self._cache_release_lock(positions_cache_key, cache_lock_token)
 
     async def get_open_orders(self, account_id: str | None = None, region: str | None = None) -> dict[str, Any]:
         resolved_account_id = self._resolve_account_id(account_id)
@@ -1048,102 +1097,125 @@ class MetaApiClient:
             return {'degraded': True, 'open_orders': [], 'reason': 'MetaApi account id not configured'}
 
         resolved_region = (region or self.settings.metaapi_region or '').strip().lower() or 'default'
-        sdk = self._get_sdk(region)
-        sdk_skip_reason: str | None = None
-        if sdk:
-            circuit_remaining = self._sdk_circuit_remaining_seconds(resolved_account_id, resolved_region)
-            if circuit_remaining > 0:
-                sdk_skip_reason = (
-                    f'MetaApi SDK circuit open for {circuit_remaining:.1f}s '
-                    '(recent websocket instability, using REST fallback).'
-                )
-            else:
-                connection = None
-                try:
-                    account = await self._sdk_call_with_timeout(
-                        sdk.metatrader_account_api.get_account(resolved_account_id),
-                        timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
-                        account_id=resolved_account_id,
-                        operation='get-account',
+        cache_ttl = self._runtime_cache_ttl('open_orders')
+        orders_cache_key = self._cache_key('open-orders', resolved_account_id, resolved_region)
+        if cache_ttl > 0:
+            cached = await self._cache_get_json(orders_cache_key, resource='open_orders')
+            if cached is not None:
+                return cached
+            cache_lock_token = await self._cache_acquire_lock(orders_cache_key, self.settings.metaapi_cache_lock_ttl_seconds)
+            if cache_lock_token is None:
+                waited = await self._cache_wait_for_json(orders_cache_key, self.settings.metaapi_cache_wait_timeout_seconds)
+                if waited is not None:
+                    return waited
+        else:
+            cache_lock_token = None
+
+        try:
+            sdk = self._get_sdk(region)
+            sdk_skip_reason: str | None = None
+            if sdk:
+                circuit_remaining = self._sdk_circuit_remaining_seconds(resolved_account_id, resolved_region)
+                if circuit_remaining > 0:
+                    sdk_skip_reason = (
+                        f'MetaApi SDK circuit open for {circuit_remaining:.1f}s '
+                        '(recent websocket instability, using REST fallback).'
                     )
-                    sdk_skip_reason = self._account_rpc_unavailable_reason(account)
-                    if sdk_skip_reason is None:
-                        connection = account.get_rpc_connection()
-                        await self._sdk_call_with_timeout(
-                            connection.connect(),
-                            timeout_seconds=self.settings.metaapi_sdk_connect_timeout_seconds,
-                            account_id=resolved_account_id,
-                            operation='rpc-connect',
-                        )
-                        await self._sdk_call_with_timeout(
-                            connection.wait_synchronized(),
-                            timeout_seconds=self.settings.metaapi_sdk_sync_timeout_seconds,
-                            account_id=resolved_account_id,
-                            operation='rpc-wait-synchronized',
-                        )
-                        result = await self._sdk_call_with_timeout(
-                            connection.get_orders(),
+                else:
+                    connection = None
+                    try:
+                        account = await self._sdk_call_with_timeout(
+                            sdk.metatrader_account_api.get_account(resolved_account_id),
                             timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
                             account_id=resolved_account_id,
-                            operation='get-open-orders',
+                            operation='get-account',
                         )
-                        self._close_sdk_circuit(resolved_account_id, resolved_region)
-                        return {'degraded': False, 'open_orders': result, 'provider': 'sdk'}
-                    self._open_sdk_circuit(
-                        resolved_account_id,
-                        resolved_region,
-                        sdk_skip_reason,
-                        operation='open_orders',
-                    )
-                    logger.info('metaapi sdk open orders skipped account_id=%s reason=%s', resolved_account_id, sdk_skip_reason)
-                except Exception as exc:  # pragma: no cover
-                    self._open_sdk_circuit(
-                        resolved_account_id,
-                        resolved_region,
-                        str(exc),
-                        operation='open_orders',
-                    )
-                    logger.warning('metaapi sdk open orders failed, trying REST fallback: %s', exc)
-                finally:
-                    await self._close_connection(connection)
+                        sdk_skip_reason = self._account_rpc_unavailable_reason(account)
+                        if sdk_skip_reason is None:
+                            connection = account.get_rpc_connection()
+                            await self._sdk_call_with_timeout(
+                                connection.connect(),
+                                timeout_seconds=self.settings.metaapi_sdk_connect_timeout_seconds,
+                                account_id=resolved_account_id,
+                                operation='rpc-connect',
+                            )
+                            await self._sdk_call_with_timeout(
+                                connection.wait_synchronized(),
+                                timeout_seconds=self.settings.metaapi_sdk_sync_timeout_seconds,
+                                account_id=resolved_account_id,
+                                operation='rpc-wait-synchronized',
+                            )
+                            result = await self._sdk_call_with_timeout(
+                                connection.get_orders(),
+                                timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
+                                account_id=resolved_account_id,
+                                operation='get-open-orders',
+                            )
+                            self._close_sdk_circuit(resolved_account_id, resolved_region)
+                            resolved = {'degraded': False, 'open_orders': result, 'provider': 'sdk'}
+                            if cache_ttl > 0:
+                                await self._cache_set_json(orders_cache_key, resolved, cache_ttl)
+                            return resolved
+                        self._open_sdk_circuit(
+                            resolved_account_id,
+                            resolved_region,
+                            sdk_skip_reason,
+                            operation='open_orders',
+                        )
+                        logger.info('metaapi sdk open orders skipped account_id=%s reason=%s', resolved_account_id, sdk_skip_reason)
+                    except Exception as exc:  # pragma: no cover
+                        self._open_sdk_circuit(
+                            resolved_account_id,
+                            resolved_region,
+                            str(exc),
+                            operation='open_orders',
+                        )
+                        logger.warning('metaapi sdk open orders failed, trying REST fallback: %s', exc)
+                    finally:
+                        await self._close_connection(connection)
 
-        result = await self._rest_get(
-            resolved_account_id,
-            [
-                f'/users/current/accounts/{resolved_account_id}/orders',
-                f'/users/current/accounts/{resolved_account_id}/open-orders',
-                f'/users/current/accounts/{resolved_account_id}/openOrders',
-                f'/users/current/accounts/{resolved_account_id}/pending-orders',
-                f'/users/current/accounts/{resolved_account_id}/pendingOrders',
-            ],
-        )
-        if result.get('degraded'):
-            return {
-                'degraded': True,
-                'open_orders': [],
-                'reason': sdk_skip_reason or result.get('reason', 'REST fallback failed'),
-                'errors': result.get('errors', []),
+            result = await self._rest_get(
+                resolved_account_id,
+                [
+                    f'/users/current/accounts/{resolved_account_id}/orders',
+                    f'/users/current/accounts/{resolved_account_id}/open-orders',
+                    f'/users/current/accounts/{resolved_account_id}/openOrders',
+                    f'/users/current/accounts/{resolved_account_id}/pending-orders',
+                    f'/users/current/accounts/{resolved_account_id}/pendingOrders',
+                ],
+            )
+            if result.get('degraded'):
+                return {
+                    'degraded': True,
+                    'open_orders': [],
+                    'reason': sdk_skip_reason or result.get('reason', 'REST fallback failed'),
+                    'errors': result.get('errors', []),
+                }
+
+            payload = result.get('payload', [])
+            if isinstance(payload, dict):
+                if isinstance(payload.get('orders'), list):
+                    payload = payload.get('orders', [])
+                elif isinstance(payload.get('openOrders'), list):
+                    payload = payload.get('openOrders', [])
+                elif isinstance(payload.get('pendingOrders'), list):
+                    payload = payload.get('pendingOrders', [])
+                elif isinstance(payload.get('items'), list):
+                    payload = payload.get('items', [])
+                else:
+                    payload = []
+
+            resolved = {
+                'degraded': False,
+                'open_orders': payload if isinstance(payload, list) else [],
+                'provider': 'rest',
+                'endpoint': result.get('endpoint'),
             }
-
-        payload = result.get('payload', [])
-        if isinstance(payload, dict):
-            if isinstance(payload.get('orders'), list):
-                payload = payload.get('orders', [])
-            elif isinstance(payload.get('openOrders'), list):
-                payload = payload.get('openOrders', [])
-            elif isinstance(payload.get('pendingOrders'), list):
-                payload = payload.get('pendingOrders', [])
-            elif isinstance(payload.get('items'), list):
-                payload = payload.get('items', [])
-            else:
-                payload = []
-
-        return {
-            'degraded': False,
-            'open_orders': payload if isinstance(payload, list) else [],
-            'provider': 'rest',
-            'endpoint': result.get('endpoint'),
-        }
+            if cache_ttl > 0:
+                await self._cache_set_json(orders_cache_key, resolved, cache_ttl)
+            return resolved
+        finally:
+            await self._cache_release_lock(orders_cache_key, cache_lock_token)
 
     async def get_deals(
         self,
@@ -1165,6 +1237,41 @@ class MetaApiClient:
         safe_limit = min(max(int(limit or 1), 1), 1000)
 
         resolved_region = (region or self.settings.metaapi_region or '').strip().lower() or 'default'
+        cache_ttl = self._runtime_cache_ttl('deals')
+        deals_cache_key = self._cache_key('deals', resolved_account_id, resolved_region, days, safe_offset, safe_limit)
+        if cache_ttl > 0:
+            cached = await self._cache_get_json(deals_cache_key, resource='deals')
+            if cached is not None:
+                return cached
+            cache_lock_token = await self._cache_acquire_lock(deals_cache_key, self.settings.metaapi_cache_lock_ttl_seconds)
+            if cache_lock_token is None:
+                waited = await self._cache_wait_for_json(deals_cache_key, self.settings.metaapi_cache_wait_timeout_seconds)
+                if waited is not None:
+                    return waited
+        else:
+            cache_lock_token = None
+
+        try:
+            return await self._fetch_deals_uncached(
+                resolved_account_id, resolved_region, region, start, end, safe_offset, safe_limit,
+                deals_cache_key, cache_ttl, cache_lock_token,
+            )
+        finally:
+            await self._cache_release_lock(deals_cache_key, cache_lock_token)
+
+    async def _fetch_deals_uncached(
+        self,
+        resolved_account_id: str,
+        resolved_region: str,
+        region: str | None,
+        start: datetime,
+        end: datetime,
+        safe_offset: int,
+        safe_limit: int,
+        cache_key: str,
+        cache_ttl: int,
+        cache_lock_token: str | None,
+    ) -> dict[str, Any]:
         sdk = self._get_sdk(region)
         sdk_skip_reason: str | None = None
         if sdk:
@@ -1234,7 +1341,7 @@ class MetaApiClient:
                             ),
                         )
                         self._close_sdk_circuit(resolved_account_id, resolved_region)
-                        return {
+                        resolved = {
                             'degraded': False,
                             'deals': deals_payload,
                             'synchronizing': bool(payload.get('synchronizing', False)) if isinstance(payload, dict) else False,
@@ -1245,6 +1352,9 @@ class MetaApiClient:
                             'offset': safe_offset,
                             'limit': safe_limit,
                         }
+                        if cache_ttl > 0:
+                            await self._cache_set_json(cache_key, resolved, cache_ttl)
+                        return resolved
                     self._open_sdk_circuit(
                         resolved_account_id,
                         resolved_region,
@@ -1307,7 +1417,7 @@ class MetaApiClient:
             ),
         )
 
-        return {
+        resolved = {
             'degraded': False,
             'deals': normalized_deals,
             'provider': 'rest',
@@ -1318,6 +1428,9 @@ class MetaApiClient:
             'offset': safe_offset,
             'limit': safe_limit,
         }
+        if cache_ttl > 0:
+            await self._cache_set_json(cache_key, resolved, cache_ttl)
+        return resolved
 
     async def get_history_orders(
         self,
@@ -1339,161 +1452,184 @@ class MetaApiClient:
         safe_limit = min(max(int(limit or 1), 1), 1000)
 
         resolved_region = (region or self.settings.metaapi_region or '').strip().lower() or 'default'
-        sdk = self._get_sdk(region)
-        sdk_skip_reason: str | None = None
-        if sdk:
-            circuit_remaining = self._sdk_circuit_remaining_seconds(resolved_account_id, resolved_region)
-            if circuit_remaining > 0:
-                sdk_skip_reason = (
-                    f'MetaApi SDK circuit open for {circuit_remaining:.1f}s '
-                    '(recent websocket instability, using REST fallback).'
-                )
-            else:
-                connection = None
-                try:
-                    account = await self._sdk_call_with_timeout(
-                        sdk.metatrader_account_api.get_account(resolved_account_id),
-                        timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
-                        account_id=resolved_account_id,
-                        operation='get-account',
-                    )
-                    if account.state != 'DEPLOYED':
-                        await self._sdk_call_with_timeout(
-                            account.deploy(),
-                            timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
-                            account_id=resolved_account_id,
-                            operation='deploy-account',
-                        )
-                        await self._sdk_call_with_timeout(
-                            account.wait_connected(),
-                            timeout_seconds=self.settings.metaapi_sdk_connect_timeout_seconds,
-                            account_id=resolved_account_id,
-                            operation='wait-account-connected',
-                        )
-                    sdk_skip_reason = self._account_rpc_unavailable_reason(account)
-                    if sdk_skip_reason is None:
-                        connection = account.get_rpc_connection()
-                        await self._sdk_call_with_timeout(
-                            connection.connect(),
-                            timeout_seconds=self.settings.metaapi_sdk_connect_timeout_seconds,
-                            account_id=resolved_account_id,
-                            operation='rpc-connect',
-                        )
-                        await self._sdk_call_with_timeout(
-                            connection.wait_synchronized(),
-                            timeout_seconds=self.settings.metaapi_sdk_sync_timeout_seconds,
-                            account_id=resolved_account_id,
-                            operation='rpc-wait-synchronized',
-                        )
-                        payload = await self._sdk_call_with_timeout(
-                            connection.get_history_orders_by_time_range(start, end, safe_offset, safe_limit),
-                            timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
-                            account_id=resolved_account_id,
-                            operation='get-history-orders-by-time-range',
-                        )
-                        history_orders_payload = payload.get('historyOrders', []) if isinstance(payload, dict) else []
-                        if not isinstance(history_orders_payload, list):
-                            history_orders_payload = []
-                        history_orders_payload = self._filter_items_by_time_range(
-                            history_orders_payload,
-                            start,
-                            end,
-                            candidate_keys=(
-                                'doneTime',
-                                'time',
-                                'brokerTime',
-                                'updateTime',
-                                'openTime',
-                                'closeTime',
-                            ),
-                        )
-                        self._close_sdk_circuit(resolved_account_id, resolved_region)
-                        return {
-                            'degraded': False,
-                            'history_orders': history_orders_payload,
-                            'synchronizing': bool(payload.get('synchronizing', False)) if isinstance(payload, dict) else False,
-                            'provider': 'sdk',
-                            'account_id': resolved_account_id,
-                            'start_time': self._iso_utc(start),
-                            'end_time': self._iso_utc(end),
-                            'offset': safe_offset,
-                            'limit': safe_limit,
-                        }
-                    self._open_sdk_circuit(
-                        resolved_account_id,
-                        resolved_region,
-                        sdk_skip_reason,
-                        operation='history_orders',
-                    )
-                    logger.info('metaapi sdk history orders skipped account_id=%s reason=%s', resolved_account_id, sdk_skip_reason)
-                except Exception as exc:  # pragma: no cover
-                    self._open_sdk_circuit(
-                        resolved_account_id,
-                        resolved_region,
-                        str(exc),
-                        operation='history_orders',
-                    )
-                    logger.warning('metaapi sdk history orders failed, trying REST fallback: %s', exc)
-                finally:
-                    await self._close_connection(connection)
+        cache_ttl = self._runtime_cache_ttl('history_orders')
+        history_cache_key = self._cache_key('history-orders', resolved_account_id, resolved_region, days, safe_offset, safe_limit)
+        if cache_ttl > 0:
+            cached = await self._cache_get_json(history_cache_key, resource='history_orders')
+            if cached is not None:
+                return cached
+            cache_lock_token = await self._cache_acquire_lock(history_cache_key, self.settings.metaapi_cache_lock_ttl_seconds)
+            if cache_lock_token is None:
+                waited = await self._cache_wait_for_json(history_cache_key, self.settings.metaapi_cache_wait_timeout_seconds)
+                if waited is not None:
+                    return waited
+        else:
+            cache_lock_token = None
 
-        result = await self._rest_get_history(
-            resolved_account_id,
-            kind='history-orders',
-            start_time=start,
-            end_time=end,
-            offset=safe_offset,
-            limit=safe_limit,
-        )
-        if result.get('degraded'):
-            return {
-                'degraded': True,
-                'history_orders': [],
-                'reason': sdk_skip_reason or result.get('reason', 'REST fallback failed'),
-                'errors': result.get('errors', []),
+        try:
+            sdk = self._get_sdk(region)
+            sdk_skip_reason: str | None = None
+            if sdk:
+                circuit_remaining = self._sdk_circuit_remaining_seconds(resolved_account_id, resolved_region)
+                if circuit_remaining > 0:
+                    sdk_skip_reason = (
+                        f'MetaApi SDK circuit open for {circuit_remaining:.1f}s '
+                        '(recent websocket instability, using REST fallback).'
+                    )
+                else:
+                    connection = None
+                    try:
+                        account = await self._sdk_call_with_timeout(
+                            sdk.metatrader_account_api.get_account(resolved_account_id),
+                            timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
+                            account_id=resolved_account_id,
+                            operation='get-account',
+                        )
+                        if account.state != 'DEPLOYED':
+                            await self._sdk_call_with_timeout(
+                                account.deploy(),
+                                timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
+                                account_id=resolved_account_id,
+                                operation='deploy-account',
+                            )
+                            await self._sdk_call_with_timeout(
+                                account.wait_connected(),
+                                timeout_seconds=self.settings.metaapi_sdk_connect_timeout_seconds,
+                                account_id=resolved_account_id,
+                                operation='wait-account-connected',
+                            )
+                        sdk_skip_reason = self._account_rpc_unavailable_reason(account)
+                        if sdk_skip_reason is None:
+                            connection = account.get_rpc_connection()
+                            await self._sdk_call_with_timeout(
+                                connection.connect(),
+                                timeout_seconds=self.settings.metaapi_sdk_connect_timeout_seconds,
+                                account_id=resolved_account_id,
+                                operation='rpc-connect',
+                            )
+                            await self._sdk_call_with_timeout(
+                                connection.wait_synchronized(),
+                                timeout_seconds=self.settings.metaapi_sdk_sync_timeout_seconds,
+                                account_id=resolved_account_id,
+                                operation='rpc-wait-synchronized',
+                            )
+                            payload = await self._sdk_call_with_timeout(
+                                connection.get_history_orders_by_time_range(start, end, safe_offset, safe_limit),
+                                timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
+                                account_id=resolved_account_id,
+                                operation='get-history-orders-by-time-range',
+                            )
+                            history_orders_payload = payload.get('historyOrders', []) if isinstance(payload, dict) else []
+                            if not isinstance(history_orders_payload, list):
+                                history_orders_payload = []
+                            history_orders_payload = self._filter_items_by_time_range(
+                                history_orders_payload,
+                                start,
+                                end,
+                                candidate_keys=(
+                                    'doneTime',
+                                    'time',
+                                    'brokerTime',
+                                    'updateTime',
+                                    'openTime',
+                                    'closeTime',
+                                ),
+                            )
+                            self._close_sdk_circuit(resolved_account_id, resolved_region)
+                            resolved = {
+                                'degraded': False,
+                                'history_orders': history_orders_payload,
+                                'synchronizing': bool(payload.get('synchronizing', False)) if isinstance(payload, dict) else False,
+                                'provider': 'sdk',
+                                'account_id': resolved_account_id,
+                                'start_time': self._iso_utc(start),
+                                'end_time': self._iso_utc(end),
+                                'offset': safe_offset,
+                                'limit': safe_limit,
+                            }
+                            if cache_ttl > 0:
+                                await self._cache_set_json(history_cache_key, resolved, cache_ttl)
+                            return resolved
+                        self._open_sdk_circuit(
+                            resolved_account_id,
+                            resolved_region,
+                            sdk_skip_reason,
+                            operation='history_orders',
+                        )
+                        logger.info('metaapi sdk history orders skipped account_id=%s reason=%s', resolved_account_id, sdk_skip_reason)
+                    except Exception as exc:  # pragma: no cover
+                        self._open_sdk_circuit(
+                            resolved_account_id,
+                            resolved_region,
+                            str(exc),
+                            operation='history_orders',
+                        )
+                        logger.warning('metaapi sdk history orders failed, trying REST fallback: %s', exc)
+                    finally:
+                        await self._close_connection(connection)
+
+            result = await self._rest_get_history(
+                resolved_account_id,
+                kind='history-orders',
+                start_time=start,
+                end_time=end,
+                offset=safe_offset,
+                limit=safe_limit,
+            )
+            if result.get('degraded'):
+                return {
+                    'degraded': True,
+                    'history_orders': [],
+                    'reason': sdk_skip_reason or result.get('reason', 'REST fallback failed'),
+                    'errors': result.get('errors', []),
+                    'account_id': resolved_account_id,
+                    'start_time': self._iso_utc(start),
+                    'end_time': self._iso_utc(end),
+                    'offset': safe_offset,
+                    'limit': safe_limit,
+                }
+
+            payload = result.get('payload', [])
+            if isinstance(payload, dict):
+                if isinstance(payload.get('historyOrders'), list):
+                    payload = payload.get('historyOrders', [])
+                elif isinstance(payload.get('history_orders'), list):
+                    payload = payload.get('history_orders', [])
+                elif isinstance(payload.get('items'), list):
+                    payload = payload.get('items', [])
+                else:
+                    payload = []
+
+            normalized_orders = self._filter_items_by_time_range(
+                payload if isinstance(payload, list) else [],
+                start,
+                end,
+                candidate_keys=(
+                    'doneTime',
+                    'time',
+                    'brokerTime',
+                    'updateTime',
+                    'openTime',
+                    'closeTime',
+                ),
+            )
+
+            resolved = {
+                'degraded': False,
+                'history_orders': normalized_orders,
+                'provider': 'rest',
+                'endpoint': result.get('endpoint'),
                 'account_id': resolved_account_id,
                 'start_time': self._iso_utc(start),
                 'end_time': self._iso_utc(end),
                 'offset': safe_offset,
                 'limit': safe_limit,
             }
-
-        payload = result.get('payload', [])
-        if isinstance(payload, dict):
-            if isinstance(payload.get('historyOrders'), list):
-                payload = payload.get('historyOrders', [])
-            elif isinstance(payload.get('history_orders'), list):
-                payload = payload.get('history_orders', [])
-            elif isinstance(payload.get('items'), list):
-                payload = payload.get('items', [])
-            else:
-                payload = []
-
-        normalized_orders = self._filter_items_by_time_range(
-            payload if isinstance(payload, list) else [],
-            start,
-            end,
-            candidate_keys=(
-                'doneTime',
-                'time',
-                'brokerTime',
-                'updateTime',
-                'openTime',
-                'closeTime',
-            ),
-        )
-
-        return {
-            'degraded': False,
-            'history_orders': normalized_orders,
-            'provider': 'rest',
-            'endpoint': result.get('endpoint'),
-            'account_id': resolved_account_id,
-            'start_time': self._iso_utc(start),
-            'end_time': self._iso_utc(end),
-            'offset': safe_offset,
-            'limit': safe_limit,
-        }
+            if cache_ttl > 0:
+                await self._cache_set_json(history_cache_key, resolved, cache_ttl)
+            return resolved
+        finally:
+            await self._cache_release_lock(history_cache_key, cache_lock_token)
 
     async def get_market_candles(
         self,

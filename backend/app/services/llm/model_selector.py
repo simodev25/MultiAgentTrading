@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from typing import Any
 from weakref import WeakKeyDictionary
@@ -29,7 +30,7 @@ DETERMINISTIC_ONLY_AGENTS: set[str] = set()
 MAX_AGENT_SKILLS_PER_AGENT = 12
 MAX_AGENT_SKILL_LENGTH = 500
 SUPPORTED_DECISION_MODES = {'conservative', 'balanced', 'permissive'}
-DEFAULT_DECISION_MODE = 'conservative'
+DEFAULT_DECISION_MODE = 'balanced'
 DEFAULT_MEMORY_CONTEXT_ENABLED = False
 LEGACY_AGENT_ALIASES: dict[str, str] = {
     'macro-analyst': 'market-context-analyst',
@@ -38,100 +39,126 @@ LEGACY_AGENT_ALIASES: dict[str, str] = {
 AGENT_TOOL_DEFINITIONS: dict[str, dict[str, Any]] = {
     'news_search': {
         'label': 'News Search',
-        'description': "Collecte les news pertinentes déjà disponibles pour l'instrument.",
+        'description': "Normalise, déduplique et score un lot de news par pertinence symbole via MCP.",
         'enabled_by_default': True,
-        'reference_origin': 'tradingAgents.get_news',
+        'reference_origin': 'mcp_trading_server.news_search',
     },
     'macro_calendar_or_event_feed': {
         'label': 'Macro Event Feed',
-        'description': 'Expose les événements macro récents déjà collectés.',
+        'description': "Filtre et score les événements macro-économiques par impact via MCP.",
         'enabled_by_default': True,
-        'reference_origin': 'tradingAgents.get_global_news',
+        'reference_origin': 'mcp_trading_server.macro_event_feed',
     },
     'symbol_relevance_filter': {
         'label': 'Symbol Relevance Filter',
-        'description': "Filtre les évidences selon leur pertinence pour l'instrument.",
+        'description': "Filtre news et macro par seuil de pertinence pour un symbole donné via MCP.",
         'enabled_by_default': True,
-        'reference_origin': 'adapted relevance scoring patterns',
+        'reference_origin': 'mcp_trading_server.symbol_relevance_filter',
     },
     'sentiment_or_event_impact_parser': {
         'label': 'Sentiment Impact Parser',
-        'description': "Parse les biais directionnels et l'impact probable des news.",
+        'description': "Parse le sentiment directionnel depuis les headlines avec dictionnaires par classe d'actif via MCP.",
         'enabled_by_default': True,
-        'reference_origin': 'tradingAgents news parsing discipline',
+        'reference_origin': 'mcp_trading_server.sentiment_parser',
     },
     'market_snapshot': {
         'label': 'Market Snapshot',
-        'description': 'Expose le snapshot marché (prix, trend, variation, volatilité).',
+        'description': 'Snapshot marché normalisé avec métriques dérivées (spread ratio, candle ratios) via MCP.',
         'enabled_by_default': True,
-        'reference_origin': 'tradingAgents.get_stock_data',
+        'reference_origin': 'mcp_trading_server.market_snapshot',
     },
     'indicator_bundle': {
         'label': 'Indicator Bundle',
-        'description': 'Expose RSI, MACD, EMA et métriques techniques associées.',
+        'description': 'Calcul réel RSI, EMA, MACD, ATR depuis données OHLC — pas de passthrough — via MCP.',
         'enabled_by_default': True,
-        'reference_origin': 'tradingAgents.get_indicators',
+        'reference_origin': 'mcp_trading_server.indicator_bundle',
+    },
+    'divergence_detector': {
+        'label': 'Divergence Detector',
+        'description': 'Détection divergences RSI-prix haussières/baissières sur N barres via MCP.',
+        'enabled_by_default': True,
+        'reference_origin': 'mcp_trading_server.divergence_detector',
     },
     'support_resistance_or_structure_detector': {
-        'label': 'Structure Detector',
-        'description': 'Déduit des bornes structurelles et des conditions invalidantes.',
+        'label': 'Support/Resistance Detector',
+        'description': 'Identification niveaux S/R par clustering de pivots avec comptage de touches via MCP.',
         'enabled_by_default': True,
-        'reference_origin': 'adapted technical structure heuristics',
+        'reference_origin': 'mcp_trading_server.support_resistance_detector',
+    },
+    'pattern_detector': {
+        'label': 'Pattern Detector',
+        'description': 'Détection patterns chandeliers : doji, hammer, engulfing, pin bar, shooting star via MCP.',
+        'enabled_by_default': True,
+        'reference_origin': 'mcp_trading_server.pattern_detector',
     },
     'multi_timeframe_context': {
         'label': 'Multi Timeframe Context',
-        'description': "Expose le contexte multi-timeframe disponible pour l'instrument.",
+        'description': "Synthèse alignement multi-TF avec score de confluence et direction dominante via MCP.",
         'enabled_by_default': True,
-        'reference_origin': 'tradingAgents multi-horizon discipline',
+        'reference_origin': 'mcp_trading_server.multi_timeframe_context',
     },
     'market_regime_context': {
-        'label': 'Market Regime Context',
-        'description': 'Décrit le régime de marché (trending/ranging/volatile/calm).',
+        'label': 'Market Regime Detector',
+        'description': 'Classification régime marché (trending/ranging/volatile/calm) par slope + ATR via MCP.',
         'enabled_by_default': True,
-        'reference_origin': 'tradingAgents market analyst regime style',
+        'reference_origin': 'mcp_trading_server.market_regime_detector',
     },
     'session_context': {
         'label': 'Session Context',
-        'description': 'Indique la session de marché et sa liquidité typique.',
+        'description': 'Sessions marché actives, overlaps et conditions de liquidité en temps réel via MCP.',
         'enabled_by_default': True,
-        'reference_origin': 'adapted context-injection pattern',
+        'reference_origin': 'mcp_trading_server.session_context',
     },
     'correlation_context': {
-        'label': 'Correlation Context',
-        'description': "Résume les corrélations de contexte plausibles pour l'actif.",
+        'label': 'Correlation Analyzer',
+        'description': "Corrélation Pearson rolling entre deux séries de prix avec analyse lead/lag via MCP.",
         'enabled_by_default': True,
-        'reference_origin': 'adapted macro-context pattern',
+        'reference_origin': 'mcp_trading_server.correlation_analyzer',
     },
     'volatility_context': {
-        'label': 'Volatility Context',
-        'description': 'Qualifie le niveau de volatilité et sa compatibilité setup.',
+        'label': 'Volatility Analyzer',
+        'description': 'ATR, volatilité historique, Bollinger bandwidth, percentile de volatilité via MCP.',
         'enabled_by_default': True,
-        'reference_origin': 'tradingAgents market context discipline',
+        'reference_origin': 'mcp_trading_server.volatility_analyzer',
     },
     'evidence_query': {
         'label': 'Evidence Query',
-        'description': 'Interroge les sorties agents pour extraire les signaux exploitables.',
+        'description': 'Agrégation et scoring des évidences agents avec consensus directionnel via MCP.',
         'enabled_by_default': True,
-        'reference_origin': 'tradingAgents debate evidence gathering',
+        'reference_origin': 'mcp_trading_server.evidence_query',
     },
     'thesis_support_extractor': {
         'label': 'Thesis Support Extractor',
-        'description': 'Sépare arguments de support, contre-arguments et limites.',
+        'description': 'Normalisation et pondération arguments de thèse pour agents de débat via MCP.',
         'enabled_by_default': True,
-        'reference_origin': 'tradingAgents bull/bear researcher pattern',
+        'reference_origin': 'mcp_trading_server.thesis_support_extractor',
     },
     'scenario_validation': {
         'label': 'Scenario Validation',
-        'description': "Construit les conditions de validation et d'invalidation de scénario.",
+        'description': "Validation scénario trading avec géométrie SL/TP et ratio risk/reward via MCP.",
         'enabled_by_default': True,
-        'reference_origin': 'tradingAgents debate/risk validation pattern',
+        'reference_origin': 'mcp_trading_server.scenario_validation',
+    },
+    'position_size_calculator': {
+        'label': 'Position Size Calculator',
+        'description': "Calcul taille position adapté par classe d'actif avec vérification marge via MCP.",
+        'enabled_by_default': True,
+        'reference_origin': 'mcp_trading_server.position_size_calculator',
+    },
+    'memory_query': {
+        'label': 'Memory Query',
+        'description': "Accès mémoire agentique : recherche, feedback, statistiques par agent via MCP.",
+        'enabled_by_default': True,
+        'reference_origin': 'mcp_trading_server.memory_query',
     },
 }
 DEFAULT_AGENT_ALLOWED_TOOLS: dict[str, tuple[str, ...]] = {
     'technical-analyst': (
         'market_snapshot',
         'indicator_bundle',
+        'divergence_detector',
         'support_resistance_or_structure_detector',
+        'pattern_detector',
         'multi_timeframe_context',
     ),
     'news-analyst': (
@@ -150,24 +177,32 @@ DEFAULT_AGENT_ALLOWED_TOOLS: dict[str, tuple[str, ...]] = {
         'evidence_query',
         'thesis_support_extractor',
         'scenario_validation',
+        'memory_query',
     ),
     'bearish-researcher': (
         'evidence_query',
         'thesis_support_extractor',
         'scenario_validation',
+        'memory_query',
     ),
     'trader-agent': (
         'evidence_query',
         'scenario_validation',
+        'position_size_calculator',
+        'memory_query',
     ),
     'risk-manager': (
         'scenario_validation',
+        'position_size_calculator',
     ),
     'execution-manager': (
         'scenario_validation',
+        'position_size_calculator',
     ),
     'schedule-planner-agent': (),
-    'order-guardian': (),
+    'order-guardian': (
+        'memory_query',
+    ),
     'agentic-runtime-planner': (),
 }
 
@@ -328,6 +363,7 @@ class AgentModelSelector:
 
     _cache_ttl_seconds = 5.0
     _settings_cache = WeakKeyDictionary()
+    _cache_lock = threading.Lock()
 
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -342,25 +378,26 @@ class AgentModelSelector:
             return {}
 
         now = time.monotonic()
-        cached = cls._settings_cache.get(db)
-        if cached and now - cached[0] <= cls._cache_ttl_seconds:
-            return cached[1]
+        with cls._cache_lock:
+            cached = cls._settings_cache.get(db)
+            if cached and now - cached[0] <= cls._cache_ttl_seconds:
+                return cached[1]
 
-        connector = (
-            db.query(ConnectorConfig)
-            .filter(ConnectorConfig.connector_name == 'ollama')
-            .first()
-        )
-        settings = connector.settings if connector is not None and isinstance(connector.settings, dict) else {}
-        cls._settings_cache[db] = (now, settings)
+            connector = (
+                db.query(ConnectorConfig)
+                .filter(ConnectorConfig.connector_name == 'ollama')
+                .first()
+            )
+            settings = connector.settings if connector is not None and isinstance(connector.settings, dict) else {}
+            cls._settings_cache[db] = (now, settings)
 
-        if len(cls._settings_cache) > 128:
-            fresh_cache = WeakKeyDictionary()
-            for cache_key, cache_value in cls._settings_cache.items():
-                if now - cache_value[0] <= cls._cache_ttl_seconds:
-                    fresh_cache[cache_key] = cache_value
-            cls._settings_cache = fresh_cache
-        return settings
+            if len(cls._settings_cache) > 128:
+                fresh_cache = WeakKeyDictionary()
+                for cache_key, cache_value in cls._settings_cache.items():
+                    if now - cache_value[0] <= cls._cache_ttl_seconds:
+                        fresh_cache[cache_key] = cache_value
+                cls._settings_cache = fresh_cache
+            return settings
 
     @classmethod
     def _load_ollama_settings(cls, db: Session | None) -> dict:
@@ -392,14 +429,8 @@ class AgentModelSelector:
             candidate_names = (normalized_agent_name, *_legacy_agent_aliases_for(normalized_agent_name))
             for candidate_name in candidate_names:
                 value = raw_enabled.get(candidate_name)
-                if isinstance(value, bool):
-                    return value
-                if isinstance(value, str):
-                    normalized = value.strip().lower()
-                    if normalized in {'1', 'true', 'yes', 'on'}:
-                        return True
-                    if normalized in {'0', 'false', 'no', 'off'}:
-                        return False
+                if value is not None:
+                    return _normalize_bool_setting(value, fallback=default_enabled)
         return default_enabled
 
     def resolve(self, db: Session | None, agent_name: str | None = None) -> str:
@@ -492,11 +523,6 @@ class AgentModelSelector:
             if bool(agent_tool_state.get(tool_id, default_enabled)):
                 enabled_tools.append(tool_id)
         return enabled_tools
-
-    def resolve_tool_catalog(self, db: Session | None, agent_name: str) -> list[dict[str, Any]]:
-        normalized_agent_name = normalize_agent_name(agent_name)
-        catalog = build_agent_tools_catalog(self._load_llm_settings(db).get('agent_tools'))
-        return list(catalog.get(normalized_agent_name, []))
 
     def resolve_decision_mode(self, db: Session | None) -> str:
         fallback = normalize_decision_mode(getattr(self.settings, 'decision_mode', DEFAULT_DECISION_MODE))

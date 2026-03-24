@@ -162,27 +162,31 @@ def test_agent_model_selector_resolves_decision_mode_with_fallback() -> None:
     Base.metadata.create_all(bind=engine)
 
     selector = AgentModelSelector()
-    selector.settings.decision_mode = 'conservative'
-    assert selector.resolve_decision_mode(None) == 'conservative'
+    previous = selector.settings.decision_mode
+    try:
+        selector.settings.decision_mode = 'conservative'
+        assert selector.resolve_decision_mode(None) == 'conservative'
 
-    with Session(engine) as db:
-        db.add(
-            ConnectorConfig(
-                connector_name='ollama',
-                enabled=True,
-                settings={'decision_mode': 'permissive'},
+        with Session(engine) as db:
+            db.add(
+                ConnectorConfig(
+                    connector_name='ollama',
+                    enabled=True,
+                    settings={'decision_mode': 'permissive'},
+                )
             )
-        )
-        db.commit()
+            db.commit()
 
-        assert selector.resolve_decision_mode(db) == 'permissive'
+            assert selector.resolve_decision_mode(db) == 'permissive'
 
-        row = db.query(ConnectorConfig).filter(ConnectorConfig.connector_name == 'ollama').first()
-        assert row is not None
-        row.settings = {'decision_mode': 'unknown-mode'}
-        db.commit()
-        AgentModelSelector.clear_cache()
-        assert selector.resolve_decision_mode(db) == 'conservative'
+            row = db.query(ConnectorConfig).filter(ConnectorConfig.connector_name == 'ollama').first()
+            assert row is not None
+            row.settings = {'decision_mode': 'unknown-mode'}
+            db.commit()
+            AgentModelSelector.clear_cache()
+            assert selector.resolve_decision_mode(db) == 'conservative'
+    finally:
+        selector.settings.decision_mode = previous
 
 
 def test_agent_model_selector_resolves_memory_context_enabled_with_fallback() -> None:

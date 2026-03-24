@@ -38,8 +38,6 @@ GENERIC_STRENGTH_KEYWORDS: dict[str, float] = {
     'rising': 1.0,
     'surge': 1.1,
     'surges': 1.1,
-    'surge': 1.1,
-    'surges': 1.1,
     'strengthen': 0.9,
     'strengthens': 0.9,
     'firm': 0.8,
@@ -55,12 +53,30 @@ GENERIC_STRENGTH_KEYWORDS: dict[str, float] = {
     'upgrades': 0.8,
     'breakout': 0.9,
     'all-time high': 1.0,
-    ' ATH ': 1.0,
+    'outperform': 0.85,
+    'outperforms': 0.85,
+    'momentum': 0.65,
+    'accumulation': 0.7,
+    'demand': 0.5,
+    'inflows': 0.7,
+    'recovery': 0.65,
+    'recovering': 0.7,
+    'appreciation': 0.75,
+    'support': 0.5,
+    'supported': 0.6,
+    'resilient': 0.65,
+    'optimism': 0.6,
+    'optimistic': 0.65,
+    'upbeat': 0.65,
+    'buoyant': 0.6,
+    'tailwind': 0.7,
+    'bid': 0.5,
 }
 
 GENERIC_WEAKNESS_KEYWORDS: dict[str, float] = {
     'selloff': 1.0,
     'sell-off': 1.0,
+    'selling': 0.75,
     'drop': 1.0,
     'drops': 1.0,
     'fall': 1.0,
@@ -72,6 +88,7 @@ GENERIC_WEAKNESS_KEYWORDS: dict[str, float] = {
     'losses': 0.75,
     'weaken': 0.9,
     'weakens': 0.9,
+    'weakness': 0.85,
     'soft': 0.7,
     'softer': 0.8,
     'weak': 0.9,
@@ -83,7 +100,23 @@ GENERIC_WEAKNESS_KEYWORDS: dict[str, float] = {
     'downgrades': 0.9,
     'breakdown': 0.9,
     'all-time low': 1.0,
-    ' ATL ': 1.0,
+    'crash': 1.1,
+    'dump': 0.9,
+    'liquidation': 0.85,
+    'liquidations': 0.85,
+    'correction': 0.7,
+    'outflows': 0.7,
+    'pressure': 0.6,
+    'pressured': 0.65,
+    'headwind': 0.7,
+    'headwinds': 0.7,
+    'decline': 0.8,
+    'declines': 0.8,
+    'declining': 0.8,
+    'depreciation': 0.75,
+    'slump': 0.9,
+    'fragile': 0.6,
+    'vulnerable': 0.6,
 }
 
 # FX-specific strength/weakness (central bank, monetary policy)
@@ -118,13 +151,23 @@ CRYPTO_CATALYST_KEYWORDS: dict[str, float] = {
     'spot etf': 0.95,
     'sec approve': 0.9,
     'regulation': -0.3,  # Context-dependent
+    'regulatory clarity': 0.7,
     'adoption': 0.8,
+    'institutional': 0.7,
+    'institutional buying': 0.9,
+    'institutional demand': 0.85,
     'listing': 0.7,
     'delisting': -0.7,
     'hack': -0.8,
     'exploit': -0.8,
+    'rug pull': -1.0,
+    'ban': -0.9,
+    'crackdown': -0.8,
+    'fraud': -0.8,
+    'investigation': -0.6,
     'upgrade': 0.6,
     'fork': 0.5,
+    'halving': 0.7,
     'airdrop': 0.4,
     'burn': 0.5,
     'unlock': -0.4,
@@ -132,6 +175,11 @@ CRYPTO_CATALYST_KEYWORDS: dict[str, float] = {
     'validator': 0.3,
     'on-chain': 0.2,
     'whale': -0.2,
+    'tvl': 0.3,
+    'defi': 0.2,
+    'network growth': 0.6,
+    'hash rate': 0.4,
+    'mining difficulty': 0.3,
 }
 
 # Equity/Index-specific
@@ -461,8 +509,8 @@ class InstrumentAwareNewsAnalyzer:
                 matches = list(re.finditer(pattern, text))
                 crypto_hits += len(matches)
                 for match in matches:
-                    window_start = max(match.start() - 48, 0)
-                    window_end = min(match.end() + 48, len(text))
+                    window_start = max(match.start() - 64, 0)
+                    window_end = min(match.end() + 64, len(text))
                     window = text[window_start:window_end]
                     crypto_score += _keyword_balance(window, GENERIC_STRENGTH_KEYWORDS, GENERIC_WEAKNESS_KEYWORDS)
                     crypto_score += _keyword_weight(window, CRYPTO_CATALYST_KEYWORDS)
@@ -476,12 +524,20 @@ class InstrumentAwareNewsAnalyzer:
             if pattern and re.search(pattern, text):
                 sector_hits += 1
 
+        # Global text fallback: when asset is mentioned (or high relevance) but window
+        # scoring didn't capture enough, use full-text sentiment as a fallback.
+        global_sentiment = _keyword_balance(text, GENERIC_STRENGTH_KEYWORDS, GENERIC_WEAKNESS_KEYWORDS)
+        if crypto_hits > 0 and abs(crypto_score) < 0.20 and abs(global_sentiment) >= 0.5:
+            crypto_score += global_sentiment * 0.6
+        elif crypto_hits == 0 and base_relevance >= 0.4 and abs(global_sentiment) >= 0.5:
+            crypto_score += global_sentiment * 0.4
+
         # Calculate effect
         support = min(max(base_relevance, crypto_hits * 0.18, sector_hits * 0.15), 1.0)
         combined_score = crypto_score + catalyst_score * 0.5
 
-        effect = _score_to_asset_effect(combined_score, threshold=0.25)
-        directional_effect = _score_to_directional_bias(combined_score, threshold=0.22)
+        effect = _score_to_asset_effect(combined_score, threshold=0.20)
+        directional_effect = _score_to_directional_bias(combined_score, threshold=0.18)
 
         # Detect regime context
         regime_info = _detect_market_regime(text)

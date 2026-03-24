@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.models.memory_entry import MemoryEntry
 from app.db.models.run import AnalysisRun
+from app.observability.metrics import memory_outcome_backfill_total, memory_search_total, memory_store_total
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +142,7 @@ class VectorMemoryService:
     @staticmethod
     def _normalize_decision_mode(value: Any) -> str:
         normalized = VectorMemoryService._normalize_text(value)
-        return normalized if normalized in {'conservative', 'balanced', 'permissive'} else 'conservative'
+        return normalized if normalized in {'conservative', 'balanced', 'permissive'} else 'balanced'
 
     @staticmethod
     def _bucket_rsi(rsi: Any) -> str:
@@ -616,7 +617,10 @@ class VectorMemoryService:
         summary: str,
         payload: dict[str, Any],
         run_id: int | None = None,
+        agent_id: str | None = None,
+        outcome_weight: float | None = None,
     ) -> MemoryEntry:
+        memory_store_total.labels(source_type=source_type, agent_id=str(agent_id or 'orchestrator')).inc()
         embedding = self._embed(f'{pair}|{timeframe}|{summary}')
         entry = MemoryEntry(
             pair=pair,
@@ -626,6 +630,8 @@ class VectorMemoryService:
             embedding=embedding,
             payload=payload,
             run_id=run_id,
+            agent_id=str(agent_id).strip() if agent_id else None,
+            outcome_weight=self._clamp(outcome_weight, -1.0, 1.0) if outcome_weight is not None else None,
         )
         db.add(entry)
         db.commit()
@@ -634,6 +640,15 @@ class VectorMemoryService:
         if self._qdrant:
             try:
                 self._ensure_collection()
+                qdrant_payload: dict[str, Any] = {
+                    'pair': pair,
+                    'timeframe': timeframe,
+                    'summary': summary,
+                }
+                if agent_id:
+                    qdrant_payload['agent_id'] = str(agent_id).strip()
+                if outcome_weight is not None:
+                    qdrant_payload['outcome_weight'] = float(outcome_weight)
                 self._qdrant.upsert(
                     collection_name=self.collection,
                     wait=False,
@@ -641,11 +656,7 @@ class VectorMemoryService:
                         PointStruct(
                             id=entry.id,
                             vector=embedding,
-                            payload={
-                                'pair': pair,
-                                'timeframe': timeframe,
-                                'summary': summary,
-                            },
+                            payload=qdrant_payload,
                         )
                     ],
                 )
@@ -657,6 +668,13 @@ class VectorMemoryService:
     def add_run_memory(self, db: Session, run: AnalysisRun) -> MemoryEntry:
         payload = self._build_trading_case_payload(run)
         summary = self._build_memory_summary(run, payload)
+        # Compute initial outcome_weight if outcome is already known
+        outcome_features = payload.get('outcome_features', {})
+        outcome_label = self._normalize_text(outcome_features.get('outcome_label')) or 'unknown'
+        rr_realized = self._safe_float(outcome_features.get('rr_realized'))
+        initial_outcome_weight: float | None = None
+        if outcome_label in {'win', 'loss', 'neutral'}:
+            initial_outcome_weight = self._case_outcome_signal(outcome_label, rr_realized)
         return self.store_memory(
             db=db,
             pair=run.pair,
@@ -665,7 +683,22 @@ class VectorMemoryService:
             summary=summary,
             payload=payload,
             run_id=run.id,
+            outcome_weight=initial_outcome_weight,
         )
+
+    @staticmethod
+    def _outcome_boost(outcome_weight: float | None) -> float:
+        """Compute a scoring boost based on trade outcome.
+
+        Winning-trade memories get boosted, losing-trade memories get
+        penalised so the system naturally prioritises lessons from
+        successful decisions.  Unknown outcomes are neutral (0).
+        """
+        if outcome_weight is None:
+            return 0.0
+        # Sigmoid-like curve: ±0.12 max contribution
+        clamped = VectorMemoryService._clamp(outcome_weight, -1.0, 1.0)
+        return clamped * 0.12
 
     def _serialize_search_result(
         self,
@@ -680,8 +713,12 @@ class VectorMemoryService:
         recency_score = self._recency_score(recency_days)
         normalized_vector = self._normalize_similarity(vector_score)
 
-        final_score = 0.45 * normalized_vector + 0.40 * business_score + 0.15 * recency_score
-        final_score = self._clamp(final_score, 0.0, 1.0)
+        # Outcome-weighted retrieval: winning memories rank higher
+        outcome_weight = getattr(entry, 'outcome_weight', None)
+        outcome_boost = self._outcome_boost(outcome_weight)
+
+        base_score = 0.45 * normalized_vector + 0.38 * business_score + 0.17 * recency_score
+        final_score = self._clamp(base_score + outcome_boost, 0.0, 1.0)
 
         has_retrieval_context = bool(retrieval_context)
         min_business = 0.35 if has_retrieval_context else 0.0
@@ -694,10 +731,13 @@ class VectorMemoryService:
             'timeframe': entry.timeframe,
             'summary': entry.summary,
             'source_type': entry.source_type,
+            'agent_id': getattr(entry, 'agent_id', None),
             'score': round(final_score, 6),
             'vector_score': round(normalized_vector, 6),
             'business_score': round(business_score, 6),
             'recency_score': round(recency_score, 6),
+            'outcome_weight': round(float(outcome_weight), 4) if outcome_weight is not None else None,
+            'outcome_boost': round(outcome_boost, 4),
             'recency_days': round(recency_days, 3) if recency_days is not None else None,
             'eligible': eligible,
             'payload': payload,
@@ -712,7 +752,19 @@ class VectorMemoryService:
         query: str,
         limit: int = 5,
         retrieval_context: dict[str, Any] | None = None,
+        agent_id: str | None = None,
+        outcome_filter: str | None = None,
     ) -> list[dict[str, Any]]:
+        """Search memory with optional agent scope and outcome filtering.
+
+        Args:
+            agent_id: If provided, restrict results to memories created by this agent.
+            outcome_filter: 'win' (outcome_weight > 0), 'loss' (< 0), or None for all.
+        """
+        memory_search_total.labels(
+            agent_id=str(agent_id or 'all'),
+            outcome_filter=str(outcome_filter or 'none'),
+        ).inc()
         query_embedding = self._embed(query)
         scored_results: list[dict[str, Any]] = []
 
@@ -720,32 +772,44 @@ class VectorMemoryService:
             try:
                 self._ensure_collection()
                 initial_limit = min(max(limit * 8, 20), 200)
+                must_filters = [
+                    FieldCondition(key='pair', match=MatchValue(value=pair)),
+                    FieldCondition(key='timeframe', match=MatchValue(value=timeframe)),
+                ]
+                if agent_id:
+                    must_filters.append(
+                        FieldCondition(key='agent_id', match=MatchValue(value=str(agent_id).strip()))
+                    )
                 results = self._qdrant.search(
                     collection_name=self.collection,
                     query_vector=query_embedding,
-                    query_filter=Filter(
-                        must=[
-                            FieldCondition(key='pair', match=MatchValue(value=pair)),
-                            FieldCondition(key='timeframe', match=MatchValue(value=timeframe)),
-                        ]
-                    ),
+                    query_filter=Filter(must=must_filters),
                     limit=initial_limit,
                     with_payload=True,
                 )
-                memory_ids = [int(item.id) for item in results]
+                memory_ids = []
+                for item in results:
+                    try:
+                        memory_ids.append(int(item.id))
+                    except (ValueError, TypeError):
+                        logger.debug("Skipping non-integer Qdrant point id: %s", item.id)
                 if memory_ids:
-                    entries = (
-                        db.query(MemoryEntry)
-                        .filter(
-                            MemoryEntry.id.in_(memory_ids),
-                            MemoryEntry.pair == pair,
-                            MemoryEntry.timeframe == timeframe,
-                        )
-                        .all()
+                    q = db.query(MemoryEntry).filter(
+                        MemoryEntry.id.in_(memory_ids),
+                        MemoryEntry.pair == pair,
+                        MemoryEntry.timeframe == timeframe,
                     )
+                    if agent_id:
+                        q = q.filter(MemoryEntry.agent_id == str(agent_id).strip())
+                    entries = q.all()
                     by_id = {entry.id: entry for entry in entries}
                     ordered = [by_id[mid] for mid in memory_ids if mid in by_id]
-                    score_by_id = {int(item.id): float(item.score) for item in results}
+                    score_by_id = {}
+                    for item in results:
+                        try:
+                            score_by_id[int(item.id)] = float(item.score)
+                        except (ValueError, TypeError):
+                            pass
                     scored_results = [
                         self._serialize_search_result(
                             entry=entry,
@@ -758,13 +822,12 @@ class VectorMemoryService:
                 logger.warning('qdrant search failed: %s', exc)
 
         if not scored_results:
-            candidates = (
-                db.query(MemoryEntry)
-                .filter(MemoryEntry.pair == pair, MemoryEntry.timeframe == timeframe)
-                .order_by(MemoryEntry.created_at.desc())
-                .limit(200)
-                .all()
+            q = db.query(MemoryEntry).filter(
+                MemoryEntry.pair == pair, MemoryEntry.timeframe == timeframe
             )
+            if agent_id:
+                q = q.filter(MemoryEntry.agent_id == str(agent_id).strip())
+            candidates = q.order_by(MemoryEntry.created_at.desc()).limit(200).all()
             for entry in candidates:
                 similarity = self._cosine(entry.embedding, query_embedding)
                 scored_results.append(
@@ -774,6 +837,18 @@ class VectorMemoryService:
                         retrieval_context=retrieval_context,
                     )
                 )
+
+        # Apply outcome filter
+        if outcome_filter == 'win':
+            scored_results = [
+                r for r in scored_results
+                if (r.get('outcome_weight') or 0) > 0
+            ]
+        elif outcome_filter == 'loss':
+            scored_results = [
+                r for r in scored_results
+                if (r.get('outcome_weight') or 0) < 0
+            ]
 
         scored_results.sort(key=lambda item: float(item.get('score', 0.0) or 0.0), reverse=True)
 
@@ -817,6 +892,128 @@ class VectorMemoryService:
             'decision_mode': self._normalize_decision_mode(decision_mode),
         }
 
+    def store_agent_feedback(
+        self,
+        db: Session,
+        *,
+        pair: str,
+        timeframe: str,
+        agent_id: str,
+        feedback_type: str,
+        summary: str,
+        detail: dict[str, Any] | None = None,
+        outcome_weight: float | None = None,
+    ) -> MemoryEntry:
+        """Store agent-specific learning feedback (tool effectiveness, strategy results).
+
+        This enables agents to learn from their own past actions independently.
+        """
+        payload = {
+            'memory_type': 'agent_feedback',
+            'feedback_type': feedback_type,
+            'agent_id': agent_id,
+            **(detail or {}),
+        }
+        return self.store_memory(
+            db=db,
+            pair=pair,
+            timeframe=timeframe,
+            source_type='agent_feedback',
+            summary=summary,
+            payload=payload,
+            agent_id=agent_id,
+            outcome_weight=outcome_weight,
+        )
+
+    def update_outcome_weights(
+        self,
+        db: Session,
+        run_id: int,
+        outcome_label: str,
+        rr_realized: float | None = None,
+    ) -> int:
+        """Backfill outcome_weight on all MemoryEntry rows for a given run.
+
+        Called after a trade closes so historical memories reflect the actual
+        outcome — enabling outcome-weighted retrieval on future queries.
+        Returns the number of rows updated.
+        """
+        memory_outcome_backfill_total.labels(outcome_label=outcome_label).inc()
+        outcome_weight = self._case_outcome_signal(outcome_label, rr_realized)
+        entries = (
+            db.query(MemoryEntry)
+            .filter(MemoryEntry.run_id == run_id)
+            .all()
+        )
+        for entry in entries:
+            entry.outcome_weight = outcome_weight
+        if entries:
+            try:
+                db.commit()
+            except Exception as exc:
+                logger.warning('update_outcome_weights db commit failed: %s', exc)
+                db.rollback()
+                return 0
+
+        # Also update Qdrant payload if available
+        if self._qdrant and entries:
+            try:
+                self._qdrant.set_payload(
+                    collection_name=self.collection,
+                    payload={'outcome_weight': outcome_weight},
+                    points=[entry.id for entry in entries],
+                )
+            except Exception as exc:
+                logger.warning('qdrant outcome_weight update failed: %s', exc)
+
+        return len(entries)
+
+    def get_agent_stats(
+        self,
+        db: Session,
+        pair: str,
+        timeframe: str,
+        agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Return aggregated memory statistics for an agent or the whole system."""
+        q = db.query(MemoryEntry).filter(
+            MemoryEntry.pair == pair,
+            MemoryEntry.timeframe == timeframe,
+        )
+        if agent_id:
+            q = q.filter(MemoryEntry.agent_id == str(agent_id).strip())
+
+        entries = q.all()
+        total = len(entries)
+        with_outcome = [e for e in entries if e.outcome_weight is not None]
+        wins = [e for e in with_outcome if (e.outcome_weight or 0) > 0]
+        losses = [e for e in with_outcome if (e.outcome_weight or 0) < 0]
+
+        avg_outcome = (
+            sum(e.outcome_weight for e in with_outcome) / len(with_outcome)
+            if with_outcome else None
+        )
+        win_rate = len(wins) / len(with_outcome) if with_outcome else None
+
+        # Per-agent breakdown
+        agent_ids_found: set[str] = set()
+        for e in entries:
+            if getattr(e, 'agent_id', None):
+                agent_ids_found.add(e.agent_id)
+
+        return {
+            'pair': pair,
+            'timeframe': timeframe,
+            'agent_id': agent_id,
+            'total_memories': total,
+            'with_outcome': len(with_outcome),
+            'wins': len(wins),
+            'losses': len(losses),
+            'win_rate': round(win_rate, 4) if win_rate is not None else None,
+            'avg_outcome_weight': round(avg_outcome, 4) if avg_outcome is not None else None,
+            'agents_with_memories': sorted(agent_ids_found),
+        }
+
     def compute_memory_signal(
         self,
         memory_cases: list[dict[str, Any]],
@@ -835,8 +1032,6 @@ class VectorMemoryService:
             payload = item.get('payload') if isinstance(item.get('payload'), dict) else {}
             decision_features = payload.get('decision_features') if isinstance(payload.get('decision_features'), dict) else {}
             decision = self._normalize_decision(decision_features.get('decision'))
-            if decision not in {'BUY', 'SELL', 'HOLD'}:
-                continue
 
             similarity = self._safe_float(item.get('score'), 0.0) or 0.0
             if similarity < 0.33:

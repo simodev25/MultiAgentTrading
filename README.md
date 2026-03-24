@@ -1,275 +1,198 @@
-# Multi-Agent Trading Platform (V1)
+# Multi-Agent Trading Platform
 
-Plateforme IA multi-agent orientée marchés multi-actifs (FX, indices, matières premières, crypto) avec:
-- Orchestration multi-agent (analystes, débat bullish/bearish, trader, risk manager, execution manager)
-- API FastAPI (JWT + RBAC sur endpoints REST)
-- Intégration LLM multi-provider (Ollama, OpenAI, Mistral), MetaApi (trading), yfinance (contexte marché), news multi-provider (Yahoo, NewsAPI, TradingEconomics, Finnhub, AlphaVantage)
-- Séparation simulation / paper / live (live désactivé par défaut)
-- Frontend React TypeScript (thème sombre premium)
-- Exécution asynchrone via Celery + RabbitMQ + Redis
-- Observabilité minimale (Prometheus + Grafana)
-- Docker Compose local + Helm minimal
-- Mémoire long-terme vectorielle (Qdrant + repli SQL cosine, pgvector optionnel)
-- Prompts versionnés en base pour enrichir le débat agents
-- Configuration LLM par agent (switch, modèle effectif, skills, catalogue modèles, prompts modifiables)
-- Gating décisionnel multi-profils (`conservative`, `balanced`, `permissive`) piloté depuis les Paramètres
-- Trading Control Room (menu `Config`): configuration connecteurs, provider/modèles LLM, comptes MetaApi, prompts et télémétrie LLM
-- Clés API runtime éditables depuis `Config > Sécurité` (OLLAMA/OPENAI/MISTRAL, NEWSAPI/TRADINGECONOMICS/FINNHUB/ALPHAVANTAGE, METAAPI_TOKEN/METAAPI_ACCOUNT_ID)
-- Backtesting avancé (Sharpe, Sortino, drawdown, profit factor)
-- Support multi-comptes MetaApi
-- Planification automatique des analyses (cron) avec sélection symbole/timeframe/mode/risque
-- Dashboard Grafana enrichi (latence/coûts LLM)
+A multi-agent AI trading system that orchestrates **8 specialized LLM agents** to produce consensus-driven trading decisions across multiple asset classes. Features real-time execution via MetaAPI, vector-based memory learning from past trades, and a React monitoring dashboard.
 
-## Structure
+## Architecture
 
-- `backend/`: API, orchestration, agents, risk, execution, tests
-- `frontend/`: UI React/Vite
-- `infra/`: Docker monitoring + chart Helm
-- `docs/`: architecture, UX/UI, configuration, monitoring, tests
+```
+┌────────────────────────────────────────────────────────────────┐
+│                     React Dashboard (Vite)                     │
+│         Charts · Orders · Backtests · Connectors · Auth        │
+└────────────────────────┬───────────────────────────────────────┘
+                         │ REST + WebSocket
+┌────────────────────────▼───────────────────────────────────────┐
+│                    FastAPI Backend                              │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────────┐    │
+│  │  Orchestrator │  │  Risk Engine │  │  Execution Layer  │    │
+│  │  (8 Agents)   │  │  + Guardian  │  │  Paper / Live     │    │
+│  └──────┬───────┘  └──────────────┘  └───────────────────┘    │
+│         │                                                      │
+│  ┌──────▼──────────────────────────────────────────────┐       │
+│  │           MCP Tool Layer (19 tools)                 │       │
+│  │  Market Data · Technical Analysis · Fundamentals    │       │
+│  │  Decision Support · Memory Query                    │       │
+│  └─────────────────────────────────────────────────────┘       │
+└────────────────────────────────────────────────────────────────┘
+         │              │              │              │
+    PostgreSQL       Redis        RabbitMQ         Qdrant
+    + pgvector       Cache       Celery Queue     Vector DB
+```
 
-## Documentation ciblée
+### Agent Pipeline
 
-- Architecture agents: `docs/agents-architecture.md`
-- Contrat runtime des agents: `docs/agents.md`
-- Orchestration et gating: `docs/orchestration.md`
-- News multi-provider et contrat `news-analyst`: `docs/news-analyst-multi-provider.md`
-- Sources market/news: `docs/data-news.md`
+Each analysis run flows sequentially through 8 agents:
 
-## Démarrage rapide
+| # | Agent | Role |
+|---|-------|------|
+| 1 | **Technical Analyst** | RSI, MACD, EMA, ATR, support/resistance, divergence detection |
+| 2 | **News Analyst** | News sentiment scoring and relevance filtering |
+| 3 | **Market Context** | Macro environment, session timing, regime detection |
+| 4 | **Bullish Researcher** | Constructs the bull case with evidence |
+| 5 | **Bearish Researcher** | Constructs the bear case with evidence |
+| 6 | **Trader** | Final BUY / SELL / HOLD decision with entry, SL, TP |
+| 7 | **Risk Manager** | Position sizing validation and portfolio risk checks |
+| 8 | **Execution Manager** | Order placement (paper or live) |
 
-1. Copier l'environnement backend:
+## Features
+
+- **Multi-asset support** — Forex, crypto, indices, metals, energy, equities
+- **Multiple LLM providers** — Ollama (local), OpenAI, Mistral
+- **Multi-source news** — NewsAPI, Finnhub, AlphaVantage, Trading Economics, LLM Web Search (Ollama/OpenAI)
+- **3 decision modes** — Conservative (strict convergence), Balanced (default, moderate), Permissive (opportunistic)
+- **Vector memory** — Outcome-weighted learning from past trades (pgvector + Qdrant)
+- **19 MCP tools** — Technical indicators, news, macro events, pattern detection, correlation analysis
+- **Paper & live trading** — MetaAPI broker integration with order guardian
+- **Backtesting** — Historical analysis with configurable LLM sampling
+- **Scheduled runs** — Automated analysis via Celery Beat
+- **Real-time updates** — WebSocket streaming during analysis runs
+- **Observability** — Prometheus metrics, Grafana dashboards, OpenTelemetry tracing
+- **Risk management** — Per-asset-class contract specs, position sizing, SL/TP validation
+
+## Tech Stack
+
+| Layer | Technologies |
+|-------|-------------|
+| Frontend | React 19, TypeScript, Material-UI 7, Vite, Lightweight Charts |
+| Backend | FastAPI, SQLAlchemy 2, Alembic, Celery, LangChain |
+| Data | PostgreSQL 16 (pgvector), Redis 7, RabbitMQ 3, Qdrant |
+| Infra | Docker Compose, Helm/K8s, Prometheus, Grafana |
+| LLM | Ollama, OpenAI, Mistral (configurable per deployment) |
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.12+
+- Node.js 22+
+- Docker & Docker Compose
+
+### Docker (recommended)
+
 ```bash
+# Copy and configure environment
 cp backend/.env.example backend/.env
-```
+# Edit backend/.env with your API keys (LLM provider, MetaAPI, etc.)
 
-2. Copier l'environnement frontend:
-```bash
-cp frontend/.env.example frontend/.env
-```
-
-3. Lancer en local conteneurisé:
-```bash
+# Start all services
 docker compose up --build
 ```
 
-4. Accéder aux services:
-- Frontend: `http://localhost:5173`
-- API docs: `http://localhost:8000/docs`
-- Grafana: `http://localhost:3000` (`admin/admin`)
-- RabbitMQ UI: `http://localhost:15672` (`guest/guest`)
+The platform will be available at:
+- **Frontend**: http://localhost:5173
+- **Backend API**: http://localhost:8000
+- **API docs**: http://localhost:8000/docs
+- **RabbitMQ UI**: http://localhost:15672
+- **Grafana**: http://localhost:3000
+- **Prometheus**: http://localhost:9090
+Default credentials: `admin@local.dev` / `admin1234`
 
-## Skills bootstrappés au démarrage
-
-- L'image backend embarque un fichier par défaut: `backend/config/agent-skills.json`.
-- Dans le conteneur, il est lu depuis: `/app/config/agent-skills.json`.
-- Au startup backend, le contenu est injecté automatiquement dans `connector_configs.settings.agent_skills`.
-
-Variables principales:
-
-- `AGENT_SKILLS_BOOTSTRAP_FILE=/app/config/agent-skills.json`
-- `AGENT_SKILLS_BOOTSTRAP_MODE=merge` (`merge` ou `replace`)
-- `AGENT_SKILLS_BOOTSTRAP_APPLY_ONCE=true` (idempotence par fingerprint)
-- `DECISION_MODE=conservative` (`conservative`, `balanced`, `permissive`)
-
-Override rapide (exemple local):
+### Local Development
 
 ```bash
-AGENT_SKILLS_BOOTSTRAP_FILE=/app/config/my-skills.json \
-AGENT_SKILLS_BOOTSTRAP_MODE=replace \
-docker compose up -d --build backend
+# Backend
+make backend-install
+make backend-run          # http://localhost:8000
+
+# Frontend
+make frontend-install
+make frontend-run         # http://localhost:5173
+
+# Tests
+make backend-test
 ```
 
-Note: pour un fichier custom, place-le dans `backend/config/` (ex: `backend/config/my-skills.json`) puis rebuild backend.
+> **Note**: Local development still requires PostgreSQL, Redis, RabbitMQ, and Qdrant. You can start only the infrastructure services with:
+> ```bash
+> docker compose up postgres redis rabbitmq qdrant -d
+> ```
 
-Désactiver complètement:
+## Configuration
 
-```bash
-AGENT_SKILLS_BOOTSTRAP_FILE= docker compose up -d --build backend
+All configuration is done via environment variables. See [`backend/.env.example`](backend/.env.example) for the full list. Key settings:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `LLM_PROVIDER` | LLM backend (`ollama`, `openai`, `mistral`) | `ollama` |
+| `OLLAMA_MODEL` | Model name for Ollama | `llama3.1` |
+| `DECISION_MODE` | Trading decision threshold (`conservative`, `balanced`, `permissive`) | `balanced` |
+| `ALLOW_LIVE_TRADING` | Enable real broker execution | `false` |
+| `ENABLE_PAPER_EXECUTION` | Enable paper trading | `true` |
+| `METAAPI_TOKEN` | MetaAPI authentication token | — |
+| `ENABLE_PGVECTOR` | Use pgvector for memory embeddings | `true` |
+| `NEWSAPI_API_KEY` | NewsAPI key (news provider) | — |
+| `FINNHUB_API_KEY` | Finnhub key (news provider) | — |
+| `ALPHAVANTAGE_API_KEY` | AlphaVantage key (news provider) | — |
+| `TRADINGECONOMICS_API_KEY` | TradingEconomics key (news provider) | — |
+
+### Decision Modes
+
+| Mode | Description |
+|------|-------------|
+| **Conservative** | Strict convergence required: 2+ aligned sources, no single-source override, high score/confidence thresholds |
+| **Balanced** (default) | Moderate thresholds, single-source technical override allowed (score >= 0.25), 1 aligned source sufficient |
+| **Permissive** | Opportunistic but prudent: lower thresholds, technical override allowed, major contradictions still blocked |
+
+Configurable via `DECISION_MODE` env var or in the UI (Connectors > AI Models).
+
+### News Providers
+
+News sources are managed in the UI (Connectors > News). Available providers:
+
+| Provider | Type | Requires API Key |
+|----------|------|:---:|
+| **NewsAPI** | REST API | Yes |
+| **Finnhub** | REST API | Yes |
+| **AlphaVantage** | REST API | Yes |
+| **Trading Economics** | REST API | Yes |
+| **LLM Web Search** | Web search via configured LLM provider (Ollama / OpenAI) | No (uses LLM key) |
+
+LLM Web Search uses the LLM provider selected in Connectors > AI Models to perform targeted web searches (site:reuters.com, site:forexlive.com, etc.) with date-aware queries.
+
+## Project Structure
+
+```
+backend/
+  app/
+    api/routes/            # REST endpoints
+    services/
+      orchestrator/        # 8-agent workflow engine
+      agent_runtime/       # v2 agentic runtime with MCP tools
+      memory/              # Vector memory service
+      llm/                 # LLM provider clients
+      market/              # Market data, news providers, instrument classification
+      trading/             # MetaAPI client, order guardian, execution
+      risk/                # Risk engine & position sizing
+      backtest/            # Historical backtesting
+      scheduler/           # Scheduled run management
+      news/                # News aggregation & sentiment
+    db/                    # SQLAlchemy models, Alembic migrations
+    observability/         # Prometheus, OpenTelemetry
+    tasks/                 # Celery task definitions
+
+frontend/
+  src/
+    pages/                 # Dashboard, RunDetail, Orders, Backtests, Connectors, Login
+    components/            # Charts, Layout, UI
+    hooks/                 # Auth, market data, orders
+
+infra/
+  docker/                  # Prometheus config, Grafana dashboards
+  helm/                    # Kubernetes Helm charts
+
+docs/
+  architecture/            # System architecture & module reference
 ```
 
-## Debug JSON par trade
+## License
 
-Pour exporter un JSON complet par run (historique prix, étapes agents, `prompt_meta`, skills, décision):
-
-- `DEBUG_TRADE_JSON_ENABLED=true`
-- `DEBUG_TRADE_JSON_DIR=./debug-traces`
-- `DEBUG_TRADE_JSON_INCLUDE_PROMPTS=true`
-- `DEBUG_TRADE_JSON_INCLUDE_PRICE_HISTORY=true`
-- `DEBUG_TRADE_JSON_PRICE_HISTORY_LIMIT=200`
-- `DEBUG_TRADE_JSON_INLINE_IN_RUN_TRACE=false`
-
-Résultat:
-
-- Un fichier `run-<id>-<timestamp>.json` est écrit dans `DEBUG_TRADE_JSON_DIR`.
-- `analysis_runs.trace.debug_trace_meta` et `analysis_runs.trace.debug_trace_file` référencent l'export.
-
-## Local vs production (résumé)
-
-| Mode | Commande de lancement | Frontend | API | Fichier env principal | Notes |
-|---|---|---|---|---|---|
-| Local dev/test | `docker compose up --build` | `5173` | `8000` | `backend/.env` + `frontend/.env` | services internes exposés (Postgres/Redis/RabbitMQ/Qdrant) |
-| Production Docker (locale) | `./scripts/install-prod-docker.sh` | `4173` | `8000` | `.env.prod` | ports internes non exposés, `pgvector` activable (`ENABLE_PGVECTOR=true`) |
-
-## Déploiement production Docker
-
-1. Créer l'env production:
-```bash
-cp .env.prod.example .env.prod
-```
-2. Déployer:
-```bash
-./scripts/install-prod-docker.sh
-```
-3. Avec monitoring:
-```bash
-./scripts/install-prod-docker.sh --with-monitoring
-```
-4. Profil workers Mac M4 Pro (12/14 coeurs):
-```bash
-./scripts/install-prod-docker.sh --tune-m4-pro
-```
-
-Documentation complète: `docs/production-docker-install.md`.
-
-Compte seed local:
-- email: `admin@local.dev`
-- mot de passe: `admin1234`
-- usage local uniquement (dev/test), à changer avant tout environnement exposé.
-
-## Checklist de validation rapide
-
-1. Vérifier la santé API:
-```bash
-curl -sS http://localhost:8000/api/v1/health
-```
-
-2. Vérifier l'authentification:
-```bash
-curl -sS -X POST http://localhost:8000/api/v1/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"admin@local.dev","password":"admin1234"}'
-```
-
-3. Vérifier CORS preflight (si UI navigateur):
-```bash
-curl -i -X OPTIONS http://localhost:8000/api/v1/auth/login \
-  -H "Origin: http://localhost:5173" \
-  -H "Access-Control-Request-Method: POST"
-```
-
-4. Vérifier l'activité worker:
-```bash
-docker compose logs --tail 50 worker
-```
-
-5. Vérifier qu'aucune erreur critique ne boucle:
-```bash
-docker compose logs --tail 100 backend postgres worker
-```
-
-Runbooks incidents fréquents:
-- `docs/troubleshooting.md`
-- `docs/production-docker-install.md` (section troubleshooting)
-
-## Sécurité V1 (important)
-
-- Les protections JWT + RBAC couvrent les endpoints REST `/api/v1/...`.
-- Les WebSockets (`/ws/runs/{id}`, `/ws/trading/orders`) doivent être exposés uniquement sur réseau interne tant que l'auth WS n'est pas ajoutée.
-- L'endpoint `/metrics` doit rester interne (monitoring) ou protégé via reverse proxy.
-- Le compte seed local et `POST /api/v1/auth/bootstrap-admin` sont destinés au dev/test interne uniquement.
-- Détails et limites connues: `docs/limits.md`.
-
-## Modes d'exécution
-
-- `simulation`: exécution simulée locale
-- `paper`: tentative MetaApi, repli simulation si indisponible
-- `live`: bloqué par défaut (`ALLOW_LIVE_TRADING=false`)
-
-## API principales
-
-- `POST /api/v1/auth/login`
-- `GET /api/v1/auth/me`
-- `POST /api/v1/runs`
-- `GET /api/v1/runs`
-- `GET /api/v1/runs/{id}`
-- `GET /api/v1/trading/orders`
-- `GET /api/v1/trading/deals`
-- `GET /api/v1/trading/history-orders`
-- `GET/POST/PATCH /api/v1/trading/accounts`
-- `GET /api/v1/connectors`
-- `PUT /api/v1/connectors/{name}`
-- `POST /api/v1/connectors/{name}/test`
-- `GET /api/v1/connectors/ollama/models`
-- `GET/POST /api/v1/prompts`
-- `POST /api/v1/prompts/{id}/activate`
-- `GET /api/v1/memory`
-- `POST /api/v1/memory/search`
-- `GET/POST /api/v1/backtests`
-- `GET/POST/PATCH/DELETE /api/v1/schedules`
-- `POST /api/v1/schedules/{id}/run-now`
-- `POST /api/v1/schedules/regenerate-active` (génération automatique de plan via LLM + fallback)
-- `GET /api/v1/analytics/llm-summary`
-- `GET /api/v1/analytics/llm-models`
-
-Bornes utiles (anti-abus):
-- `GET /api/v1/trading/orders?limit=...` (`1..500`)
-- `GET /api/v1/memory?limit=...` (`1..200`)
-
-Paramètre `.env` pour activer la vue trades MT5 réels (tables + graphes):
-- `ENABLE_METAAPI_REAL_TRADES_DASHBOARD=true`
-- `METAAPI_USE_SDK_FOR_MARKET_DATA=false` (recommandé pour limiter les abonnements SDK MetaApi)
-- `CELERY_WORKER_CONCURRENCY=2` (stabilité locale)
-
-Paramètres `.env` pour le pipeline news multi-provider:
-- `NEWS_PROVIDERS` (JSON map, activation/priorité/timeout par provider)
-- `NEWS_ANALYSIS` (JSON map, déduplication/relevance/limites)
-- `NEWSAPI_API_KEY`
-- `TRADINGECONOMICS_API_KEY`
-- `FINNHUB_API_KEY`
-- `ALPHAVANTAGE_API_KEY`
-
-Clés éditables depuis l'UI (`Config > Sécurité`), sans redémarrage:
-- `OLLAMA_API_KEY`, `OPENAI_API_KEY`, `MISTRAL_API_KEY` (stockées dans `connector_configs.settings` du connecteur `ollama`)
-- `NEWSAPI_API_KEY`, `TRADINGECONOMICS_API_KEY`, `FINNHUB_API_KEY`, `ALPHAVANTAGE_API_KEY` (connecteur `yfinance`)
-- `METAAPI_TOKEN`, `METAAPI_ACCOUNT_ID` (connecteur `metaapi`)
-- priorité runtime: valeur en base > variable `.env`
-- les champs affichent un aperçu masqué (la plupart des caractères cachés)
-- providers news activables/désactivables individuellement (Yahoo/NewsAPI/TradingEconomics/Finnhub/AlphaVantage)
-
-Paramètres `.env` UI (`frontend/.env`) pour la même vue:
-- `VITE_ENABLE_METAAPI_REAL_TRADES_DASHBOARD=true`
-- `VITE_METAAPI_REAL_TRADES_DEFAULT_DAYS=14` (ou liste CSV `0,7,14,30,90`; `0` = Aujourd'hui, compat: `1` est interprété comme Aujourd'hui)
-- `VITE_METAAPI_REAL_TRADES_REFRESH_MS=15000`
-- `VITE_METAAPI_REAL_TRADES_DASHBOARD_LIMIT=8`
-- `VITE_METAAPI_REAL_TRADES_TABLE_LIMIT=15`
-- `VITE_METAAPI_REAL_TRADES_ORDERS_PAGE_LIMIT=25`
-
-## Tests
-
-Backend:
-```bash
-cd backend
-pytest -q
-```
-
-Frontend e2e minimal:
-```bash
-cd frontend
-npm install
-npm run test:e2e
-```
-
-## Documentation
-
-- [Architecture](docs/architecture.md)
-- [UX/UI](docs/ux-ui.md)
-- [Ollama Cloud](docs/ollama-cloud.md)
-- [MetaApi](docs/metaapi.md)
-- [Données et news](docs/data-news.md)
-- [Orchestration](docs/orchestration.md)
-- [Monitoring](docs/monitoring.md)
-- [Installation Production Docker](docs/production-docker-install.md)
-- [Tests](docs/testing.md)
-- [Suivi Performance et Revue](docs/performance-review-tracker.md)
-- [Limites](docs/limits.md)
-- [Troubleshooting](docs/troubleshooting.md)
+Private — All rights reserved.

@@ -1,8 +1,11 @@
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
+import { ButtonSpinner, ProgressBar } from '../components/LoadingIndicators';
+import { TableSkeletonRows } from '../components/orders/TableSkeletonRows';
 import { DEFAULT_PAIR, DEFAULT_TIMEFRAMES } from '../constants/markets';
 import { useAuth } from '../hooks/useAuth';
 import { useMarketSymbols } from '../hooks/useMarketSymbols';
+import { FlaskConical, Play } from 'lucide-react';
 import type { BacktestRun } from '../types';
 
 const STRATEGIES = [
@@ -30,6 +33,9 @@ export function BacktestsPage() {
   const [runs, setRuns] = useState<BacktestRun[]>([]);
   const [selected, setSelected] = useState<BacktestRun | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadingProgress, setLoadingProgress] = useState(0);
+  const progressRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [initialLoadDone, setInitialLoadDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const loadRuns = async () => {
@@ -39,6 +45,8 @@ export function BacktestsPage() {
       setRuns(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Cannot load backtests');
+    } finally {
+      setInitialLoadDone(true);
     }
   };
 
@@ -53,11 +61,30 @@ export function BacktestsPage() {
     }
   }, [instruments, pair]);
 
+  const startProgress = () => {
+    setLoadingProgress(0);
+    const start = Date.now();
+    // Asymptotic curve: approaches 90% over ~60s, never reaches 100 until done
+    progressRef.current = setInterval(() => {
+      const elapsed = (Date.now() - start) / 1000;
+      setLoadingProgress(Math.min(90, 90 * (1 - Math.exp(-elapsed / 20))));
+    }, 500);
+  };
+
+  const stopProgress = () => {
+    if (progressRef.current) clearInterval(progressRef.current);
+    progressRef.current = null;
+    setLoadingProgress(100);
+    // Reset after animation completes
+    setTimeout(() => setLoadingProgress(0), 600);
+  };
+
   const createBacktest = async (e: FormEvent) => {
     e.preventDefault();
     if (!token) return;
     setLoading(true);
     setError(null);
+    startProgress();
     try {
       await api.createBacktest(token, {
         pair,
@@ -70,6 +97,7 @@ export function BacktestsPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Cannot create backtest');
     } finally {
+      stopProgress();
       setLoading(false);
     }
   };
@@ -85,84 +113,109 @@ export function BacktestsPage() {
   };
 
   return (
-    <div className="dashboard-grid">
-      <section className="card primary">
-        <h2>Backtesting multi-actifs</h2>
-        <form className="form-grid inline" onSubmit={createBacktest}>
-          <label>
-            Instrument
+    <div className="flex flex-col gap-5">
+      {/* Launch form */}
+      <section className="hw-surface p-5">
+        <div className="section-header">
+          <span className="section-title">BACKTEST_ENGINE</span>
+          <FlaskConical className="section-icon" />
+        </div>
+        <form className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 items-end" onSubmit={createBacktest}>
+          <div>
+            <label className="micro-label block mb-1.5">Instrument</label>
             <select value={pair} onChange={(e) => setPair(e.target.value)}>
               {instruments.map((item) => (
                 <option key={item}>{item}</option>
               ))}
             </select>
-          </label>
-          <label>
-            Timeframe
+          </div>
+          <div>
+            <label className="micro-label block mb-1.5">Timeframe</label>
             <select value={timeframe} onChange={(e) => setTimeframe(e.target.value)}>
               {DEFAULT_TIMEFRAMES.map((item) => (
                 <option key={item}>{item}</option>
               ))}
             </select>
-          </label>
-          <label>
-            Start
+          </div>
+          <div>
+            <label className="micro-label block mb-1.5">Start</label>
             <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} required />
-          </label>
-          <label>
-            End
+          </div>
+          <div>
+            <label className="micro-label block mb-1.5">End</label>
             <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} required />
-          </label>
-          <label>
-            Strategy
+          </div>
+          <div>
+            <label className="micro-label block mb-1.5">Strategy</label>
             <select value={strategy} onChange={(e) => setStrategy(e.target.value)}>
               {STRATEGIES.map((item) => (
-                <option key={item.value} value={item.value}>
-                  {item.label}
-                </option>
+                <option key={item.value} value={item.value}>{item.label}</option>
               ))}
             </select>
-          </label>
-          <button className="btn-primary" disabled={loading}>{loading ? 'Calcul...' : 'Lancer backtest'}</button>
+          </div>
+          <div>
+            <button className="btn-primary w-full" disabled={loading}>
+              {loading ? <ButtonSpinner /> : <Play className="w-3.5 h-3.5" />}
+              {loading ? 'Calcul en cours' : 'Lancer'}
+            </button>
+          </div>
         </form>
-        {error && <p className="alert">{error}</p>}
+        {loading && (
+          <div className="mt-3">
+            <ProgressBar percent={loadingProgress} label="Backtest" striped />
+          </div>
+        )}
+        {error && <p className="alert mt-3">{error}</p>}
       </section>
 
-      <section className="card">
-        <h3>Historique backtests</h3>
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Instrument</th>
-              <th>TF</th>
-              <th>Période</th>
-              <th>Status</th>
-              <th>Return %</th>
-              <th>Sharpe</th>
-              <th>Action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {runs.map((run) => (
-              <tr key={run.id}>
-                <td>{run.id}</td>
-                <td>{run.pair}</td>
-                <td>{run.timeframe}</td>
-                <td>{run.start_date} → {run.end_date}</td>
-                <td><span className={`badge ${run.status}`}>{run.status}</span></td>
-                <td>{String(run.metrics?.total_return_pct ?? '-')}</td>
-                <td>{String(run.metrics?.sharpe_ratio ?? '-')}</td>
-                <td><button onClick={() => void showDetails(run.id)}>Voir</button></td>
+      {/* Backtest history */}
+      <section className="hw-surface p-5">
+        <div className="section-header">
+          <span className="section-title">BACKTEST_HISTORY</span>
+        </div>
+        <div className="overflow-x-auto">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Instrument</th>
+                <th>TF</th>
+                <th>Période</th>
+                <th>Status</th>
+                <th>Return %</th>
+                <th>Sharpe</th>
+                <th>Action</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {!initialLoadDone && runs.length === 0 && (
+                <TableSkeletonRows prefix="backtests" columns={8} rows={3} />
+              )}
+              {runs.map((run) => (
+                <tr key={run.id}>
+                  <td className="font-mono text-text-muted">{run.id}</td>
+                  <td className="font-semibold">{run.pair}</td>
+                  <td>{run.timeframe}</td>
+                  <td className="text-text-muted">{run.start_date} → {run.end_date}</td>
+                  <td><span className={`badge ${run.status}`}>{run.status}</span></td>
+                  <td className="font-mono">{String(run.metrics?.total_return_pct ?? '-')}</td>
+                  <td className="font-mono">{String(run.metrics?.sharpe_ratio ?? '-')}</td>
+                  <td>
+                    <button className="btn-ghost btn-small" onClick={() => void showDetails(run.id)}>Voir</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </section>
 
-      <section className="card">
-        <h3>Détail backtest</h3>
-        <pre>{JSON.stringify(selected, null, 2)}</pre>
+      {/* Detail */}
+      <section className="hw-surface p-5">
+        <div className="section-header">
+          <span className="section-title">BACKTEST_DETAIL</span>
+        </div>
+        <pre className="json-view">{JSON.stringify(selected, null, 2)}</pre>
       </section>
     </div>
   );

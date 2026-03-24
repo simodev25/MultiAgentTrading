@@ -98,18 +98,18 @@ export function PlatformOrdersTable({
         </tbody>
       </table>
       {orders.length > 0 && !bootstrapLoading && (
-        <div className="table-pagination">
-          <p className="table-pagination-meta">
+        <div className="flex items-center justify-between mt-4 pt-3 border-t border-border">
+          <span className="text-[10px] font-mono text-text-muted">
             {pageStart}-{pageEnd} sur {orders.length}
-          </p>
-          <div className="table-pagination-actions">
-            <button type="button" disabled={ordersPage <= 1} onClick={onPreviousPage}>
+          </span>
+          <div className="flex items-center gap-2">
+            <button className="btn-ghost btn-small" type="button" disabled={ordersPage <= 1} onClick={onPreviousPage}>
               Précédent
             </button>
-            <span>
+            <span className="text-[10px] font-mono text-text-muted">
               Page {ordersPage} / {ordersTotalPages} ({ordersPerPage} par page)
             </span>
-            <button type="button" disabled={ordersPage >= ordersTotalPages} onClick={onNextPage}>
+            <button className="btn-ghost btn-small" type="button" disabled={ordersPage >= ordersTotalPages} onClick={onNextPage}>
               Suivant
             </button>
           </div>

@@ -20,7 +20,6 @@ from app.services.market.instrument import (
     AssetClass,
     InstrumentDescriptor,
     InstrumentClassifier,
-    normalize_instrument,
 )
 
 logger = logging.getLogger(__name__)
@@ -689,21 +688,6 @@ def resolve_symbol_for_provider(
     # First classify, then convert
     instr = InstrumentClassifier.classify(raw_symbol)
     return adapter.to_provider_symbol(instr)
-
-
-def resolve_provider_symbol_to_instrument(
-    provider_symbol: str,
-    provider: str,
-) -> SymbolResolutionResult:
-    """Convert a provider-specific symbol to a canonical instrument."""
-    adapter = get_provider_adapter(provider)
-    if not adapter:
-        return SymbolResolutionResult(
-            success=False,
-            reason=f"Unknown provider: {provider}",
-        )
-
-    return adapter.from_provider_symbol(provider_symbol)
 
 
 def get_news_candidates_for_instrument(

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -16,6 +16,6 @@ class AgentRuntimeMessage(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     sender_session_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     message_metadata: Mapped[dict] = mapped_column('metadata', JSON, default=dict, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
 
     run = relationship('AnalysisRun', back_populates='runtime_messages')

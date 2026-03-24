@@ -5,6 +5,7 @@ __pycache__/
 *.sqlite3
 *.db
 *debug-traces*
+.agents*
 .env
 .env.*
 !.env.example
@@ -19,3 +20,4 @@ coverage/
 .DS_Store
 .idea/
 .vscode/
+.agents/skills/architecture-designer/references/adr-template.md

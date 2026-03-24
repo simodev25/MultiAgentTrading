@@ -4,7 +4,7 @@ import pytest
 from fnmatch import fnmatch
 from datetime import datetime, timedelta, timezone
 
-from app.services.market.yfinance_provider import YFinanceMarketProvider
+from app.services.market.news_provider import MarketProvider
 
 
 def _frame(rows: int = 3) -> pd.DataFrame:
@@ -58,41 +58,41 @@ class _FakeRedis:
 @pytest.fixture(autouse=True)
 def _use_env_defaults_for_runtime_connector_keys(monkeypatch):
     monkeypatch.setattr(
-        'app.services.market.yfinance_provider.RuntimeConnectorSettings.get_string',
+        'app.services.market.news_provider.RuntimeConnectorSettings.get_string',
         lambda _connector_name, _keys, **kwargs: str(kwargs.get('default') or '').strip(),
     )
 
 
 def test_ticker_candidates_include_suffixless_fx_variant() -> None:
-    candidates = YFinanceMarketProvider._ticker_candidates('EURUSD.PRO')
+    candidates = MarketProvider._ticker_candidates('EURUSD.PRO')
     assert 'EURUSD.PRO' not in candidates
     assert 'EURUSD=X' in candidates
 
 
 def test_ticker_candidates_map_crypto_pairs_to_spot_symbols() -> None:
-    candidates = YFinanceMarketProvider._ticker_candidates('LTCUSD')
+    candidates = MarketProvider._ticker_candidates('LTCUSD')
     assert candidates[0] == 'LTC-USD'
     assert 'LTCUSD=X' not in candidates
 
 
 def test_normalize_pair_strips_broker_suffix_for_non_fx_symbols() -> None:
-    assert YFinanceMarketProvider._normalize_pair('AAPL.PRO') == 'AAPL'
+    assert MarketProvider._normalize_pair('AAPL.PRO') == 'AAPL'
 
 
 def test_ticker_candidates_include_index_alias() -> None:
-    candidates = YFinanceMarketProvider._ticker_candidates('SPX500')
+    candidates = MarketProvider._ticker_candidates('SPX500')
     assert '^GSPC' in candidates
 
 
 def test_news_symbol_candidates_for_crypto_avoid_fx_dollar_fallbacks() -> None:
-    candidates = YFinanceMarketProvider._news_symbol_candidates('DOTUSD')
+    candidates = MarketProvider._news_symbol_candidates('DOTUSD')
     assert candidates[0] == 'DOT-USD'
     assert 'DX-Y.NYB' not in candidates
     assert '^DXY' not in candidates
 
 
 def test_normalize_article_item_maps_same_usd_story_by_base_quote_role() -> None:
-    eurusd = YFinanceMarketProvider._normalize_article_item(
+    eurusd = MarketProvider._normalize_article_item(
         provider='newsapi',
         pair='EURUSD',
         title='Dollar falls after soft US CPI as Fed turns dovish',
@@ -101,7 +101,7 @@ def test_normalize_article_item_maps_same_usd_story_by_base_quote_role() -> None
         published_at=_iso_hours_ago(1),
         source_name='Reuters',
     )
-    usdjpy = YFinanceMarketProvider._normalize_article_item(
+    usdjpy = MarketProvider._normalize_article_item(
         provider='newsapi',
         pair='USDJPY',
         title='Dollar falls after soft US CPI as Fed turns dovish',
@@ -120,7 +120,7 @@ def test_normalize_article_item_maps_same_usd_story_by_base_quote_role() -> None
 
 
 def test_normalize_article_item_handles_cross_pairs_generically() -> None:
-    eurgbp = YFinanceMarketProvider._normalize_article_item(
+    eurgbp = MarketProvider._normalize_article_item(
         provider='newsapi',
         pair='EURGBP',
         title='Sterling rises after hawkish Bank of England remarks',
@@ -129,7 +129,7 @@ def test_normalize_article_item_handles_cross_pairs_generically() -> None:
         published_at=_iso_hours_ago(2),
         source_name='Bloomberg',
     )
-    audnzd = YFinanceMarketProvider._normalize_article_item(
+    audnzd = MarketProvider._normalize_article_item(
         provider='newsapi',
         pair='AUDNZD',
         title='Aussie rallies after hawkish RBA surprise',
@@ -148,7 +148,7 @@ def test_normalize_article_item_handles_cross_pairs_generically() -> None:
 
 
 def test_get_historical_candles_tries_fallback_candidates(monkeypatch) -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.yfinance_cache_enabled = False
     provider._redis = None
     calls: list[str] = []
@@ -163,7 +163,7 @@ def test_get_historical_candles_tries_fallback_candidates(monkeypatch) -> None:
                 return _frame()
             return pd.DataFrame()
 
-    monkeypatch.setattr('app.services.market.yfinance_provider.yf.Ticker', _FakeTicker)
+    monkeypatch.setattr('app.services.market.news_provider.yf.Ticker', _FakeTicker)
 
     frame = provider.get_historical_candles('EURUSD.PRO', 'H1', '2026-01-01', '2026-01-02')
     assert not frame.empty
@@ -171,7 +171,7 @@ def test_get_historical_candles_tries_fallback_candidates(monkeypatch) -> None:
 
 
 def test_get_market_snapshot_exposes_instrument_resolution_trace(monkeypatch) -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.yfinance_cache_enabled = False
     provider._redis = None
 
@@ -182,7 +182,7 @@ def test_get_market_snapshot_exposes_instrument_resolution_trace(monkeypatch) ->
         def history(self, **kwargs):
             return _frame(rows=60)
 
-    monkeypatch.setattr('app.services.market.yfinance_provider.yf.Ticker', _FakeTicker)
+    monkeypatch.setattr('app.services.market.news_provider.yf.Ticker', _FakeTicker)
 
     snapshot = provider.get_market_snapshot('EURUSD.PRO', 'H1')
 
@@ -194,7 +194,7 @@ def test_get_market_snapshot_exposes_instrument_resolution_trace(monkeypatch) ->
 
 
 def test_get_news_context_tries_fallback_candidates(monkeypatch) -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.yfinance_cache_enabled = False
     provider._redis = None
     provider.settings.news_providers = {
@@ -217,7 +217,7 @@ def test_get_news_context_tries_fallback_candidates(monkeypatch) -> None:
                 return [{'title': 'Test headline', 'publisher': 'unit', 'link': 'https://example.com', 'providerPublishTime': _epoch_hours_ago(1)}]
             return []
 
-    monkeypatch.setattr('app.services.market.yfinance_provider.yf.Ticker', _FakeTicker)
+    monkeypatch.setattr('app.services.market.news_provider.yf.Ticker', _FakeTicker)
 
     payload = provider.get_news_context('EURUSD.PRO', limit=5)
     assert payload['degraded'] is False
@@ -230,7 +230,7 @@ def test_get_news_context_tries_fallback_candidates(monkeypatch) -> None:
 
 
 def test_get_news_context_supports_nested_yfinance_news_schema(monkeypatch) -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.yfinance_cache_enabled = False
     provider._redis = None
     provider.settings.news_providers = {
@@ -262,7 +262,7 @@ def test_get_news_context_supports_nested_yfinance_news_schema(monkeypatch) -> N
                 ]
             return []
 
-    monkeypatch.setattr('app.services.market.yfinance_provider.yf.Ticker', _FakeTicker)
+    monkeypatch.setattr('app.services.market.news_provider.yf.Ticker', _FakeTicker)
 
     payload = provider.get_news_context('AAPL', limit=5)
     assert payload['degraded'] is False
@@ -274,7 +274,7 @@ def test_get_news_context_supports_nested_yfinance_news_schema(monkeypatch) -> N
 
 
 def test_get_news_context_prefers_preview_link_over_canonical_when_available(monkeypatch) -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.yfinance_cache_enabled = False
     provider._redis = None
     provider.settings.news_providers = {
@@ -307,7 +307,7 @@ def test_get_news_context_prefers_preview_link_over_canonical_when_available(mon
                 ]
             return []
 
-    monkeypatch.setattr('app.services.market.yfinance_provider.yf.Ticker', _FakeTicker)
+    monkeypatch.setattr('app.services.market.news_provider.yf.Ticker', _FakeTicker)
 
     payload = provider.get_news_context('EURUSD.PRO', limit=5)
     assert payload['degraded'] is False
@@ -318,7 +318,7 @@ def test_get_news_context_prefers_preview_link_over_canonical_when_available(mon
 
 
 def test_get_news_context_uses_macro_fallback_when_pair_has_no_headlines(monkeypatch) -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.yfinance_cache_enabled = False
     provider._redis = None
     provider.settings.news_providers = {
@@ -341,7 +341,7 @@ def test_get_news_context_uses_macro_fallback_when_pair_has_no_headlines(monkeyp
                 return [{'title': 'Risk sentiment shifts', 'publisher': 'unit', 'link': 'https://example.com/risk', 'providerPublishTime': _epoch_hours_ago(2)}]
             return []
 
-    monkeypatch.setattr('app.services.market.yfinance_provider.yf.Ticker', _FakeTicker)
+    monkeypatch.setattr('app.services.market.news_provider.yf.Ticker', _FakeTicker)
 
     payload = provider.get_news_context('EURUSD.PRO', limit=5)
     assert payload['degraded'] is False
@@ -351,7 +351,7 @@ def test_get_news_context_uses_macro_fallback_when_pair_has_no_headlines(monkeyp
 
 
 def test_get_news_context_yahoo_filters_out_stale_items_by_lookback(monkeypatch) -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.yfinance_cache_enabled = False
     provider._redis = None
     provider.settings.news_providers = {
@@ -385,7 +385,7 @@ def test_get_news_context_yahoo_filters_out_stale_items_by_lookback(monkeypatch)
                 ]
             return []
 
-    monkeypatch.setattr('app.services.market.yfinance_provider.yf.Ticker', _FakeTicker)
+    monkeypatch.setattr('app.services.market.news_provider.yf.Ticker', _FakeTicker)
 
     payload = provider.get_news_context('EURUSD.PRO', limit=5)
     assert payload['degraded'] is False
@@ -395,7 +395,7 @@ def test_get_news_context_yahoo_filters_out_stale_items_by_lookback(monkeypatch)
 
 
 def test_get_market_snapshot_uses_cache(monkeypatch) -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.yfinance_cache_enabled = True
     provider.settings.yfinance_snapshot_cache_min_ttl_seconds = 10
     provider.settings.yfinance_snapshot_cache_max_ttl_seconds = 10
@@ -413,7 +413,7 @@ def test_get_market_snapshot_uses_cache(monkeypatch) -> None:
             calls.append(self.symbol)
             return _frame(rows=120)
 
-    monkeypatch.setattr('app.services.market.yfinance_provider.yf.Ticker', _FakeTicker)
+    monkeypatch.setattr('app.services.market.news_provider.yf.Ticker', _FakeTicker)
 
     first = provider.get_market_snapshot('EURUSD.PRO', 'H1')
     second = provider.get_market_snapshot('EURUSD.PRO', 'H1')
@@ -425,7 +425,7 @@ def test_get_market_snapshot_uses_cache(monkeypatch) -> None:
 
 
 def test_get_market_snapshot_refreshes_cache_when_bucket_changes(monkeypatch) -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.yfinance_cache_enabled = True
     provider.settings.yfinance_snapshot_cache_min_ttl_seconds = 10
     provider.settings.yfinance_snapshot_cache_max_ttl_seconds = 10
@@ -446,7 +446,7 @@ def test_get_market_snapshot_refreshes_cache_when_bucket_changes(monkeypatch) ->
             frame['Close'] = frame['Close'] + (calls['count'] - 1) * 0.1
             return frame
 
-    monkeypatch.setattr('app.services.market.yfinance_provider.yf.Ticker', _FakeTicker)
+    monkeypatch.setattr('app.services.market.news_provider.yf.Ticker', _FakeTicker)
 
     first = provider.get_market_snapshot('EURUSD.PRO', 'H1')
     second = provider.get_market_snapshot('EURUSD.PRO', 'H1')
@@ -458,7 +458,7 @@ def test_get_market_snapshot_refreshes_cache_when_bucket_changes(monkeypatch) ->
 
 
 def test_get_historical_candles_uses_cache(monkeypatch) -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.yfinance_cache_enabled = True
     provider.settings.yfinance_historical_cache_ttl_seconds = 600
     provider._redis = _FakeRedis()
@@ -474,7 +474,7 @@ def test_get_historical_candles_uses_cache(monkeypatch) -> None:
             calls.append(self.symbol)
             return _frame(rows=24)
 
-    monkeypatch.setattr('app.services.market.yfinance_provider.yf.Ticker', _FakeTicker)
+    monkeypatch.setattr('app.services.market.news_provider.yf.Ticker', _FakeTicker)
 
     first = provider.get_historical_candles('EURUSD.PRO', 'H1', '2026-01-01', '2026-01-02')
     second = provider.get_historical_candles('EURUSD.PRO', 'H1', '2026-01-01', '2026-01-02')
@@ -487,7 +487,7 @@ def test_get_historical_candles_uses_cache(monkeypatch) -> None:
 
 
 def test_get_news_context_uses_cache(monkeypatch) -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.yfinance_cache_enabled = True
     provider.settings.yfinance_news_cache_ttl_seconds = 120
     provider._redis = _FakeRedis()
@@ -504,7 +504,7 @@ def test_get_news_context_uses_cache(monkeypatch) -> None:
             calls.append(self.symbol)
             return [{'title': 'cached headline', 'publisher': 'unit', 'link': 'https://example.com', 'providerPublishTime': _epoch_hours_ago(1)}]
 
-    monkeypatch.setattr('app.services.market.yfinance_provider.yf.Ticker', _FakeTicker)
+    monkeypatch.setattr('app.services.market.news_provider.yf.Ticker', _FakeTicker)
 
     first = provider.get_news_context('EURUSD.PRO', limit=3)
     second = provider.get_news_context('EURUSD.PRO', limit=3)
@@ -516,10 +516,10 @@ def test_get_news_context_uses_cache(monkeypatch) -> None:
 
 
 def test_provider_api_key_prefers_runtime_connector_settings(monkeypatch) -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.newsapi_api_key = 'env-newsapi-key'
     monkeypatch.setattr(
-        'app.services.market.yfinance_provider.RuntimeConnectorSettings.get_string',
+        'app.services.market.news_provider.RuntimeConnectorSettings.get_string',
         lambda _connector_name, keys, **_kwargs: 'runtime-newsapi-key' if 'NEWSAPI_API_KEY' in keys else '',
     )
 
@@ -531,13 +531,13 @@ def test_provider_api_key_prefers_runtime_connector_settings(monkeypatch) -> Non
 
 
 def test_news_providers_config_applies_runtime_provider_enabled_overrides(monkeypatch) -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.news_providers = {
         'newsapi': {'enabled': True},
         'finnhub': {'enabled': False},
     }
     monkeypatch.setattr(
-        'app.services.market.yfinance_provider.RuntimeConnectorSettings.settings',
+        'app.services.market.news_provider.RuntimeConnectorSettings.settings',
         lambda _connector_name: {'news_providers': {'newsapi': {'enabled': False}, 'finnhub': {'enabled': True}}},
     )
 
@@ -547,7 +547,7 @@ def test_news_providers_config_applies_runtime_provider_enabled_overrides(monkey
 
 
 def test_get_news_context_marks_unavailable_provider_when_credentials_missing() -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.yfinance_cache_enabled = False
     provider._redis = None
     provider.settings.news_providers = {
@@ -569,7 +569,7 @@ def test_get_news_context_marks_unavailable_provider_when_credentials_missing() 
 
 
 def test_get_news_context_returns_error_when_all_callable_providers_fail(monkeypatch) -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.yfinance_cache_enabled = False
     provider._redis = None
     provider.settings.news_providers = {
@@ -594,7 +594,7 @@ def test_get_news_context_returns_error_when_all_callable_providers_fail(monkeyp
         def get(self, *args, **kwargs):
             raise httpx.ReadTimeout('timeout')
 
-    monkeypatch.setattr('app.services.market.yfinance_provider.httpx.Client', _ErrorClient)
+    monkeypatch.setattr('app.services.market.news_provider.httpx.Client', _ErrorClient)
 
     payload = provider.get_news_context('EURUSD.PRO', limit=5)
 
@@ -606,7 +606,7 @@ def test_get_news_context_returns_error_when_all_callable_providers_fail(monkeyp
 
 
 def test_get_news_context_marks_alphavantage_unavailable_when_rate_limited(monkeypatch) -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.yfinance_cache_enabled = False
     provider._redis = None
     provider.settings.news_providers = {
@@ -647,7 +647,7 @@ def test_get_news_context_marks_alphavantage_unavailable_when_rate_limited(monke
                 }
             )
 
-    monkeypatch.setattr('app.services.market.yfinance_provider.httpx.Client', _FakeClient)
+    monkeypatch.setattr('app.services.market.news_provider.httpx.Client', _FakeClient)
 
     payload = provider.get_news_context('EURUSD.PRO', limit=5)
 
@@ -662,7 +662,7 @@ def test_get_news_context_marks_alphavantage_unavailable_when_rate_limited(monke
 
 
 def test_get_news_context_returns_partial_when_one_provider_fails(monkeypatch) -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.yfinance_cache_enabled = False
     provider._redis = None
     provider.settings.news_providers = {
@@ -704,8 +704,8 @@ def test_get_news_context_returns_partial_when_one_provider_fails(monkeypatch) -
         def get(self, *args, **kwargs):
             raise httpx.ReadTimeout('timeout')
 
-    monkeypatch.setattr('app.services.market.yfinance_provider.yf.Ticker', _FakeTicker)
-    monkeypatch.setattr('app.services.market.yfinance_provider.httpx.Client', _ErrorClient)
+    monkeypatch.setattr('app.services.market.news_provider.yf.Ticker', _FakeTicker)
+    monkeypatch.setattr('app.services.market.news_provider.httpx.Client', _ErrorClient)
 
     payload = provider.get_news_context('EURUSD.PRO', limit=5)
 
@@ -717,7 +717,7 @@ def test_get_news_context_returns_partial_when_one_provider_fails(monkeypatch) -
 
 
 def test_get_news_context_deduplicates_same_item_from_multiple_providers(monkeypatch) -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.yfinance_cache_enabled = False
     provider._redis = None
     provider.settings.news_providers = {
@@ -783,8 +783,8 @@ def test_get_news_context_deduplicates_same_item_from_multiple_providers(monkeyp
                 }
             )
 
-    monkeypatch.setattr('app.services.market.yfinance_provider.yf.Ticker', _FakeTicker)
-    monkeypatch.setattr('app.services.market.yfinance_provider.httpx.Client', _FakeClient)
+    monkeypatch.setattr('app.services.market.news_provider.yf.Ticker', _FakeTicker)
+    monkeypatch.setattr('app.services.market.news_provider.httpx.Client', _FakeClient)
 
     payload = provider.get_news_context('EURUSD.PRO', limit=5)
 
@@ -796,7 +796,7 @@ def test_get_news_context_deduplicates_same_item_from_multiple_providers(monkeyp
 
 
 def test_get_news_context_newsapi_uses_header_api_key(monkeypatch) -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.yfinance_cache_enabled = False
     provider._redis = None
     provider.settings.news_providers = {
@@ -848,7 +848,7 @@ def test_get_news_context_newsapi_uses_header_api_key(monkeypatch) -> None:
                 }
             )
 
-    monkeypatch.setattr('app.services.market.yfinance_provider.httpx.Client', _FakeClient)
+    monkeypatch.setattr('app.services.market.news_provider.httpx.Client', _FakeClient)
 
     payload = provider.get_news_context('EURUSD.PRO', limit=5)
 
@@ -863,7 +863,7 @@ def test_get_news_context_newsapi_uses_header_api_key(monkeypatch) -> None:
 
 
 def test_clear_news_cache_deletes_only_news_keys() -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.yfinance_cache_enabled = True
     provider._redis = _FakeRedis()
     provider._redis_unavailable_until = 0.0
@@ -885,7 +885,7 @@ def test_clear_news_cache_deletes_only_news_keys() -> None:
 
 
 def test_test_news_provider_returns_disabled_for_disabled_provider() -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.news_providers = {
         'yahoo_finance': {'enabled': True, 'priority': 100},
         'newsapi': {'enabled': False},
@@ -903,7 +903,7 @@ def test_test_news_provider_returns_disabled_for_disabled_provider() -> None:
 
 
 def test_test_news_provider_returns_ok_for_newsapi(monkeypatch) -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.news_providers = {
         'yahoo_finance': {'enabled': False},
         'newsapi': {'enabled': True, 'priority': 90, 'api_key_env': 'NEWSAPI_API_KEY'},
@@ -949,7 +949,7 @@ def test_test_news_provider_returns_ok_for_newsapi(monkeypatch) -> None:
                 }
             )
 
-    monkeypatch.setattr('app.services.market.yfinance_provider.httpx.Client', _FakeClient)
+    monkeypatch.setattr('app.services.market.news_provider.httpx.Client', _FakeClient)
 
     result = provider.test_news_provider('newsapi', pair='EURUSD.PRO', max_items=5)
 
@@ -961,7 +961,7 @@ def test_test_news_provider_returns_ok_for_newsapi(monkeypatch) -> None:
 
 
 def test_test_news_provider_alphavantage_uses_sanitized_tickers(monkeypatch) -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.news_providers = {
         'yahoo_finance': {'enabled': False},
         'newsapi': {'enabled': False},
@@ -1011,7 +1011,7 @@ def test_test_news_provider_alphavantage_uses_sanitized_tickers(monkeypatch) -> 
                 }
             )
 
-    monkeypatch.setattr('app.services.market.yfinance_provider.httpx.Client', _FakeClient)
+    monkeypatch.setattr('app.services.market.news_provider.httpx.Client', _FakeClient)
 
     result = provider.test_news_provider('alphavantage', pair='EURUSD.PRO', max_items=5)
 
@@ -1029,7 +1029,7 @@ def test_test_news_provider_alphavantage_uses_sanitized_tickers(monkeypatch) -> 
 
 
 def test_test_news_provider_alphavantage_returns_unavailable_on_api_rate_limit(monkeypatch) -> None:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     provider.settings.news_providers = {
         'yahoo_finance': {'enabled': False},
         'newsapi': {'enabled': False},
@@ -1063,7 +1063,7 @@ def test_test_news_provider_alphavantage_returns_unavailable_on_api_rate_limit(m
         def get(self, *_args, **_kwargs):
             return _FakeResponse({'Note': 'API call frequency is 5 requests per minute'})
 
-    monkeypatch.setattr('app.services.market.yfinance_provider.httpx.Client', _FakeClient)
+    monkeypatch.setattr('app.services.market.news_provider.httpx.Client', _FakeClient)
 
     result = provider.test_news_provider('alphavantage', pair='EURUSD.PRO', max_items=5)
 

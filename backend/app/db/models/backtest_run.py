@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from sqlalchemy import Date, DateTime, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -21,6 +21,6 @@ class BacktestRun(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_by_id: Mapped[int] = mapped_column(ForeignKey('users.id'), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
     trades = relationship('BacktestTrade', back_populates='run', cascade='all, delete-orphan')

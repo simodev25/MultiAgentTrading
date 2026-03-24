@@ -282,7 +282,8 @@ type NewsProviderKey =
   | 'newsapi'
   | 'tradingeconomics'
   | 'finnhub'
-  | 'alphavantage';
+  | 'alphavantage'
+  | 'llm_search';
 
 const EMPTY_SECRET_FIELDS: Record<SecretFieldKey, string> = {
   NEWSAPI_API_KEY: '',
@@ -302,6 +303,7 @@ const DEFAULT_NEWS_PROVIDER_ENABLED: Record<NewsProviderKey, boolean> = {
   tradingeconomics: true,
   finnhub: false,
   alphavantage: false,
+  llm_search: false,
 };
 
 const NEWS_PROVIDER_LABELS: Record<NewsProviderKey, string> = {
@@ -310,6 +312,7 @@ const NEWS_PROVIDER_LABELS: Record<NewsProviderKey, string> = {
   tradingeconomics: 'TradingEconomics',
   finnhub: 'Finnhub',
   alphavantage: 'AlphaVantage',
+  llm_search: 'LLM Web Search',
 };
 
 const NEWS_PROVIDER_ORDER: NewsProviderKey[] = [
@@ -318,6 +321,7 @@ const NEWS_PROVIDER_ORDER: NewsProviderKey[] = [
   'tradingeconomics',
   'finnhub',
   'alphavantage',
+  'llm_search',
 ];
 
 let editableGroupCounter = 0;
@@ -414,6 +418,14 @@ export function ConnectorsPage() {
   const [savingSecrets, setSavingSecrets] = useState(false);
   const [newsProvidersEnabled, setNewsProvidersEnabled] = useState<Record<NewsProviderKey, boolean>>(DEFAULT_NEWS_PROVIDER_ENABLED);
   const [savingNewsProviders, setSavingNewsProviders] = useState(false);
+
+  const [cacheEnabled, setCacheEnabled] = useState(false);
+  const [cachePositionsTtl, setCachePositionsTtl] = useState(3);
+  const [cacheOpenOrdersTtl, setCacheOpenOrdersTtl] = useState(5);
+  const [cacheDealsTtl, setCacheDealsTtl] = useState(60);
+  const [cacheHistoryOrdersTtl, setCacheHistoryOrdersTtl] = useState(60);
+  const [cacheAccountInfoTtl, setCacheAccountInfoTtl] = useState(5);
+  const [savingCache, setSavingCache] = useState(false);
 
   const hydrateAgentModels = (connectorRows: ConnectorConfig[]) => {
     const ollama = connectorRows.find((item) => item.connector_name === 'ollama');
@@ -530,29 +542,29 @@ export function ConnectorsPage() {
 
   const hydrateSecretFields = (connectorRows: ConnectorConfig[]) => {
     const ollama = connectorRows.find((item) => item.connector_name === 'ollama');
-    const yfinance = connectorRows.find((item) => item.connector_name === 'yfinance');
+    const newsConnector = connectorRows.find((item) => item.connector_name === 'news');
     const metaapi = connectorRows.find((item) => item.connector_name === 'metaapi');
 
     const ollamaSettings = (ollama?.settings ?? {}) as Record<string, unknown>;
-    const yfinanceSettings = (yfinance?.settings ?? {}) as Record<string, unknown>;
+    const newsSettings = (newsConnector?.settings ?? {}) as Record<string, unknown>;
     const metaapiSettings = (metaapi?.settings ?? {}) as Record<string, unknown>;
 
     setSecretFields({
       OLLAMA_API_KEY: readConnectorSecret(ollamaSettings, 'OLLAMA_API_KEY'),
       OPENAI_API_KEY: readConnectorSecret(ollamaSettings, 'OPENAI_API_KEY'),
       MISTRAL_API_KEY: readConnectorSecret(ollamaSettings, 'MISTRAL_API_KEY'),
-      NEWSAPI_API_KEY: readConnectorSecret(yfinanceSettings, 'NEWSAPI_API_KEY'),
-      TRADINGECONOMICS_API_KEY: readConnectorSecret(yfinanceSettings, 'TRADINGECONOMICS_API_KEY'),
-      FINNHUB_API_KEY: readConnectorSecret(yfinanceSettings, 'FINNHUB_API_KEY'),
-      ALPHAVANTAGE_API_KEY: readConnectorSecret(yfinanceSettings, 'ALPHAVANTAGE_API_KEY'),
+      NEWSAPI_API_KEY: readConnectorSecret(newsSettings, 'NEWSAPI_API_KEY'),
+      TRADINGECONOMICS_API_KEY: readConnectorSecret(newsSettings, 'TRADINGECONOMICS_API_KEY'),
+      FINNHUB_API_KEY: readConnectorSecret(newsSettings, 'FINNHUB_API_KEY'),
+      ALPHAVANTAGE_API_KEY: readConnectorSecret(newsSettings, 'ALPHAVANTAGE_API_KEY'),
       METAAPI_TOKEN: readConnectorSecret(metaapiSettings, 'METAAPI_TOKEN'),
       METAAPI_ACCOUNT_ID: readConnectorSecret(metaapiSettings, 'METAAPI_ACCOUNT_ID'),
     });
   };
 
   const hydrateNewsProviders = (connectorRows: ConnectorConfig[]) => {
-    const yfinance = connectorRows.find((item) => item.connector_name === 'yfinance');
-    const settings = (yfinance?.settings ?? {}) as Record<string, unknown>;
+    const newsConnector = connectorRows.find((item) => item.connector_name === 'news');
+    const settings = (newsConnector?.settings ?? {}) as Record<string, unknown>;
     const rawMap = settings.news_providers && typeof settings.news_providers === 'object'
       ? (settings.news_providers as Record<string, unknown>)
       : {};
@@ -572,6 +584,17 @@ export function ConnectorsPage() {
       }
     });
     setNewsProvidersEnabled(next);
+  };
+
+  const hydrateCacheSettings = (connectorRows: ConnectorConfig[]) => {
+    const metaapi = connectorRows.find((item) => item.connector_name === 'metaapi');
+    const s = (metaapi?.settings ?? {}) as Record<string, unknown>;
+    setCacheEnabled(typeof s.cache_enabled === 'boolean' ? s.cache_enabled : false);
+    setCachePositionsTtl(typeof s.cache_positions_ttl === 'number' ? s.cache_positions_ttl : 3);
+    setCacheOpenOrdersTtl(typeof s.cache_open_orders_ttl === 'number' ? s.cache_open_orders_ttl : 5);
+    setCacheDealsTtl(typeof s.cache_deals_ttl === 'number' ? s.cache_deals_ttl : 60);
+    setCacheHistoryOrdersTtl(typeof s.cache_history_orders_ttl === 'number' ? s.cache_history_orders_ttl : 60);
+    setCacheAccountInfoTtl(typeof s.cache_account_info_ttl === 'number' ? s.cache_account_info_ttl : 5);
   };
 
   const loadAll = async () => {
@@ -629,6 +652,7 @@ export function ConnectorsPage() {
       hydrateAgentModels(connectorRows);
       hydrateSecretFields(connectorRows);
       hydrateNewsProviders(connectorRows);
+      hydrateCacheSettings(connectorRows);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Cannot load admin data');
     }
@@ -982,8 +1006,8 @@ export function ConnectorsPage() {
         api.updateConnector(token, 'ollama', buildSettings('ollama', ['OLLAMA_API_KEY', 'OPENAI_API_KEY', 'MISTRAL_API_KEY'])),
         api.updateConnector(
           token,
-          'yfinance',
-          buildSettings('yfinance', ['NEWSAPI_API_KEY', 'TRADINGECONOMICS_API_KEY', 'FINNHUB_API_KEY', 'ALPHAVANTAGE_API_KEY']),
+          'news',
+          buildSettings('news', ['NEWSAPI_API_KEY', 'TRADINGECONOMICS_API_KEY', 'FINNHUB_API_KEY', 'ALPHAVANTAGE_API_KEY']),
         ),
         api.updateConnector(token, 'metaapi', buildSettings('metaapi', ['METAAPI_TOKEN', 'METAAPI_ACCOUNT_ID'])),
       ]);
@@ -999,13 +1023,13 @@ export function ConnectorsPage() {
     e.preventDefault();
     if (!token) return;
 
-    const yfinance = connectors.find((item) => item.connector_name === 'yfinance');
-    if (!yfinance) {
-      setError('Connecteur yfinance introuvable');
+    const newsConnector = connectors.find((item) => item.connector_name === 'news');
+    if (!newsConnector) {
+      setError('Connecteur news introuvable');
       return;
     }
 
-    const existingSettings = (yfinance.settings ?? {}) as Record<string, unknown>;
+    const existingSettings = (newsConnector.settings ?? {}) as Record<string, unknown>;
     const existingProviders = existingSettings.news_providers && typeof existingSettings.news_providers === 'object'
       ? (existingSettings.news_providers as Record<string, unknown>)
       : {};
@@ -1021,8 +1045,8 @@ export function ConnectorsPage() {
     setSavingNewsProviders(true);
     setError(null);
     try {
-      await api.updateConnector(token, 'yfinance', {
-        enabled: yfinance.enabled,
+      await api.updateConnector(token, 'news', {
+        enabled: newsConnector.enabled,
         settings: {
           ...existingSettings,
           news_providers: nextProviders,
@@ -1033,6 +1057,35 @@ export function ConnectorsPage() {
       setError(err instanceof Error ? err.message : 'Cannot save providers config');
     } finally {
       setSavingNewsProviders(false);
+    }
+  };
+
+  const saveCacheSettings = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!token) return;
+    const metaapi = connectors.find((item) => item.connector_name === 'metaapi');
+    const existingSettings = (metaapi?.settings ?? {}) as Record<string, unknown>;
+
+    setSavingCache(true);
+    setError(null);
+    try {
+      await api.updateConnector(token, 'metaapi', {
+        enabled: metaapi?.enabled ?? true,
+        settings: {
+          ...existingSettings,
+          cache_enabled: cacheEnabled,
+          cache_positions_ttl: cachePositionsTtl,
+          cache_open_orders_ttl: cacheOpenOrdersTtl,
+          cache_deals_ttl: cacheDealsTtl,
+          cache_history_orders_ttl: cacheHistoryOrdersTtl,
+          cache_account_info_ttl: cacheAccountInfoTtl,
+        },
+      });
+      await loadAll();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Cannot save cache settings');
+    } finally {
+      setSavingCache(false);
     }
   };
 
@@ -1065,45 +1118,47 @@ export function ConnectorsPage() {
   const averageLatencySeconds = Number(summary?.average_latency_ms ?? 0) / 1000;
 
   return (
-    <div className="dashboard-grid config-page">
-      <section className="card primary config-hero">
-        <div className="config-hero-copy">
-          <h2>CONFIGURATION</h2>
-          <p>Gérer les connecteurs, modèles IA et paramètres de trading.</p>
-        </div>
-        <div className="config-hero-status">
-          <p className="config-hero-status-title">
-            <span className={`status-dot ${ollamaConnector?.enabled ? 'ok' : 'blocked'}`} />
-            LLM
-          </p>
-          <div className="config-hero-status-grid">
-            <div>
-              <span>État</span>
-              <strong className={ollamaConnector?.enabled ? 'ok-text' : 'danger-text'}>{ollamaConnector?.enabled ? 'Online' : 'Offline'}</strong>
+    <div className="flex flex-col gap-5">
+      <section className="hw-surface p-5">
+        <div className="flex items-center justify-between">
+          <div>
+            <span className="section-title">SYSTEM_CONFIG</span>
+            <p className="text-xs text-text-muted mt-1">Gérer les connecteurs, modèles IA et paramètres de trading.</p>
+          </div>
+          <div className="flex items-center gap-6">
+            <div className="flex items-center gap-2">
+              <div className={`led ${ollamaConnector?.enabled ? 'led-green' : 'led-red'}`} />
+              <span className="micro-label">LLM</span>
             </div>
-            <div>
-              <span>Provider</span>
-              <strong>{llmProvider}</strong>
-            </div>
-            <div>
-              <span>Coût moyen</span>
-              <strong>${averageCostPerRun.toFixed(3)} / run</strong>
-            </div>
-            <div>
-              <span>Latence</span>
-              <strong>{averageLatencySeconds > 0 ? `${averageLatencySeconds.toFixed(1)} s` : '-'}</strong>
+            <div className="grid grid-cols-4 gap-4">
+              <div className="text-center">
+                <span className="micro-label block">État</span>
+                <strong className={`text-xs font-mono ${ollamaConnector?.enabled ? 'text-success' : 'text-danger'}`}>{ollamaConnector?.enabled ? 'Online' : 'Offline'}</strong>
+              </div>
+              <div className="text-center">
+                <span className="micro-label block">Provider</span>
+                <strong className="text-xs font-mono text-text">{llmProvider}</strong>
+              </div>
+              <div className="text-center">
+                <span className="micro-label block">Coût moyen</span>
+                <strong className="text-xs font-mono text-text">${averageCostPerRun.toFixed(3)} / run</strong>
+              </div>
+              <div className="text-center">
+                <span className="micro-label block">Latence</span>
+                <strong className="text-xs font-mono text-text">{averageLatencySeconds > 0 ? `${averageLatencySeconds.toFixed(1)} s` : '-'}</strong>
+              </div>
             </div>
           </div>
         </div>
       </section>
 
-      <section className="card config-shell">
-        <div className="config-tabs" role="tablist" aria-label="Configuration tabs">
+      <section className="hw-surface p-5">
+        <div className="flex gap-1 mb-4 border-b border-border pb-3" role="tablist" aria-label="Configuration tabs">
           {CONFIG_TABS.map((tab) => (
             <button
               key={tab.id}
               type="button"
-              className={`config-tab ${activeConfigTab === tab.id ? 'active' : ''}`}
+              className={`px-3 py-1.5 rounded-md text-[11px] font-medium transition-all ${activeConfigTab === tab.id ? 'bg-accent/10 text-accent border border-accent/20' : 'text-text-muted hover:text-text border border-transparent'}`}
               onClick={() => setActiveConfigTab(tab.id)}
               role="tab"
               aria-selected={activeConfigTab === tab.id}
@@ -1115,9 +1170,9 @@ export function ConnectorsPage() {
         {error && <p className="alert">{error}</p>}
 
         {activeConfigTab === 'connectors' && (
-          <div className="config-panel-grid">
-            <section className="card config-inner-card">
-              <h3>Connecteurs</h3>
+          <div className="flex flex-col gap-4">
+            <section className="hw-surface-alt p-4">
+              <div className="section-header"><span className="section-title">CONNECTORS</span></div>
               <table>
                 <thead>
                   <tr>
@@ -1147,21 +1202,26 @@ export function ConnectorsPage() {
               </table>
             </section>
 
-            <section className="card config-inner-card">
-              <h3>Résultat test connecteur</h3>
+            <section className="hw-surface-alt p-4">
+              <div className="section-header"><span className="section-title">TEST_RESULT</span></div>
               <pre>{JSON.stringify(testResult, null, 2)}</pre>
             </section>
 
-            <section className="card config-inner-card">
-              <h3>Providers News</h3>
+            <section className="hw-surface-alt p-4">
+              <div className="section-header"><span className="section-title">NEWS_PROVIDERS</span></div>
               <p className="model-source">
                 Active ou désactive chaque provider news depuis l’onglet Connecteurs.
               </p>
-              <form className="form-grid" onSubmit={saveNewsProviders}>
+              <form className="flex flex-col gap-3" onSubmit={saveNewsProviders}>
                 {NEWS_PROVIDER_ORDER.map((providerName) => (
-                  <div key={providerName} className="form-grid inline">
+                  <div key={providerName} className="grid grid-cols-2 md:grid-cols-4 gap-3 items-end">
                     <label>
                       {NEWS_PROVIDER_LABELS[providerName]}
+                      {providerName === 'llm_search' && (
+                        <span className="model-source" style={{ fontSize: '0.75rem', marginLeft: 4 }}>
+                          (utilise le provider LLM configur&eacute;)
+                        </span>
+                      )}
                       <input
                         className="ui-switch"
                         type="checkbox"
@@ -1190,10 +1250,10 @@ export function ConnectorsPage() {
         )}
 
         {activeConfigTab === 'models' && (
-          <div className="config-panel-grid">
-            <section className="card stats config-inner-card">
-              <h3>LLM Telemetry</h3>
-              <div className="stats-grid">
+          <div className="flex flex-col gap-4">
+            <section className="hw-surface-alt p-4">
+              <div className="section-header"><span className="section-title">LLM_TELEMETRY</span></div>
+              <div className="grid grid-cols-4 gap-4">
                 <div>
                   <span>Calls</span>
                   <strong>{summary?.total_calls ?? 0}</strong>
@@ -1213,9 +1273,9 @@ export function ConnectorsPage() {
               </div>
             </section>
 
-            <section className="card config-inner-card">
-              <h3>Modèles LLM par agent</h3>
-              <form className="form-grid" onSubmit={saveAgentModels}>
+            <section className="hw-surface-alt p-4">
+              <div className="section-header"><span className="section-title">LLM_MODELS_PER_AGENT</span></div>
+              <form className="flex flex-col gap-3" onSubmit={saveAgentModels}>
                 <label>
                   Provider LLM
                   <select value={llmProvider} onChange={(e) => setLlmProvider(normalizeLlmProvider(e.target.value))}>
@@ -1383,9 +1443,9 @@ export function ConnectorsPage() {
               </form>
             </section>
 
-            <section className="card config-inner-card" id="agent-prompts-editor">
-              <h3>Prompt + skills (par agent)</h3>
-              <form className="form-grid" onSubmit={createPrompt}>
+            <section className="hw-surface-alt p-4" id="agent-prompts-editor">
+              <div className="section-header"><span className="section-title">PROMPT_SKILLS_EDITOR</span></div>
+              <form className="flex flex-col gap-3" onSubmit={createPrompt}>
                 <label>
                   Agent
                   <select value={promptAgent} onChange={(e) => setPromptAgent(e.target.value)}>
@@ -1416,7 +1476,7 @@ export function ConnectorsPage() {
                     placeholder={'ex:\nPrioriser les événements à fort impact pour l’instrument analysé\nSignaler explicitement les incertitudes'}
                   />
                 </label>
-                <div className="form-grid inline">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 items-end">
                   <button className="btn-primary" disabled={promptSaving}>{promptSaving ? 'Enregistrement...' : 'Créer + activer version prompt'}</button>
                   <button
                     className="btn-ghost"
@@ -1462,10 +1522,10 @@ export function ConnectorsPage() {
         )}
 
         {activeConfigTab === 'trading' && (
-          <div className="config-panel-grid">
-            <section className="card config-inner-card">
-              <h3>Mode de décision</h3>
-              <form className="form-grid" onSubmit={saveDecisionMode}>
+          <div className="flex flex-col gap-4">
+            <section className="hw-surface-alt p-4">
+              <div className="section-header"><span className="section-title">DECISION_MODE</span></div>
+              <form className="flex flex-col gap-3" onSubmit={saveDecisionMode}>
                 <label>
                   Decision Mode
                   <select value={decisionMode} onChange={(e) => setDecisionMode(normalizeDecisionMode(e.target.value))}>
@@ -1501,9 +1561,9 @@ export function ConnectorsPage() {
               </form>
             </section>
 
-            <section className="card config-inner-card">
-              <h3>Comptes MetaApi</h3>
-              <form className="form-grid inline" onSubmit={createAccount}>
+            <section className="hw-surface-alt p-4">
+              <div className="section-header"><span className="section-title">METAAPI_ACCOUNTS</span></div>
+              <form className="grid grid-cols-2 md:grid-cols-4 gap-3 items-end" onSubmit={createAccount}>
                 <label>
                   Label
                   <input value={accountLabel} onChange={(e) => setAccountLabel(e.target.value)} required />
@@ -1550,12 +1610,55 @@ export function ConnectorsPage() {
               </table>
             </section>
 
-            <section className="card config-inner-card">
-              <h3>Symboles marché</h3>
+            <section className="hw-surface-alt p-4">
+              <div className="section-header"><span className="section-title">CACHE_REDIS_METAAPI</span></div>
+              <p className="model-source">
+                Cache Redis pour réduire les appels MetaAPI. TTL en secondes (0 = désactivé pour la ressource).
+              </p>
+              <form className="flex flex-col gap-3" onSubmit={saveCacheSettings}>
+                <label>
+                  Cache activé
+                  <input
+                    className="ui-switch"
+                    type="checkbox"
+                    checked={cacheEnabled}
+                    onChange={(e) => setCacheEnabled(e.target.checked)}
+                  />
+                </label>
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                  <label>
+                    Positions TTL
+                    <input type="number" min={0} max={300} value={cachePositionsTtl} disabled={!cacheEnabled} onChange={(e) => setCachePositionsTtl(Math.max(0, Number(e.target.value)))} />
+                  </label>
+                  <label>
+                    Open Orders TTL
+                    <input type="number" min={0} max={300} value={cacheOpenOrdersTtl} disabled={!cacheEnabled} onChange={(e) => setCacheOpenOrdersTtl(Math.max(0, Number(e.target.value)))} />
+                  </label>
+                  <label>
+                    Deals TTL
+                    <input type="number" min={0} max={600} value={cacheDealsTtl} disabled={!cacheEnabled} onChange={(e) => setCacheDealsTtl(Math.max(0, Number(e.target.value)))} />
+                  </label>
+                  <label>
+                    History Orders TTL
+                    <input type="number" min={0} max={600} value={cacheHistoryOrdersTtl} disabled={!cacheEnabled} onChange={(e) => setCacheHistoryOrdersTtl(Math.max(0, Number(e.target.value)))} />
+                  </label>
+                  <label>
+                    Account Info TTL
+                    <input type="number" min={0} max={300} value={cacheAccountInfoTtl} disabled={!cacheEnabled} onChange={(e) => setCacheAccountInfoTtl(Math.max(0, Number(e.target.value)))} />
+                  </label>
+                </div>
+                <button className="btn-primary" disabled={savingCache}>
+                  {savingCache ? 'Enregistrement...' : 'Enregistrer cache'}
+                </button>
+              </form>
+            </section>
+
+            <section className="hw-surface-alt p-4">
+              <div className="section-header"><span className="section-title">MARKET_SYMBOLS</span></div>
               <p className="model-source">
                 Source active: <code>{marketSymbols.source}</code>
               </p>
-              <form className="form-grid" onSubmit={saveMarketSymbols}>
+              <form className="flex flex-col gap-3" onSubmit={saveMarketSymbols}>
                 {symbolGroupsInput.map((group) => (
                   <div key={group.id} className="form-grid inline symbol-group-row">
                     <label>
@@ -1580,7 +1683,7 @@ export function ConnectorsPage() {
                     </button>
                   </div>
                 ))}
-                <div className="form-grid inline">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 items-end">
                   <button className="btn-ghost" type="button" onClick={addSymbolGroupRow}>
                     Ajouter groupe
                   </button>
@@ -1592,14 +1695,14 @@ export function ConnectorsPage() {
         )}
 
         {activeConfigTab === 'security' && (
-          <div className="config-panel-grid">
-            <section className="card config-inner-card">
-              <h3>Clés API Runtime</h3>
+          <div className="flex flex-col gap-4">
+            <section className="hw-surface-alt p-4">
+              <div className="section-header"><span className="section-title">API_RUNTIME_KEYS</span></div>
               <p className="model-source">
                 Ces valeurs sont stockées dans les settings connecteurs et utilisées au runtime (LLM, news providers, MetaApi).
               </p>
-              <form className="form-grid" onSubmit={saveSecrets}>
-                <h4>LLM</h4>
+              <form className="flex flex-col gap-3" onSubmit={saveSecrets}>
+                <span className="text-[10px] font-semibold tracking-[0.12em] text-text-muted uppercase block mt-2 mb-1">LLM_KEYS</span>
                 <label>
                   OLLAMA_API_KEY
                   <input
@@ -1630,7 +1733,7 @@ export function ConnectorsPage() {
                   />
                   <p className="model-source">Actuel: <code>{maskSecretPreview(secretFields.MISTRAL_API_KEY)}</code></p>
                 </label>
-                <h4>News providers</h4>
+                <span className="text-[10px] font-semibold tracking-[0.12em] text-text-muted uppercase block mt-2 mb-1">NEWS_PROVIDER_KEYS</span>
                 <label>
                   NEWSAPI_API_KEY
                   <input
@@ -1671,7 +1774,7 @@ export function ConnectorsPage() {
                   />
                   <p className="model-source">Actuel: <code>{maskSecretPreview(secretFields.ALPHAVANTAGE_API_KEY)}</code></p>
                 </label>
-                <h4>MetaApi</h4>
+                <span className="text-[10px] font-semibold tracking-[0.12em] text-text-muted uppercase block mt-2 mb-1">METAAPI_KEYS</span>
                 <label>
                   METAAPI_TOKEN
                   <input
@@ -1698,9 +1801,9 @@ export function ConnectorsPage() {
               </form>
             </section>
 
-            <section className="card config-inner-card">
-              <h3>Mémoire long-terme</h3>
-              <form className="form-grid inline" onSubmit={searchMemory}>
+            <section className="hw-surface-alt p-4">
+              <div className="section-header"><span className="section-title">LONG_TERM_MEMORY</span></div>
+              <form className="grid grid-cols-2 md:grid-cols-4 gap-3 items-end" onSubmit={searchMemory}>
                 <label>
                   Instrument
                   <select value={memoryPair} onChange={(e) => setMemoryPair(e.target.value)}>

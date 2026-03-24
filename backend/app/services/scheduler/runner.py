@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -79,7 +79,7 @@ def create_and_enqueue_run(
         status='pending',
         trace=base_trace,
         created_by_id=created_by_id,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     db.add(run)
     db.commit()

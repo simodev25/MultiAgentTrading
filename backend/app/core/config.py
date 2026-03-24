@@ -85,7 +85,7 @@ class Settings(BaseSettings):
     mistral_timeout_seconds: int = Field(default=30, alias='MISTRAL_TIMEOUT_SECONDS')
     mistral_input_cost_per_1m_tokens: float = Field(default=0.0, alias='MISTRAL_INPUT_COST_PER_1M_TOKENS')
     mistral_output_cost_per_1m_tokens: float = Field(default=0.0, alias='MISTRAL_OUTPUT_COST_PER_1M_TOKENS')
-    decision_mode: str = Field(default='conservative', alias='DECISION_MODE')
+    decision_mode: str = Field(default='balanced', alias='DECISION_MODE')
     agent_skills_bootstrap_file: str = Field(default='', alias='AGENT_SKILLS_BOOTSTRAP_FILE')
     agent_skills_bootstrap_mode: str = Field(default='merge', alias='AGENT_SKILLS_BOOTSTRAP_MODE')
     agent_skills_bootstrap_apply_once: bool = Field(default=True, alias='AGENT_SKILLS_BOOTSTRAP_APPLY_ONCE')
@@ -114,6 +114,10 @@ class Settings(BaseSettings):
     metaapi_account_info_cache_ttl_seconds: int = Field(default=5, alias='METAAPI_ACCOUNT_INFO_CACHE_TTL_SECONDS')
     metaapi_market_candles_cache_min_ttl_seconds: int = Field(default=2, alias='METAAPI_MARKET_CANDLES_CACHE_MIN_TTL_SECONDS')
     metaapi_market_candles_cache_max_ttl_seconds: int = Field(default=12, alias='METAAPI_MARKET_CANDLES_CACHE_MAX_TTL_SECONDS')
+    metaapi_positions_cache_ttl_seconds: int = Field(default=3, alias='METAAPI_POSITIONS_CACHE_TTL_SECONDS')
+    metaapi_open_orders_cache_ttl_seconds: int = Field(default=5, alias='METAAPI_OPEN_ORDERS_CACHE_TTL_SECONDS')
+    metaapi_deals_cache_ttl_seconds: int = Field(default=60, alias='METAAPI_DEALS_CACHE_TTL_SECONDS')
+    metaapi_history_orders_cache_ttl_seconds: int = Field(default=60, alias='METAAPI_HISTORY_ORDERS_CACHE_TTL_SECONDS')
     metaapi_cache_lock_ttl_seconds: float = Field(default=3.0, alias='METAAPI_CACHE_LOCK_TTL_SECONDS')
     metaapi_cache_wait_timeout_seconds: float = Field(default=1.2, alias='METAAPI_CACHE_WAIT_TIMEOUT_SECONDS')
     yfinance_cache_enabled: bool = Field(default=True, alias='YFINANCE_CACHE_ENABLED')
@@ -121,6 +125,7 @@ class Settings(BaseSettings):
     yfinance_snapshot_cache_min_ttl_seconds: int = Field(default=2, alias='YFINANCE_SNAPSHOT_CACHE_MIN_TTL_SECONDS')
     yfinance_snapshot_cache_max_ttl_seconds: int = Field(default=30, alias='YFINANCE_SNAPSHOT_CACHE_MAX_TTL_SECONDS')
     yfinance_news_cache_ttl_seconds: int = Field(default=120, alias='YFINANCE_NEWS_CACHE_TTL_SECONDS')
+    news_provider_cache_ttl_seconds: int = Field(default=900, alias='NEWS_PROVIDER_CACHE_TTL_SECONDS')
     yfinance_historical_cache_ttl_seconds: int = Field(default=900, alias='YFINANCE_HISTORICAL_CACHE_TTL_SECONDS')
     yfinance_cache_frame_max_rows: int = Field(default=5000, alias='YFINANCE_CACHE_FRAME_MAX_ROWS')
     yfinance_cache_lock_ttl_seconds: float = Field(default=3.0, alias='YFINANCE_CACHE_LOCK_TTL_SECONDS')
@@ -269,7 +274,7 @@ class Settings(BaseSettings):
         normalized = str(value or '').strip().lower()
         if normalized in SUPPORTED_DECISION_MODES:
             return normalized
-        return 'conservative'
+        return 'balanced'
 
     @field_validator('news_providers', 'news_analysis', mode='before')
     @classmethod

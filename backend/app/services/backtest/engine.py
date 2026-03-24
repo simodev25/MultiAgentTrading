@@ -13,7 +13,7 @@ from ta.trend import EMAIndicator
 from ta.volatility import AverageTrueRange
 
 from app.core.config import get_settings
-from app.services.market.yfinance_provider import YFinanceMarketProvider
+from app.services.market.news_provider import MarketProvider
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ class BacktestEngine:
 
     def __init__(self) -> None:
         self.settings = get_settings()
-        self.market_provider = YFinanceMarketProvider()
+        self.market_provider = MarketProvider()
 
     @classmethod
     def normalize_strategy(cls, strategy: str | None) -> str | None:

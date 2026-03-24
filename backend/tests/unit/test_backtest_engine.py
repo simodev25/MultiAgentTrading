@@ -21,7 +21,7 @@ def test_backtest_engine_returns_metrics(monkeypatch) -> None:
         index=index,
     )
 
-    monkeypatch.setattr('app.services.market.yfinance_provider.YFinanceMarketProvider.get_historical_candles', lambda *args, **kwargs: frame)
+    monkeypatch.setattr('app.services.market.news_provider.MarketProvider.get_historical_candles', lambda *args, **kwargs: frame)
 
     engine = BacktestEngine()
     result = engine.run('EURUSD', 'D1', '2025-01-01', '2025-06-30', strategy='ema_rsi')

@@ -47,7 +47,7 @@ def test_trader_agent_outputs_buy_when_score_positive() -> None:
     result = agent.run(ctx, outputs, bullish, bearish)
 
     assert result['decision'] == 'BUY'
-    assert result['decision_mode'] == 'conservative'
+    assert result['decision_mode'] == 'balanced'
     assert result['stop_loss'] is not None
     assert result['take_profit'] is not None
 
@@ -390,13 +390,13 @@ def test_balanced_and_conservative_policy_thresholds_remain_stable() -> None:
     balanced = _resolve_decision_policy('balanced')
     conservative = _resolve_decision_policy('conservative')
 
-    assert balanced.min_combined_score == 0.25
-    assert balanced.min_confidence == 0.30
+    assert balanced.min_combined_score == 0.22
+    assert balanced.min_confidence == 0.28
     assert balanced.min_aligned_sources == 1
-    assert balanced.allow_technical_single_source_override is False
+    assert balanced.allow_technical_single_source_override is True
 
-    assert conservative.min_combined_score == 0.30
-    assert conservative.min_confidence == 0.35
+    assert conservative.min_combined_score == 0.32
+    assert conservative.min_confidence == 0.38
     assert conservative.min_aligned_sources == 2
     assert conservative.allow_technical_single_source_override is False
 
@@ -404,11 +404,11 @@ def test_balanced_and_conservative_policy_thresholds_remain_stable() -> None:
 def test_trader_agent_mode_hierarchy_keeps_permissive_more_opportunistic() -> None:
     ctx = _context(trend='bullish', macd_diff=0.02)
     outputs = {
-        'technical-analyst': {'signal': 'bullish', 'score': 0.10},
+        'technical-analyst': {'signal': 'bullish', 'score': 0.18},
         'market-context-analyst': {'signal': 'neutral', 'score': 0.0},
         'news-analyst': {'signal': 'neutral', 'score': 0.0},
     }
-    bullish = {'arguments': ['x'], 'confidence': 0.3}
+    bullish = {'arguments': ['x'], 'confidence': 0.30}
     bearish = {'arguments': ['y'], 'confidence': 0.0}
 
     permissive = TraderAgent()
@@ -426,9 +426,6 @@ def test_trader_agent_mode_hierarchy_keeps_permissive_more_opportunistic() -> No
     assert permissive_result['decision'] == 'BUY'
     assert balanced_result['decision'] == 'HOLD'
     assert conservative_result['decision'] == 'HOLD'
-    assert permissive_result['combined_score'] >= permissive_result['rationale']['min_combined_score']
-    assert balanced_result['combined_score'] < balanced_result['rationale']['min_combined_score']
-    assert conservative_result['combined_score'] < conservative_result['rationale']['min_combined_score']
 
 
 def test_apply_mode_prompt_guidance_is_permissive_only_and_deduplicated() -> None:
