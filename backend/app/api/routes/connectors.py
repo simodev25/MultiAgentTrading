@@ -21,13 +21,13 @@ from app.services.llm.model_selector import (
 )
 from app.services.llm.provider_client import LlmClient
 from app.services.market.symbols import get_market_symbols_config, save_market_symbols_config
-from app.services.market.yfinance_provider import YFinanceMarketProvider
+from app.services.market.news_provider import MarketProvider
 from app.services.memory.vector_memory import VectorMemoryService
 from app.services.trading.metaapi_client import MetaApiClient
 
 router = APIRouter(prefix='/connectors', tags=['connectors'])
 
-SUPPORTED_CONNECTORS = ['ollama', 'metaapi', 'yfinance', 'qdrant']
+SUPPORTED_CONNECTORS = ['ollama', 'metaapi', 'news', 'qdrant']
 CONNECTOR_SECRET_DEFAULT_FIELDS: dict[str, dict[str, str]] = {
     'ollama': {
         'OLLAMA_API_KEY': 'ollama_api_key',
@@ -38,7 +38,7 @@ CONNECTOR_SECRET_DEFAULT_FIELDS: dict[str, dict[str, str]] = {
         'METAAPI_TOKEN': 'metaapi_token',
         'METAAPI_ACCOUNT_ID': 'metaapi_account_id',
     },
-    'yfinance': {
+    'news': {
         'NEWSAPI_API_KEY': 'newsapi_api_key',
         'TRADINGECONOMICS_API_KEY': 'tradingeconomics_api_key',
         'FINNHUB_API_KEY': 'finnhub_api_key',
@@ -209,6 +209,16 @@ def list_connectors(
 ) -> list[ConnectorConfigOut]:
     settings = get_settings()
     updated_connector_names: set[str] = set()
+    # Migrate legacy 'yfinance' connector row to 'news'.
+    legacy_row = db.query(ConnectorConfig).filter(ConnectorConfig.connector_name == 'yfinance').first()
+    if legacy_row is not None:
+        news_row = db.query(ConnectorConfig).filter(ConnectorConfig.connector_name == 'news').first()
+        if news_row is None:
+            legacy_row.connector_name = 'news'
+            updated_connector_names.add('news')
+        else:
+            db.delete(legacy_row)
+        db.flush()
     connectors = db.query(ConnectorConfig).filter(ConnectorConfig.connector_name.in_(SUPPORTED_CONNECTORS)).all()
     existing = {conn.connector_name for conn in connectors}
     for connector_name in SUPPORTED_CONNECTORS:
@@ -319,9 +329,9 @@ def update_connector(
     db.commit()
     db.refresh(conn)
     RuntimeConnectorSettings.clear_cache(connector_name)
-    if connector_name == 'yfinance':
+    if connector_name == 'news':
         try:
-            YFinanceMarketProvider().clear_news_cache()
+            MarketProvider().clear_news_cache()
         except Exception:
             pass
     if connector_name == 'ollama':
@@ -342,8 +352,8 @@ async def test_connector(
     if connector_name == 'metaapi':
         client = MetaApiClient()
         return await client.get_account_information()
-    if connector_name == 'yfinance':
-        provider = YFinanceMarketProvider()
+    if connector_name == 'news':
+        provider = MarketProvider()
         settings = get_settings()
         symbols_config = get_market_symbols_config(db, settings)
         sample_symbol = next(iter(symbols_config.get('tradeable_pairs', [])), 'SPY')
@@ -363,14 +373,14 @@ async def test_connector(
     raise HTTPException(status_code=404, detail='Unsupported connector')
 
 
-@router.post('/yfinance/news-providers/{provider_name}/test')
+@router.post('/news/news-providers/{provider_name}/test')
 async def test_yfinance_news_provider(
     provider_name: str,
     pair: str | None = None,
     db: Session = Depends(get_db),
     _=Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN)),
 ) -> dict:
-    provider = YFinanceMarketProvider()
+    provider = MarketProvider()
     settings = get_settings()
     symbols_config = get_market_symbols_config(db, settings)
     sample_symbol = str(pair or next(iter(symbols_config.get('tradeable_pairs', [])), 'SPY')).strip() or 'SPY'

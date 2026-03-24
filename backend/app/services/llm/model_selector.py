@@ -30,7 +30,7 @@ DETERMINISTIC_ONLY_AGENTS: set[str] = set()
 MAX_AGENT_SKILLS_PER_AGENT = 12
 MAX_AGENT_SKILL_LENGTH = 500
 SUPPORTED_DECISION_MODES = {'conservative', 'balanced', 'permissive'}
-DEFAULT_DECISION_MODE = 'conservative'
+DEFAULT_DECISION_MODE = 'balanced'
 DEFAULT_MEMORY_CONTEXT_ENABLED = False
 LEGACY_AGENT_ALIASES: dict[str, str] = {
     'macro-analyst': 'market-context-analyst',

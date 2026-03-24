@@ -93,8 +93,8 @@ def test_news_agent_ignores_empty_titles() -> None:
     assert out['decision_mode'] == 'no_evidence'
     assert out['llm_call_attempted'] is False
     assert out['llm_fallback_used'] is False
-    assert out['llm_skipped_reason'] == 'coverage_none'
-    assert out['llm_summary'] == 'LLM not called (coverage_none)'
+    assert out['llm_skipped_reason'] == 'no_evidence'
+    assert out['llm_summary'] == 'LLM not called (no_evidence)'
 
 
 def test_news_agent_uses_deterministic_fallback_when_llm_is_degraded(monkeypatch) -> None:

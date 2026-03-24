@@ -282,7 +282,8 @@ type NewsProviderKey =
   | 'newsapi'
   | 'tradingeconomics'
   | 'finnhub'
-  | 'alphavantage';
+  | 'alphavantage'
+  | 'llm_search';
 
 const EMPTY_SECRET_FIELDS: Record<SecretFieldKey, string> = {
   NEWSAPI_API_KEY: '',
@@ -302,6 +303,7 @@ const DEFAULT_NEWS_PROVIDER_ENABLED: Record<NewsProviderKey, boolean> = {
   tradingeconomics: true,
   finnhub: false,
   alphavantage: false,
+  llm_search: false,
 };
 
 const NEWS_PROVIDER_LABELS: Record<NewsProviderKey, string> = {
@@ -310,6 +312,7 @@ const NEWS_PROVIDER_LABELS: Record<NewsProviderKey, string> = {
   tradingeconomics: 'TradingEconomics',
   finnhub: 'Finnhub',
   alphavantage: 'AlphaVantage',
+  llm_search: 'LLM Web Search',
 };
 
 const NEWS_PROVIDER_ORDER: NewsProviderKey[] = [
@@ -318,6 +321,7 @@ const NEWS_PROVIDER_ORDER: NewsProviderKey[] = [
   'tradingeconomics',
   'finnhub',
   'alphavantage',
+  'llm_search',
 ];
 
 let editableGroupCounter = 0;
@@ -538,29 +542,29 @@ export function ConnectorsPage() {
 
   const hydrateSecretFields = (connectorRows: ConnectorConfig[]) => {
     const ollama = connectorRows.find((item) => item.connector_name === 'ollama');
-    const yfinance = connectorRows.find((item) => item.connector_name === 'yfinance');
+    const newsConnector = connectorRows.find((item) => item.connector_name === 'news');
     const metaapi = connectorRows.find((item) => item.connector_name === 'metaapi');
 
     const ollamaSettings = (ollama?.settings ?? {}) as Record<string, unknown>;
-    const yfinanceSettings = (yfinance?.settings ?? {}) as Record<string, unknown>;
+    const newsSettings = (newsConnector?.settings ?? {}) as Record<string, unknown>;
     const metaapiSettings = (metaapi?.settings ?? {}) as Record<string, unknown>;
 
     setSecretFields({
       OLLAMA_API_KEY: readConnectorSecret(ollamaSettings, 'OLLAMA_API_KEY'),
       OPENAI_API_KEY: readConnectorSecret(ollamaSettings, 'OPENAI_API_KEY'),
       MISTRAL_API_KEY: readConnectorSecret(ollamaSettings, 'MISTRAL_API_KEY'),
-      NEWSAPI_API_KEY: readConnectorSecret(yfinanceSettings, 'NEWSAPI_API_KEY'),
-      TRADINGECONOMICS_API_KEY: readConnectorSecret(yfinanceSettings, 'TRADINGECONOMICS_API_KEY'),
-      FINNHUB_API_KEY: readConnectorSecret(yfinanceSettings, 'FINNHUB_API_KEY'),
-      ALPHAVANTAGE_API_KEY: readConnectorSecret(yfinanceSettings, 'ALPHAVANTAGE_API_KEY'),
+      NEWSAPI_API_KEY: readConnectorSecret(newsSettings, 'NEWSAPI_API_KEY'),
+      TRADINGECONOMICS_API_KEY: readConnectorSecret(newsSettings, 'TRADINGECONOMICS_API_KEY'),
+      FINNHUB_API_KEY: readConnectorSecret(newsSettings, 'FINNHUB_API_KEY'),
+      ALPHAVANTAGE_API_KEY: readConnectorSecret(newsSettings, 'ALPHAVANTAGE_API_KEY'),
       METAAPI_TOKEN: readConnectorSecret(metaapiSettings, 'METAAPI_TOKEN'),
       METAAPI_ACCOUNT_ID: readConnectorSecret(metaapiSettings, 'METAAPI_ACCOUNT_ID'),
     });
   };
 
   const hydrateNewsProviders = (connectorRows: ConnectorConfig[]) => {
-    const yfinance = connectorRows.find((item) => item.connector_name === 'yfinance');
-    const settings = (yfinance?.settings ?? {}) as Record<string, unknown>;
+    const newsConnector = connectorRows.find((item) => item.connector_name === 'news');
+    const settings = (newsConnector?.settings ?? {}) as Record<string, unknown>;
     const rawMap = settings.news_providers && typeof settings.news_providers === 'object'
       ? (settings.news_providers as Record<string, unknown>)
       : {};
@@ -1002,8 +1006,8 @@ export function ConnectorsPage() {
         api.updateConnector(token, 'ollama', buildSettings('ollama', ['OLLAMA_API_KEY', 'OPENAI_API_KEY', 'MISTRAL_API_KEY'])),
         api.updateConnector(
           token,
-          'yfinance',
-          buildSettings('yfinance', ['NEWSAPI_API_KEY', 'TRADINGECONOMICS_API_KEY', 'FINNHUB_API_KEY', 'ALPHAVANTAGE_API_KEY']),
+          'news',
+          buildSettings('news', ['NEWSAPI_API_KEY', 'TRADINGECONOMICS_API_KEY', 'FINNHUB_API_KEY', 'ALPHAVANTAGE_API_KEY']),
         ),
         api.updateConnector(token, 'metaapi', buildSettings('metaapi', ['METAAPI_TOKEN', 'METAAPI_ACCOUNT_ID'])),
       ]);
@@ -1019,13 +1023,13 @@ export function ConnectorsPage() {
     e.preventDefault();
     if (!token) return;
 
-    const yfinance = connectors.find((item) => item.connector_name === 'yfinance');
-    if (!yfinance) {
-      setError('Connecteur yfinance introuvable');
+    const newsConnector = connectors.find((item) => item.connector_name === 'news');
+    if (!newsConnector) {
+      setError('Connecteur news introuvable');
       return;
     }
 
-    const existingSettings = (yfinance.settings ?? {}) as Record<string, unknown>;
+    const existingSettings = (newsConnector.settings ?? {}) as Record<string, unknown>;
     const existingProviders = existingSettings.news_providers && typeof existingSettings.news_providers === 'object'
       ? (existingSettings.news_providers as Record<string, unknown>)
       : {};
@@ -1041,8 +1045,8 @@ export function ConnectorsPage() {
     setSavingNewsProviders(true);
     setError(null);
     try {
-      await api.updateConnector(token, 'yfinance', {
-        enabled: yfinance.enabled,
+      await api.updateConnector(token, 'news', {
+        enabled: newsConnector.enabled,
         settings: {
           ...existingSettings,
           news_providers: nextProviders,
@@ -1213,6 +1217,11 @@ export function ConnectorsPage() {
                   <div key={providerName} className="grid grid-cols-2 md:grid-cols-4 gap-3 items-end">
                     <label>
                       {NEWS_PROVIDER_LABELS[providerName]}
+                      {providerName === 'llm_search' && (
+                        <span className="model-source" style={{ fontSize: '0.75rem', marginLeft: 4 }}>
+                          (utilise le provider LLM configur&eacute;)
+                        </span>
+                      )}
                       <input
                         className="ui-switch"
                         type="checkbox"

@@ -47,6 +47,8 @@ Each analysis run flows sequentially through 8 agents:
 
 - **Multi-asset support** — Forex, crypto, indices, metals, energy, equities
 - **Multiple LLM providers** — Ollama (local), OpenAI, Mistral
+- **Multi-source news** — NewsAPI, Finnhub, AlphaVantage, Trading Economics, LLM Web Search (Ollama/OpenAI)
+- **3 decision modes** — Conservative (strict convergence), Balanced (default, moderate), Permissive (opportunistic)
 - **Vector memory** — Outcome-weighted learning from past trades (pgvector + Qdrant)
 - **19 MCP tools** — Technical indicators, news, macro events, pattern detection, correlation analysis
 - **Paper & live trading** — MetaAPI broker integration with order guardian
@@ -92,7 +94,8 @@ The platform will be available at:
 - **RabbitMQ UI**: http://localhost:15672
 - **Grafana**: http://localhost:3000
 - **Prometheus**: http://localhost:9090
-admin@local.dev password admin1234
+Default credentials: `admin@local.dev` / `admin1234`
+
 ### Local Development
 
 ```bash
@@ -121,11 +124,39 @@ All configuration is done via environment variables. See [`backend/.env.example`
 |----------|-------------|---------|
 | `LLM_PROVIDER` | LLM backend (`ollama`, `openai`, `mistral`) | `ollama` |
 | `OLLAMA_MODEL` | Model name for Ollama | `llama3.1` |
-| `DECISION_MODE` | Trading decision threshold (`conservative`, `balanced`, `permissive`) | `conservative` |
+| `DECISION_MODE` | Trading decision threshold (`conservative`, `balanced`, `permissive`) | `balanced` |
 | `ALLOW_LIVE_TRADING` | Enable real broker execution | `false` |
 | `ENABLE_PAPER_EXECUTION` | Enable paper trading | `true` |
 | `METAAPI_TOKEN` | MetaAPI authentication token | — |
 | `ENABLE_PGVECTOR` | Use pgvector for memory embeddings | `true` |
+| `NEWSAPI_API_KEY` | NewsAPI key (news provider) | — |
+| `FINNHUB_API_KEY` | Finnhub key (news provider) | — |
+| `ALPHAVANTAGE_API_KEY` | AlphaVantage key (news provider) | — |
+| `TRADINGECONOMICS_API_KEY` | TradingEconomics key (news provider) | — |
+
+### Decision Modes
+
+| Mode | Description |
+|------|-------------|
+| **Conservative** | Strict convergence required: 2+ aligned sources, no single-source override, high score/confidence thresholds |
+| **Balanced** (default) | Moderate thresholds, single-source technical override allowed (score >= 0.25), 1 aligned source sufficient |
+| **Permissive** | Opportunistic but prudent: lower thresholds, technical override allowed, major contradictions still blocked |
+
+Configurable via `DECISION_MODE` env var or in the UI (Connectors > AI Models).
+
+### News Providers
+
+News sources are managed in the UI (Connectors > News). Available providers:
+
+| Provider | Type | Requires API Key |
+|----------|------|:---:|
+| **NewsAPI** | REST API | Yes |
+| **Finnhub** | REST API | Yes |
+| **AlphaVantage** | REST API | Yes |
+| **Trading Economics** | REST API | Yes |
+| **LLM Web Search** | Web search via configured LLM provider (Ollama / OpenAI) | No (uses LLM key) |
+
+LLM Web Search uses the LLM provider selected in Connectors > AI Models to perform targeted web searches (site:reuters.com, site:forexlive.com, etc.) with date-aware queries.
 
 ## Project Structure
 
@@ -138,7 +169,7 @@ backend/
       agent_runtime/       # v2 agentic runtime with MCP tools
       memory/              # Vector memory service
       llm/                 # LLM provider clients
-      market/              # Market data (YFinance, instrument classification)
+      market/              # Market data, news providers, instrument classification
       trading/             # MetaAPI client, order guardian, execution
       risk/                # Risk engine & position sizing
       backtest/            # Historical backtesting

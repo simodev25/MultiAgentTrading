@@ -895,6 +895,7 @@ export function OrdersPage() {
                         marketCandles={marketCandles}
                         selectedTicket={selectedChartTicket}
                         selectedSymbol={chartSelection.symbol}
+                        displaySymbol={chartSelection.displaySymbol}
                       />
                     </Suspense>
                   )}

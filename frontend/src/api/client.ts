@@ -126,7 +126,7 @@ export const api = {
     request(`/connectors/${connector}/test`, { method: 'POST' }, token),
   testNewsProvider: (token: string, provider: string, pair?: string) => {
     const query = pair ? `?pair=${encodeURIComponent(pair)}` : '';
-    return request(`/connectors/yfinance/news-providers/${encodeURIComponent(provider)}/test${query}`, { method: 'POST' }, token);
+    return request(`/connectors/news/news-providers/${encodeURIComponent(provider)}/test${query}`, { method: 'POST' }, token);
   },
   listOllamaModels: (token: string) =>
     request<{ models: string[]; source?: string | null; error?: string; provider?: string | null }>(

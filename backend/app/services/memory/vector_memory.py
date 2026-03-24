@@ -142,7 +142,7 @@ class VectorMemoryService:
     @staticmethod
     def _normalize_decision_mode(value: Any) -> str:
         normalized = VectorMemoryService._normalize_text(value)
-        return normalized if normalized in {'conservative', 'balanced', 'permissive'} else 'conservative'
+        return normalized if normalized in {'conservative', 'balanced', 'permissive'} else 'balanced'
 
     @staticmethod
     def _bucket_rsi(rsi: Any) -> str:

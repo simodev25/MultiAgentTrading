@@ -23,7 +23,7 @@ from app.observability.metrics import analysis_runs_total, orchestrator_step_dur
 from app.observability.trace_context import trace_ctx
 from app.services.execution.executor import ExecutionService
 from app.services.llm.model_selector import AgentModelSelector
-from app.services.market.yfinance_provider import YFinanceMarketProvider
+from app.services.market.news_provider import MarketProvider
 from app.services.memory.memori_memory import MemoriMemoryService
 from app.services.memory.vector_memory import VectorMemoryService
 from app.services.orchestrator.agents import (
@@ -60,7 +60,7 @@ class TradingOrchestrator:
 
     def __init__(self) -> None:
         self.settings = get_settings()
-        self.market_provider = YFinanceMarketProvider()
+        self.market_provider = MarketProvider()
         self.metaapi = MetaApiClient()
         self.account_selector = MetaApiAccountSelector()
         self.memory_service = VectorMemoryService()
@@ -806,7 +806,7 @@ class TradingOrchestrator:
         macd_state = str(context.get('macd_state', 'unknown') or 'unknown')
         volatility_regime = str(context.get('volatility_regime', 'unknown') or 'unknown')
         contradiction_level = str(context.get('contradiction_level', 'unknown') or 'unknown')
-        resolved_mode = str(decision_mode or context.get('decision_mode', 'conservative') or 'conservative')
+        resolved_mode = str(decision_mode or context.get('decision_mode', 'balanced') or 'balanced')
         return (
             f'{pair} {timeframe} trend {trend} technical_signal {technical_signal} '
             f'rsi_bucket {rsi_bucket} macd_state {macd_state} volatility {volatility_regime} '

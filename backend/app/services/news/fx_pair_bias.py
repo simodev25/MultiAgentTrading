@@ -6,12 +6,24 @@ from typing import Any, Sequence
 
 FX_STRENGTH_KEYWORDS: dict[str, float] = {
     'rally': 1.0,
+    'rallies': 1.0,
     'rebound': 0.8,
+    'rebounds': 0.8,
     'gain': 1.0,
     'gains': 1.0,
     'rise': 1.0,
     'rises': 1.0,
     'rising': 1.0,
+    'climb': 0.9,
+    'climbs': 0.9,
+    'jump': 0.95,
+    'jumps': 0.95,
+    'advance': 0.8,
+    'advances': 0.8,
+    'soar': 1.0,
+    'soars': 1.0,
+    'surge': 1.0,
+    'surges': 1.0,
     'strengthen': 0.9,
     'strengthens': 0.9,
     'firm': 0.8,
@@ -31,16 +43,52 @@ FX_STRENGTH_KEYWORDS: dict[str, float] = {
     'hikes': 0.7,
     'sticky inflation': 0.7,
     'higher yields': 0.8,
+    'stable': 0.5,
+    'stability': 0.5,
+    'resilient': 0.65,
+    'resilience': 0.65,
+    'anchored': 0.5,
+    'supported': 0.6,
+    'support': 0.55,
+    'outperform': 0.85,
+    'outperforms': 0.85,
+    'outperformance': 0.8,
+    'tailwind': 0.7,
+    'tailwinds': 0.7,
+    'upbeat': 0.65,
+    'optimism': 0.6,
+    'optimistic': 0.65,
+    'surplus': 0.6,
+    'inflows': 0.7,
+    'recovering': 0.7,
+    'recovery': 0.65,
+    'buoyant': 0.6,
+    'appreciation': 0.75,
+    'appreciates': 0.75,
+    'bullish': 0.85,
+    'bid': 0.5,
+    'demand': 0.5,
 }
 
 FX_WEAKNESS_KEYWORDS: dict[str, float] = {
     'selloff': 1.0,
     'sell-off': 1.0,
+    'selling': 0.75,
     'drop': 1.0,
     'drops': 1.0,
     'fall': 1.0,
     'falls': 1.0,
     'falling': 1.0,
+    'dip': 0.8,
+    'dips': 0.8,
+    'slide': 0.9,
+    'slides': 0.9,
+    'slip': 0.75,
+    'slips': 0.75,
+    'retreat': 0.8,
+    'retreats': 0.8,
+    'tumble': 0.95,
+    'tumbles': 0.95,
     'loss': 0.75,
     'losses': 0.75,
     'weaken': 0.9,
@@ -49,12 +97,34 @@ FX_WEAKNESS_KEYWORDS: dict[str, float] = {
     'softer': 0.8,
     'weak': 0.9,
     'weaker': 0.95,
+    'weakness': 0.85,
     'dovish': 0.9,
     'rate cut': 0.95,
     'rate cuts': 0.95,
     'cuts': 0.7,
     'cooler inflation': 0.7,
     'recession': 1.0,
+    'pressure': 0.6,
+    'pressured': 0.65,
+    'headwind': 0.7,
+    'headwinds': 0.7,
+    'underperform': 0.85,
+    'underperforms': 0.85,
+    'pessimism': 0.6,
+    'pessimistic': 0.65,
+    'outflows': 0.7,
+    'depreciation': 0.75,
+    'depreciates': 0.75,
+    'bearish': 0.85,
+    'slump': 0.9,
+    'slumps': 0.9,
+    'decline': 0.8,
+    'declines': 0.8,
+    'declining': 0.8,
+    'deficit': 0.55,
+    'drag': 0.55,
+    'fragile': 0.6,
+    'vulnerable': 0.6,
 }
 
 
@@ -104,11 +174,11 @@ def _local_currency_score(text: str, aliases: Sequence[str]) -> tuple[float, int
 
 
 def _score_to_effect(score: float, support: float) -> str:
-    if support < 0.18:
+    if support < 0.15:
         return 'unknown'
-    if score >= 0.55:
+    if score >= 0.35:
         return 'strengthening'
-    if score <= -0.55:
+    if score <= -0.35:
         return 'weakening'
     return 'unknown'
 
