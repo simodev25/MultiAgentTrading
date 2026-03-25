@@ -814,6 +814,33 @@ class MetaApiClient:
         return True, None
 
     @staticmethod
+    def _normalize_volume_to_spec(volume: float, spec: Any) -> float:
+        """Align volume to the broker's symbol specification (step, min, max).
+
+        MetaTrader brokers reject orders whose volume does not align with the
+        instrument's ``volumeStep``.  This method floors the volume to the
+        nearest valid step and clamps it within ``[volumeMin, volumeMax]``.
+        """
+        import math as _math
+
+        if not isinstance(spec, dict):
+            return volume
+
+        step = float(spec.get('volumeStep') or spec.get('volume_step') or 0)
+        vol_min = float(spec.get('volumeMin') or spec.get('volume_min') or 0)
+        vol_max = float(spec.get('volumeMax') or spec.get('volume_max') or 0)
+
+        if step > 0:
+            volume = round(_math.floor(volume / step) * step, 8)
+
+        if vol_min > 0:
+            volume = max(volume, vol_min)
+        if vol_max > 0:
+            volume = min(volume, vol_max)
+
+        return volume
+
+    @staticmethod
     def _is_symbol_candidate_failure(reason: str | None) -> bool:
         message = (reason or '').strip().lower()
         if not message:
@@ -1631,6 +1658,96 @@ class MetaApiClient:
         finally:
             await self._cache_release_lock(history_cache_key, cache_lock_token)
 
+    async def get_current_tick(
+        self,
+        *,
+        symbol: str,
+        account_id: str | None = None,
+        region: str | None = None,
+    ) -> dict[str, Any]:
+        """Fetch current bid/ask/spread for a symbol via SDK or REST."""
+        resolved_account_id = self._resolve_account_id(account_id)
+        if not resolved_account_id:
+            return {'degraded': True, 'reason': 'MetaApi account id not configured'}
+
+        symbol_candidates = self._market_symbol_candidates(symbol)
+        if not symbol_candidates:
+            return {'degraded': True, 'reason': 'No symbol candidates'}
+
+        # Try SDK first
+        sdk = self._get_sdk(region)
+        if sdk and self._sdk_circuit_remaining_seconds(resolved_account_id, region) <= 0:
+            try:
+                account = await self._sdk_call_with_timeout(
+                    sdk.metatrader_account_api.get_account(resolved_account_id),
+                    timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
+                    account_id=resolved_account_id,
+                    operation='get-account-for-tick',
+                )
+                rpc_unavailable_reason = self._account_rpc_unavailable_reason(account)
+                if not rpc_unavailable_reason:
+                    connection = account.get_rpc_connection()
+                    try:
+                        await self._sdk_call_with_timeout(
+                            connection.connect(),
+                            timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
+                            account_id=resolved_account_id,
+                            operation='rpc-connect-for-tick',
+                        )
+                        await self._sdk_call_with_timeout(
+                            connection.wait_synchronized(),
+                            timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
+                            account_id=resolved_account_id,
+                            operation='rpc-wait-synchronized-for-tick',
+                        )
+                        for candidate in symbol_candidates:
+                            try:
+                                price = await self._sdk_call_with_timeout(
+                                    connection.get_symbol_price(candidate),
+                                    timeout_seconds=self.settings.metaapi_sdk_request_timeout_seconds,
+                                    account_id=resolved_account_id,
+                                    operation=f'get-symbol-price:{candidate}',
+                                )
+                                if isinstance(price, dict) and (price.get('bid') or price.get('ask')):
+                                    return {
+                                        'degraded': False,
+                                        'symbol': candidate,
+                                        'bid': float(price.get('bid') or 0),
+                                        'ask': float(price.get('ask') or 0),
+                                        'spread': round(float(price.get('ask') or 0) - float(price.get('bid') or 0), 8),
+                                        'provider': 'sdk',
+                                    }
+                            except Exception:
+                                continue
+                    finally:
+                        await self._close_connection(connection)
+            except Exception as exc:
+                logger.debug('get_current_tick sdk failed for %s: %s', symbol, exc)
+
+        # REST fallback
+        from urllib.parse import quote
+        for candidate in symbol_candidates:
+            symbol_encoded = quote(candidate, safe='')
+            result = await self._rest_get(resolved_account_id, [
+                f'/users/current/accounts/{resolved_account_id}/symbols/{symbol_encoded}/current-price',
+                f'/users/current/accounts/{resolved_account_id}/symbols/{symbol_encoded}/current-tick',
+            ])
+            if not bool(result.get('degraded', False)):
+                payload = result.get('payload', {})
+                if isinstance(payload, dict) and (payload.get('bid') or payload.get('ask')):
+                    bid = float(payload.get('bid') or 0)
+                    ask = float(payload.get('ask') or 0)
+                    return {
+                        'degraded': False,
+                        'symbol': candidate,
+                        'bid': bid,
+                        'ask': ask,
+                        'spread': round(ask - bid, 8),
+                        'provider': 'rest',
+                    }
+
+        return {'degraded': True, 'reason': 'Current tick unavailable'}
+
     async def get_market_candles(
         self,
         *,
@@ -1949,11 +2066,14 @@ class MetaApiClient:
                         failed_reasons.append(f'{candidate}: {reason or "not tradable"}')
                         continue
 
+                    # Normalize volume to broker step/min/max from symbol spec
+                    normalized_volume = self._normalize_volume_to_spec(volume, symbol_spec)
+
                     try:
                         if normalized_side == 'BUY':
-                            result = await connection.create_market_buy_order(candidate, volume, stop_loss=stop_loss, take_profit=take_profit)
+                            result = await connection.create_market_buy_order(candidate, normalized_volume, stop_loss=stop_loss, take_profit=take_profit)
                         else:
-                            result = await connection.create_market_sell_order(candidate, volume, stop_loss=stop_loss, take_profit=take_profit)
+                            result = await connection.create_market_sell_order(candidate, normalized_volume, stop_loss=stop_loss, take_profit=take_profit)
                     except Exception as exc:
                         failed_reasons.append(f'{candidate}: {exc}')
                         continue

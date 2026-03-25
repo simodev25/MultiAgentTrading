@@ -91,7 +91,7 @@ def test_resolve_market_snapshot_uses_metaapi_when_enabled(monkeypatch) -> None:
         orchestrator.settings.metaapi_use_sdk_for_market_data = True
 
         candles: list[dict[str, object]] = []
-        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        start = datetime.now(timezone.utc) - timedelta(minutes=15 * 90)
         for idx in range(90):
             close = 70000.0 + (idx * 4.5)
             candles.append(
@@ -122,7 +122,18 @@ def test_resolve_market_snapshot_uses_metaapi_when_enabled(monkeypatch) -> None:
                 'provider': 'sdk',
             }
 
+        async def fake_get_current_tick(*, symbol: str, account_id: str | None, region: str | None):
+            return {
+                'degraded': False,
+                'symbol': symbol,
+                'bid': 70400.0,
+                'ask': 70405.0,
+                'spread': 5.0,
+                'provider': 'sdk',
+            }
+
         monkeypatch.setattr(orchestrator.metaapi, 'get_market_candles', fake_get_market_candles)
+        monkeypatch.setattr(orchestrator.metaapi, 'get_current_tick', fake_get_current_tick)
         monkeypatch.setattr(
             orchestrator.market_provider,
             'get_market_snapshot',
@@ -144,6 +155,9 @@ def test_resolve_market_snapshot_uses_metaapi_when_enabled(monkeypatch) -> None:
         assert snapshot['symbol'] == 'BTCUSD'
         assert snapshot['timeframe'] == 'M15'
         assert snapshot['trend'] in {'bullish', 'neutral'}
+        assert snapshot['bid'] == 70400.0
+        assert snapshot['ask'] == 70405.0
+        assert snapshot['spread'] == 5.0
 
 
 def test_resolve_market_snapshot_falls_back_to_yfinance_when_metaapi_degraded(monkeypatch) -> None:
@@ -166,7 +180,11 @@ def test_resolve_market_snapshot_falls_back_to_yfinance_when_metaapi_degraded(mo
                 'tried_symbols': ['BTCUSD'],
             }
 
+        async def fake_get_current_tick(*, symbol: str, **_kwargs):
+            return {'degraded': True, 'reason': 'unavailable'}
+
         monkeypatch.setattr(orchestrator.metaapi, 'get_market_candles', fake_get_market_candles)
+        monkeypatch.setattr(orchestrator.metaapi, 'get_current_tick', fake_get_current_tick)
         monkeypatch.setattr(
             orchestrator.market_provider,
             'get_market_snapshot',
@@ -219,7 +237,7 @@ def test_resolve_market_snapshot_uses_env_metaapi_account_when_no_db_account(mon
                 'timeframe': timeframe,
                 'candles': [
                     {
-                        'time': (datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=15 * idx)).isoformat().replace('+00:00', 'Z'),
+                        'time': (datetime.now(timezone.utc) - timedelta(minutes=15 * (80 - idx))).isoformat().replace('+00:00', 'Z'),
                         'open': 100.0 + idx,
                         'high': 101.0 + idx,
                         'low': 99.0 + idx,
@@ -231,7 +249,11 @@ def test_resolve_market_snapshot_uses_env_metaapi_account_when_no_db_account(mon
                 'provider': 'sdk',
             }
 
+        async def fake_get_current_tick(*, symbol: str, **_kwargs):
+            return {'degraded': True, 'reason': 'unavailable'}
+
         monkeypatch.setattr(orchestrator.metaapi, 'get_market_candles', fake_get_market_candles)
+        monkeypatch.setattr(orchestrator.metaapi, 'get_current_tick', fake_get_current_tick)
 
         snapshot = asyncio.run(
             orchestrator.resolve_market_snapshot(

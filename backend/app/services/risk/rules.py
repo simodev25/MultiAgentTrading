@@ -7,6 +7,7 @@ Supports forex, crypto, indices, commodities, metals, equities.
 from __future__ import annotations
 
 import logging
+import math
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -39,12 +40,14 @@ _CONTRACT_SPECS: dict[str, dict[str, Any]] = {
         'contract_size': 100_000,
         'min_volume': 0.01,
         'max_volume': 10.0,
+        'volume_step': 0.01,
     },
     'crypto': {
         'pip_value_per_lot': 1.0,
         'contract_size': 1,
-        'min_volume': 0.001,
+        'min_volume': 0.01,
         'max_volume': 100.0,
+        'volume_step': 0.01,
     },
     'index': {
         'default_pip_size': 1.0,
@@ -52,6 +55,7 @@ _CONTRACT_SPECS: dict[str, dict[str, Any]] = {
         'contract_size': 1,
         'min_volume': 0.1,
         'max_volume': 50.0,
+        'volume_step': 0.1,
     },
     'metal': {
         'default_pip_size': 0.01,
@@ -59,6 +63,7 @@ _CONTRACT_SPECS: dict[str, dict[str, Any]] = {
         'contract_size': 100,
         'min_volume': 0.01,
         'max_volume': 10.0,
+        'volume_step': 0.01,
     },
     'energy': {
         'default_pip_size': 0.01,
@@ -66,6 +71,7 @@ _CONTRACT_SPECS: dict[str, dict[str, Any]] = {
         'contract_size': 1000,
         'min_volume': 0.01,
         'max_volume': 10.0,
+        'volume_step': 0.01,
     },
     'commodity': {
         'default_pip_size': 0.01,
@@ -73,6 +79,7 @@ _CONTRACT_SPECS: dict[str, dict[str, Any]] = {
         'contract_size': 1000,
         'min_volume': 0.01,
         'max_volume': 10.0,
+        'volume_step': 0.01,
     },
     'equity': {
         'default_pip_size': 0.01,
@@ -80,6 +87,7 @@ _CONTRACT_SPECS: dict[str, dict[str, Any]] = {
         'contract_size': 1,
         'min_volume': 1.0,
         'max_volume': 1000.0,
+        'volume_step': 1.0,
     },
     'etf': {
         'default_pip_size': 0.01,
@@ -87,6 +95,7 @@ _CONTRACT_SPECS: dict[str, dict[str, Any]] = {
         'contract_size': 1,
         'min_volume': 1.0,
         'max_volume': 1000.0,
+        'volume_step': 1.0,
     },
 }
 
@@ -170,6 +179,13 @@ class RiskEngine:
         spec = _CONTRACT_SPECS.get(ac, _CONTRACT_SPECS.get('forex', {}))
         return float(spec.get('min_volume', 0.01)), float(spec.get('max_volume', 10.0))
 
+    @staticmethod
+    def _round_to_step(volume: float, step: float) -> float:
+        """Floor volume to the nearest valid broker step size."""
+        if step <= 0:
+            return volume
+        return round(math.floor(volume / step) * step, 8)
+
     def evaluate(
         self,
         mode: str,
@@ -222,8 +238,11 @@ class RiskEngine:
         suggested_volume = risk_amount / (sl_pips * pip_value) if pip_value > 0 else min_vol
         suggested_volume = max(min(suggested_volume, max_vol), min_vol)
 
-        # Margin estimate
+        # Align to broker volume step (floor to avoid exceeding risk budget)
         spec = _CONTRACT_SPECS.get(ac, {})
+        volume_step = float(spec.get('volume_step', 0.01))
+        suggested_volume = self._round_to_step(suggested_volume, volume_step)
+        suggested_volume = max(suggested_volume, min_vol)  # ensure >= min after flooring
         contract_size = float(spec.get('contract_size', 100_000))
         margin_required = suggested_volume * contract_size * price / 100  # Assumes 1:100 leverage
 
@@ -280,6 +299,9 @@ class RiskEngine:
         raw_volume = risk_amount / (sl_pips * pip_value) if pip_value > 0 else min_vol
 
         suggested = max(min(raw_volume, max_vol), min_vol)
+        volume_step = float(spec.get('volume_step', 0.01))
+        suggested = self._round_to_step(suggested, volume_step)
+        suggested = max(suggested, min_vol)
 
         effective_leverage = leverage if leverage > 0 else 1.0
         margin_required = (suggested * contract_size * entry_price) / effective_leverage

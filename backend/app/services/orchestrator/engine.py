@@ -4,7 +4,7 @@ import json
 import math
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
@@ -534,6 +534,29 @@ class TradingOrchestrator:
                 'timeframe': timeframe,
             }
 
+        # Candle freshness guard: reject obviously stale data (e.g. bare
+        # symbol returning 2012-era candles for a .PRO instrument).
+        _max_age_days: dict[str, int] = {
+            'M1': 1, 'M5': 1, 'M15': 2, 'M30': 2,
+            'H1': 3, 'H4': 5, 'D1': 10, 'W1': 21, 'MN1': 45,
+        }
+        _tf_upper = str(timeframe or '').strip().upper()
+        _freshness_limit = _max_age_days.get(_tf_upper, 10)
+        _latest_ts = frame.index[-1]
+        if _latest_ts.tzinfo is None:
+            _latest_ts = _latest_ts.tz_localize(timezone.utc)
+        _candle_age = datetime.now(timezone.utc) - _latest_ts
+        if _candle_age > timedelta(days=_freshness_limit):
+            return {
+                'degraded': True,
+                'error': (
+                    f'Stale candle data: latest candle is {_candle_age.days}d old '
+                    f'(max {_freshness_limit}d for {_tf_upper})'
+                ),
+                'pair': pair,
+                'timeframe': timeframe,
+            }
+
         close = frame['Close']
         high = frame['High']
         low = frame['Low']
@@ -590,7 +613,7 @@ class TradingOrchestrator:
             'trend': trend,
         }
 
-    def _yfinance_market_snapshot_with_metaapi_context(
+    def _market_snapshot_with_metaapi_context(
         self,
         *,
         pair: str,
@@ -627,15 +650,26 @@ class TradingOrchestrator:
         metaapi_account_ref: int | None = None,
     ) -> dict[str, Any]:
         if not bool(self.settings.metaapi_use_sdk_for_market_data):
-            return self._yfinance_market_snapshot_with_metaapi_context(pair=pair, timeframe=timeframe)
+            return self._market_snapshot_with_metaapi_context(pair=pair, timeframe=timeframe)
 
         selected_account = self.account_selector.resolve(db, metaapi_account_ref)
-        metaapi_market = await self.metaapi.get_market_candles(
-            pair=pair,
-            timeframe=timeframe,
-            limit=240,
-            account_id=selected_account.account_id if selected_account is not None else None,
-            region=selected_account.region if selected_account is not None else None,
+        _acct_id = selected_account.account_id if selected_account is not None else None
+        _acct_region = selected_account.region if selected_account is not None else None
+
+        # Fetch candles and current tick in parallel
+        metaapi_market, current_tick = await asyncio.gather(
+            self.metaapi.get_market_candles(
+                pair=pair,
+                timeframe=timeframe,
+                limit=240,
+                account_id=_acct_id,
+                region=_acct_region,
+            ),
+            self.metaapi.get_current_tick(
+                symbol=pair,
+                account_id=_acct_id,
+                region=_acct_region,
+            ),
         )
         if bool(metaapi_market.get('degraded', False)):
             logger.warning(
@@ -645,7 +679,7 @@ class TradingOrchestrator:
                 selected_account.account_id if selected_account is not None else str(self.settings.metaapi_account_id or '').strip() or 'default',
                 metaapi_market.get('reason'),
             )
-            return self._yfinance_market_snapshot_with_metaapi_context(
+            return self._market_snapshot_with_metaapi_context(
                 pair=pair,
                 timeframe=timeframe,
                 metaapi_payload=metaapi_market,
@@ -665,7 +699,7 @@ class TradingOrchestrator:
                 selected_account.account_id if selected_account is not None else str(self.settings.metaapi_account_id or '').strip() or 'default',
                 snapshot.get('error'),
             )
-            return self._yfinance_market_snapshot_with_metaapi_context(
+            return self._market_snapshot_with_metaapi_context(
                 pair=pair,
                 timeframe=timeframe,
                 metaapi_payload={
@@ -685,6 +719,45 @@ class TradingOrchestrator:
         snapshot['metaapi_account_id'] = (
             selected_account.account_id if selected_account is not None else str(self.settings.metaapi_account_id or '').strip() or None
         )
+
+        # Merge bid/ask/spread from current tick data
+        if isinstance(current_tick, dict) and not bool(current_tick.get('degraded', False)):
+            snapshot['bid'] = current_tick.get('bid')
+            snapshot['ask'] = current_tick.get('ask')
+            snapshot['spread'] = current_tick.get('spread')
+
+        # Cross-validate when MetaApi resolved to a fallback symbol.
+        # If the primary candidate (e.g. USDJPY.pro) failed and the bare
+        # symbol (USDJPY) was used instead, its price may come from a
+        # different instrument.  Compare against YFinance to detect this.
+        _tried = metaapi_market.get('tried_symbols', [])
+        _resolved_sym = str(metaapi_market.get('symbol') or '').strip().upper()
+        _primary_sym = str(_tried[0]).strip().upper() if _tried else ''
+        if _primary_sym and _resolved_sym and _resolved_sym != _primary_sym:
+            try:
+                _yf_ref = self.market_provider.get_market_snapshot(pair, timeframe)
+                if not bool(_yf_ref.get('degraded', False)):
+                    _yf_price = float(_yf_ref.get('last_price', 0))
+                    _meta_price = float(snapshot.get('last_price', 0))
+                    if _yf_price > 0 and _meta_price > 0:
+                        _divergence = abs(_meta_price - _yf_price) / _yf_price
+                        if _divergence > 0.25:
+                            logger.warning(
+                                'MetaApi fallback symbol %s price %.5f diverges %.1f%% from YFinance %.5f for %s — using YFinance',
+                                _resolved_sym,
+                                _meta_price,
+                                _divergence * 100,
+                                _yf_price,
+                                pair,
+                            )
+                            return self._market_snapshot_with_metaapi_context(
+                                pair=pair,
+                                timeframe=timeframe,
+                                metaapi_payload=metaapi_market,
+                            )
+            except Exception as exc:
+                logger.debug('YFinance cross-validation failed for %s: %s', pair, exc)
+
         return snapshot
 
     async def _fetch_multi_tf_snapshots(

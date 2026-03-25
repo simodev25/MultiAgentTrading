@@ -448,8 +448,13 @@ def _merge_llm_signal(base_score: float, llm_signal: str, *, threshold: float, l
     elif base_score == 0.0:
         merged_score = llm_score
     elif (base_score > 0 and llm_signal == 'bullish') or (base_score < 0 and llm_signal == 'bearish'):
+        # Agree — reinforce
         merged_score = base_score + llm_score
+    elif abs(base_score) < threshold:
+        # Disagree but deterministic is weak — LLM dominates
+        merged_score = base_score * 0.2 + llm_score * 0.8
     else:
+        # Disagree with firm deterministic — average
         merged_score = (base_score + llm_score) / 2.0
 
     merged_score = round(float(merged_score), 3)
@@ -1986,12 +1991,16 @@ class TechnicalAnalystAgent:
         output: dict[str, Any] = {
             'signal': signal,
             'score': round(score, 3),
+            'confidence': round(abs(score), 3),
+            'summary': None,
             'market_bias': market_bias,
             'setup_quality': setup_quality,
             'indicators': m_effective,
+            'degraded': False,
             'llm_enabled': llm_enabled,
             'llm_call_attempted': False,
             'llm_fallback_used': False,
+            'llm_summary': None,
             'tooling': {
                 'enabled_tools': enabled_tools,
                 'invocations': tool_invocations,
@@ -2169,6 +2178,8 @@ class TechnicalAnalystAgent:
             {
                 'signal': merged_signal,
                 'score': merged_score,
+                'confidence': round(abs(merged_score), 3),
+                'summary': _compact_prompt_text(llm_text, max_chars=220) if llm_text.strip() else None,
                 'llm_summary': llm_text,
                 'degraded': llm_degraded,
                 'prompt_meta': {
@@ -2970,6 +2981,7 @@ class NewsAnalystAgent:
                 self._record_llm_success()
             else:
                 llm_fallback_used = True
+                degraded = True
                 if not llm_summary.strip():
                     llm_summary = _build_empty_llm_summary(llm_res, retried=llm_retry_used)
                 if llm_degraded:
@@ -3207,22 +3219,22 @@ class MarketContextAnalystAgent:
         trend_bias: str,
         momentum_bias: str,
         volatility_context: str,
-    ) -> str:
+    ) -> float:
         if signal == 'neutral':
-            return 'low'
+            return 0.25
 
         magnitude = abs(float(score))
         if magnitude >= 0.24:
-            confidence = 'high'
+            confidence = 0.75
         elif magnitude >= 0.14:
-            confidence = 'medium'
+            confidence = 0.50
         else:
-            confidence = 'low'
+            confidence = 0.30
 
         if mixed_context or regime in {'volatile', 'unstable'}:
-            if confidence == 'high':
-                return 'medium'
-            return 'low'
+            confidence = min(confidence, 0.40)
+
+        return round(confidence, 3)
 
         # If momentum and volatility are neutral, directional conviction is capped
         # unless we explicitly have a strong trending inheritance from trend.
@@ -3278,7 +3290,8 @@ class MarketContextAnalystAgent:
     def _aligned_summary(output: dict[str, Any]) -> str:
         signal = str(output.get('signal') or 'neutral')
         score = round(_safe_float(output.get('score'), 0.0), 3)
-        confidence = str(output.get('confidence') or 'low')
+        _raw_conf = output.get('confidence', 0.0)
+        confidence = str(round(float(_raw_conf), 3)) if isinstance(_raw_conf, (int, float)) else str(_raw_conf or 'low')
         regime = str(output.get('regime') or 'ranging')
         momentum_bias = str(output.get('momentum_bias') or 'neutral')
         volatility_context = str(output.get('volatility_context') or 'neutral')
@@ -3293,10 +3306,14 @@ class MarketContextAnalystAgent:
             return {
                 'signal': 'neutral',
                 'score': 0.0,
-                'confidence': 'low',
+                'confidence': 0.0,
+                'summary': 'Market snapshot degraded; no reliable context bias.',
                 'regime': 'unstable',
                 'momentum_bias': 'neutral',
                 'volatility_context': 'neutral',
+                'tradability_score': 0.0,
+                'execution_penalty': 1.0,
+                'hard_block': True,
                 'reason': 'Market snapshot degraded; no reliable context bias.',
                 'degraded': True,
                 '_mixed_context': True,
@@ -3406,7 +3423,8 @@ class MarketContextAnalystAgent:
         )
         execution_penalty = round(max(0.0, 1.0 - tradability_score), 3)
         hard_block = (
-            (regime == 'volatile' and volatility_context == 'unsupportive')
+            tradability_score < 0.05
+            or (regime == 'volatile' and volatility_context == 'unsupportive')
             or (regime in ('ranging', 'calm') and mixed_context and abs(score) < 0.10)
         )
 
@@ -3414,6 +3432,7 @@ class MarketContextAnalystAgent:
             'signal': signal,
             'score': score,
             'confidence': confidence,
+            'summary': reason,
             'regime': regime,
             'momentum_bias': momentum_bias,
             'volatility_context': volatility_context,
@@ -4063,7 +4082,10 @@ class TraderAgent:
                 effective_score = round(raw_score * news_weight_multiplier, 4)
             weighted_agent_scores[str(name)] = effective_score
 
-        net_score = round(raw_net_score if not weighted_agent_scores else sum(weighted_agent_scores.values()), 3)
+        net_score = _clamp(
+            round(raw_net_score if not weighted_agent_scores else sum(weighted_agent_scores.values()), 3),
+            -1.0, 1.0,
+        )
         raw_net_score = round(raw_net_score, 3)
         news_score_raw = float((news_output or {}).get('score', 0.0) or 0.0)
         news_score_effective = (
@@ -4235,10 +4257,12 @@ class TraderAgent:
                 combined_score = max(combined_score - contradiction_penalty, -1.0)
             elif combined_score < 0.0:
                 combined_score = min(combined_score + contradiction_penalty, 1.0)
-        # Apply market-context execution penalty (halved to avoid over-dampening)
+        # Apply market-context execution penalty.
+        # Scale factor ramps from 0.5 (mild) to 0.9 (severe) as penalty grows.
         if mc_execution_penalty > 0.0:
-            combined_score *= (1.0 - mc_execution_penalty * 0.5)
-        combined_score = round(combined_score, 3)
+            _penalty_scale = 0.5 + 0.4 * mc_execution_penalty  # 0.5 at 0%, 0.9 at 100%
+            combined_score *= (1.0 - mc_execution_penalty * _penalty_scale)
+        combined_score = round(_clamp(combined_score, -1.0, 1.0), 3)
         combined_score_before_memory = combined_score
         pre_memory_candidate_decision = 'BUY' if combined_score_before_memory > 0.0 else 'SELL' if combined_score_before_memory < 0.0 else 'HOLD'
 

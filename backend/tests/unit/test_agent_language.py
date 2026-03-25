@@ -124,7 +124,7 @@ def test_news_agent_uses_deterministic_fallback_when_llm_is_degraded(monkeypatch
     )
 
     out = agent.run(ctx, db=None)
-    assert out['degraded'] is False
+    assert out['degraded'] is True
     assert out['llm_call_attempted'] is True
     assert out['llm_fallback_used'] is True
     assert out['summary'] == 'LLM degraded for news-analyst. Deterministic skill-aware fallback used.'

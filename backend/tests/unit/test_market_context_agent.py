@@ -38,7 +38,7 @@ def test_mixed_context_returns_neutral_low_confidence() -> None:
     )
 
     assert out['signal'] == 'neutral'
-    assert out['confidence'] == 'low'
+    assert out['confidence'] <= 0.30
     assert out['score'] == 0.0
 
 
@@ -61,7 +61,7 @@ def test_supportive_regime_allows_moderate_bullish_bias() -> None:
 
     assert out['signal'] == 'bullish'
     assert 0.12 <= out['score'] <= 0.35
-    assert out['confidence'] in {'medium', 'high'}
+    assert out['confidence'] >= 0.50
 
 
 def test_weak_trend_inheritance_keeps_low_confidence() -> None:
@@ -83,7 +83,7 @@ def test_weak_trend_inheritance_keeps_low_confidence() -> None:
 
     assert out['signal'] == 'neutral'
     assert abs(out['score']) <= 0.12
-    assert out['confidence'] == 'low'
+    assert out['confidence'] <= 0.30
     assert 'trop peu confirmant' in out['reason'].lower()
 
 
@@ -133,7 +133,7 @@ def test_volatile_unsupportive_context_blocks_strong_signal() -> None:
     assert out['regime'] == 'volatile'
     assert out['volatility_context'] == 'unsupportive'
     assert abs(out['score']) <= 0.2
-    assert out['confidence'] == 'low'
+    assert out['confidence'] <= 0.30
 
 
 def test_llm_summary_matches_structured_context_output() -> None:
@@ -214,7 +214,7 @@ def test_permissive_mode_can_still_trade_after_context_patch() -> None:
             'market-context-analyst': {
                 'signal': 'bearish',
                 'score': -0.13,
-                'confidence': 'low',
+                'confidence': 0.25,
                 'regime': 'calm',
                 'momentum_bias': 'neutral',
                 'volatility_context': 'neutral',
