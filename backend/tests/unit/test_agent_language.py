@@ -421,7 +421,7 @@ def test_technical_agent_respects_explicit_neutral_llm_output(monkeypatch) -> No
 
     out = agent.run(ctx, db=None)
     assert out['signal'] == 'neutral'
-    assert out['score'] == -0.15
+    assert out['score'] == -0.139
 
 
 def test_technical_agent_marks_empty_llm_output_as_degraded(monkeypatch) -> None:

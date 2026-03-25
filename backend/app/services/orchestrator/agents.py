@@ -1816,6 +1816,9 @@ class TechnicalAnalystAgent:
                 'signal': 'neutral',
                 'score': 0.0,
                 'reason': 'Market data unavailable',
+                'degraded': True,
+                'llm_call_attempted': False,
+                'llm_fallback_used': False,
                 'tooling': {
                     'enabled_tools': enabled_tools,
                     'invocations': tool_invocations,
@@ -1856,16 +1859,24 @@ class TechnicalAnalystAgent:
         elif trend == 'bearish':
             score -= 0.35
 
-        if rsi < 35:
-            score += 0.25
-        elif rsi > 65:
-            score -= 0.25
+        # Continuous RSI contribution: scaled between -0.25 (overbought) and +0.25 (oversold)
+        # Neutral zone 45-55 contributes near zero
+        rsi_clamped = max(0.0, min(100.0, rsi))
+        rsi_contribution = (50.0 - rsi_clamped) / 50.0 * 0.25
+        score += rsi_contribution
 
-        if macd_diff > 0:
-            score += 0.2
-        else:
-            score -= 0.2
+        # Continuous MACD contribution: stronger MACD diff = stronger contribution
+        atr = max(_safe_float(m.get('atr'), 0.001), 1e-8)
+        macd_ratio = macd_diff / atr  # normalize by ATR for cross-pair comparability
+        macd_contribution = max(-0.20, min(0.20, macd_ratio * 0.10))
+        score += macd_contribution
 
+        # Change pct contribution (small but differentiating)
+        change_pct = _safe_float(m.get('change_pct'), 0.0)
+        change_contribution = max(-0.10, min(0.10, change_pct / 100.0 * 0.5))
+        score += change_contribution
+
+        score = round(score, 4)
         signal = 'bullish' if score > 0.15 else 'bearish' if score < -0.15 else 'neutral'
         _sr_fallback = {
             'validation': (
@@ -1899,6 +1910,71 @@ class TechnicalAnalystAgent:
         )
         tool_invocations['multi_timeframe_context'] = multi_timeframe_tool
 
+        divergence_tool = _run_agent_tool(
+            tool_id='divergence_detector',
+            enabled_tools=enabled_tools,
+            executor=lambda: (
+                _mcp_divergence_detector(closes=_closes)
+                if _has_candles
+                else {'divergences': [], 'note': 'Raw OHLC candles not available.'}
+            ),
+        )
+        tool_invocations['divergence_detector'] = divergence_tool
+
+        pattern_tool = _run_agent_tool(
+            tool_id='pattern_detector',
+            enabled_tools=enabled_tools,
+            executor=lambda: (
+                _mcp_pattern_detector(opens=_opens, highs=_highs, lows=_lows, closes=_closes)
+                if _has_candles
+                else {'patterns': [], 'note': 'Raw OHLC candles not available.'}
+            ),
+        )
+        tool_invocations['pattern_detector'] = pattern_tool
+
+        # Enrich score with divergence/pattern data from pre-executed tools
+        _div_result = divergence_tool.get('data') or {}
+        _pat_result = pattern_tool.get('data') or {}
+        if isinstance(_div_result.get('divergences'), list):
+            for div in _div_result['divergences']:
+                if div.get('type') == 'bullish':
+                    score += 0.06
+                elif div.get('type') == 'bearish':
+                    score -= 0.06
+        if isinstance(_pat_result.get('patterns'), list):
+            for pat in _pat_result['patterns']:
+                strength = _safe_float(pat.get('strength'), 0.0)
+                if pat.get('signal') == 'bullish':
+                    score += strength * 0.04
+                elif pat.get('signal') == 'bearish':
+                    score -= strength * 0.04
+        score = round(max(-1.0, min(1.0, score)), 4)
+
+        # --- market_bias vs trade_signal separation ---
+        market_bias = 'bullish' if score > 0.05 else 'bearish' if score < -0.05 else 'neutral'
+
+        # Setup quality: how many indicators converge clearly
+        _quality_factors = 0
+        if rsi > 60 or rsi < 40:       # RSI clearly directional
+            _quality_factors += 1
+        if (trend == 'bullish' and macd_diff > 0) or (trend == 'bearish' and macd_diff < 0):
+            _quality_factors += 1       # MACD aligned with trend
+        if abs(score) >= 0.35:          # strong composite edge
+            _quality_factors += 1
+
+        if _quality_factors >= 3:
+            setup_quality = 'high'
+        elif _quality_factors >= 2:
+            setup_quality = 'medium'
+        else:
+            setup_quality = 'low'
+
+        # trade_signal: when setup is low-quality and edge is weak, force neutral
+        if setup_quality == 'low' and abs(score) < 0.30:
+            signal = 'neutral'
+        else:
+            signal = 'bullish' if score > 0.15 else 'bearish' if score < -0.15 else 'neutral'
+
         m_effective = {
             **m,
             'trend': trend,
@@ -1910,8 +1986,12 @@ class TechnicalAnalystAgent:
         output: dict[str, Any] = {
             'signal': signal,
             'score': round(score, 3),
+            'market_bias': market_bias,
+            'setup_quality': setup_quality,
             'indicators': m_effective,
             'llm_enabled': llm_enabled,
+            'llm_call_attempted': False,
+            'llm_fallback_used': False,
             'tooling': {
                 'enabled_tools': enabled_tools,
                 'invocations': tool_invocations,
@@ -1997,6 +2077,19 @@ class TechnicalAnalystAgent:
                     'last_price': m_effective.get('last_price'),
                 },
             ))
+        # Inject pre-computed divergence/pattern results into user prompt context
+        _extra_context_parts: list[str] = []
+        _div_data = divergence_tool.get('data') or {}
+        if isinstance(_div_data.get('divergences'), list) and _div_data['divergences']:
+            _div_lines = [f"  - {d.get('type', '?')} divergence ({d.get('bars_apart', '?')} bars)" for d in _div_data['divergences'][:3]]
+            _extra_context_parts.append('Divergences détectées:\n' + '\n'.join(_div_lines))
+        _pat_data = pattern_tool.get('data') or {}
+        if isinstance(_pat_data.get('patterns'), list) and _pat_data['patterns']:
+            _pat_lines = [f"  - {p.get('type', '?')} ({p.get('signal', '?')}, strength={p.get('strength', '?')})" for p in _pat_data['patterns'][:5]]
+            _extra_context_parts.append('Patterns chandeliers détectés:\n' + '\n'.join(_pat_lines))
+        if _extra_context_parts:
+            user_prompt += '\n\n' + '\n'.join(_extra_context_parts)
+
         system_prompt = _append_tools_prompt_guidance(system_prompt, enabled_tools=enabled_tools)
         decision_mode = self.model_selector.resolve_decision_mode(db)
         system_prompt, user_prompt = _apply_mode_prompt_guidance(
@@ -2017,16 +2110,8 @@ class TechnicalAnalystAgent:
                 'ema_fast': m_effective.get('ema_fast'),
                 'ema_slow': m_effective.get('ema_slow'),
             },
-            'divergence_detector': lambda _args: (
-                _mcp_divergence_detector(closes=_closes)
-                if _has_candles
-                else {'divergences': [], 'note': 'Raw OHLC candles not available; use indicator_bundle.'}
-            ),
-            'pattern_detector': lambda _args: (
-                _mcp_pattern_detector(opens=_opens, highs=_highs, lows=_lows, closes=_closes)
-                if _has_candles
-                else {'patterns': [], 'note': 'Raw OHLC candles not available; use indicator_bundle.'}
-            ),
+            'divergence_detector': lambda _args: dict(divergence_tool.get('data') or {}),
+            'pattern_detector': lambda _args: dict(pattern_tool.get('data') or {}),
             'support_resistance_or_structure_detector': lambda _args: (
                 _mcp_support_resistance_detector(highs=_highs, lows=_lows, closes=_closes)
                 if _has_candles
@@ -2064,6 +2149,22 @@ class TechnicalAnalystAgent:
         )
 
         resolved_skills = list(prompt_info.get('skills', runtime_skills)) if isinstance(prompt_info, dict) else list(runtime_skills)
+
+        # Parse setup_quality from LLM output (e.g. "setup_quality=low")
+        for _sq_line in (llm_text or '').splitlines():
+            _sq_match = re.match(r'\s*setup_quality\s*=\s*(high|medium|low)', _sq_line.strip(), re.IGNORECASE)
+            if _sq_match:
+                setup_quality = _sq_match.group(1).strip().lower()
+                break
+
+        # Override trade signal when LLM confirms low quality
+        if setup_quality == 'low' and abs(merged_score) < 0.30:
+            merged_signal = 'neutral'
+
+        output['llm_call_attempted'] = True
+        output['llm_fallback_used'] = llm_degraded
+        output['market_bias'] = market_bias
+        output['setup_quality'] = setup_quality
         output.update(
             {
                 'signal': merged_signal,
@@ -2463,6 +2564,19 @@ class NewsAnalystAgent:
         directional_edge = directional_sum / weight_sum if weight_sum > 0.0 else 0.0
         score = round(_clamp(directional_edge, -1.0, 1.0), 3)
 
+        # Evidence quality metrics for score penalty (only when metadata is present)
+        _all_retained = relevant_news + relevant_macro
+        _with_freshness = [i for i in _all_retained if i.get('freshness_score') is not None]
+        _with_credibility = [i for i in _all_retained if i.get('credibility_score') is not None]
+        avg_freshness = (
+            sum(_safe_float(i.get('freshness_score'), 0.0) for i in _with_freshness) / len(_with_freshness)
+            if _with_freshness else 1.0
+        )
+        avg_credibility = (
+            sum(_safe_float(i.get('credibility_score'), 0.0) for i in _with_credibility) / len(_with_credibility)
+            if _with_credibility else 1.0
+        )
+
         if relevant_total == 0:
             coverage = 'none'
         elif relevant_total <= 2:
@@ -2539,9 +2653,29 @@ class NewsAnalystAgent:
                 information_state = 'market_news_only'
             else:
                 information_state = 'clear_directional_bias'
-            decision_mode = 'directional'
-            reason = 'Relevant news and macro evidence produced a directional effect on the instrument'
-            summary = _format_news_summary(signal, 'Les évidences news retenues produisent un biais directionnel exploitable sur cet instrument.')
+
+            # Penalize weak narrative: low credibility (opinion-based) or stale evidence
+            _evidence_quality_factor = 1.0
+            if avg_credibility < 0.4:
+                _evidence_quality_factor *= 0.5
+            if avg_freshness < 0.35:
+                _evidence_quality_factor *= 0.65
+
+            if _evidence_quality_factor < 1.0:
+                score = round(score * _evidence_quality_factor, 3)
+                decision_mode = 'weak_narrative'
+                reason = 'Evidence shows directional bias but credibility or freshness is insufficient for a confident signal'
+                summary = _format_news_summary(
+                    signal,
+                    'Les évidences retenues montrent un biais mais la qualité narrative ou la fraîcheur est insuffisante.',
+                )
+                if abs(score) < 0.10:
+                    signal = 'neutral'
+                confidence = min(confidence, 0.45)
+            else:
+                decision_mode = 'directional'
+                reason = 'Relevant news and macro evidence produced a directional effect on the instrument'
+                summary = _format_news_summary(signal, 'Les évidences news retenues produisent un biais directionnel exploitable sur cet instrument.')
             if coverage == 'low':
                 confidence = min(confidence, 0.55)
 
@@ -3029,6 +3163,33 @@ class MarketContextAnalystAgent:
         return 'ranging'
 
     @staticmethod
+    def _compute_tradability(
+        *,
+        regime: str,
+        volatility_context: str,
+        momentum_bias: str,
+        mixed_context: bool,
+        trend: str,
+    ) -> float:
+        """Tradability score: 0.0 = untradeable, 1.0 = ideal conditions."""
+        t = 1.0
+        # Regime penalty
+        _regime_mult = {'trending': 1.0, 'ranging': 0.5, 'calm': 0.4, 'volatile': 0.3, 'unstable': 0.2}
+        t *= _regime_mult.get(regime, 0.5)
+        # Volatility context
+        _vol_mult = {'supportive': 1.0, 'neutral': 0.75, 'unsupportive': 0.4}
+        t *= _vol_mult.get(volatility_context, 0.6)
+        # Mixed signals
+        if mixed_context:
+            t *= 0.6
+        # Momentum aligned with trend → slight boost; opposing → penalty
+        if trend in ('bullish', 'bearish') and momentum_bias == trend:
+            t = min(t * 1.1, 1.0)
+        elif trend in ('bullish', 'bearish') and momentum_bias not in ('neutral', trend):
+            t *= 0.6
+        return round(min(max(t, 0.0), 1.0), 3)
+
+    @staticmethod
     def _resolve_volatility_context(atr_ratio: float, regime: str) -> str:
         if regime in {'volatile', 'unstable'} or atr_ratio >= 0.01:
             return 'unsupportive'
@@ -3236,6 +3397,19 @@ class MarketContextAnalystAgent:
             volatility_context=volatility_context,
         )
 
+        tradability_score = self._compute_tradability(
+            regime=regime,
+            volatility_context=volatility_context,
+            momentum_bias=momentum_bias,
+            mixed_context=mixed_context,
+            trend=trend,
+        )
+        execution_penalty = round(max(0.0, 1.0 - tradability_score), 3)
+        hard_block = (
+            (regime == 'volatile' and volatility_context == 'unsupportive')
+            or (regime in ('ranging', 'calm') and mixed_context and abs(score) < 0.10)
+        )
+
         return {
             'signal': signal,
             'score': score,
@@ -3243,6 +3417,9 @@ class MarketContextAnalystAgent:
             'regime': regime,
             'momentum_bias': momentum_bias,
             'volatility_context': volatility_context,
+            'tradability_score': tradability_score,
+            'execution_penalty': execution_penalty,
+            'hard_block': hard_block,
             'reason': reason,
             'degraded': False,
             '_mixed_context': mixed_context,
@@ -3413,6 +3590,21 @@ class MarketContextAnalystAgent:
                 decision_mode=trading_decision_mode,
                 agent_name=self.name,
             )
+
+            # Inject pre-computed tool data into prompt so LLM has full context
+            _ctx_parts: list[str] = []
+            _regime_data = regime_tool.get('data') or {}
+            if _regime_data:
+                _ctx_parts.append(f"Regime: {_regime_data.get('regime', '?')} (signal={_regime_data.get('signal', '?')})")
+            _ctx_parts.append(f"Session: {session_label} (UTC {utc_hour}h), timeframe={ctx.timeframe}")
+            _corr_data = correlation_tool.get('data') or {}
+            if _corr_data.get('asset_class'):
+                _ctx_parts.append(f"Asset class: {_corr_data['asset_class']}")
+            _vol_data = volatility_tool.get('data') or {}
+            if _vol_data:
+                _ctx_parts.append(f"Volatility: atr_ratio={_vol_data.get('atr_ratio', '?')}, context={_vol_data.get('volatility_context', '?')}")
+            if _ctx_parts:
+                user_prompt += '\n\nDonnées contextuelles pré-calculées:\n' + '\n'.join(f'- {p}' for p in _ctx_parts)
 
             output['llm_call_attempted'] = True
             market_context_tool_dispatchers: dict[str, Any] = {
@@ -3924,6 +4116,17 @@ class TraderAgent:
                 {},
             )
 
+        # Extract market-context tradability governance
+        _mc_output = agent_outputs.get('market-context-analyst')
+        if not isinstance(_mc_output, dict):
+            _mc_output = next(
+                (v for k, v in agent_outputs.items() if 'market-context' in str(k).lower() and isinstance(v, dict)),
+                {},
+            )
+        mc_hard_block = bool(_mc_output.get('hard_block', False))
+        mc_execution_penalty = _clamp(_safe_float(_mc_output.get('execution_penalty'), 0.0), 0.0, 1.0)
+        mc_tradability_score = _clamp(_safe_float(_mc_output.get('tradability_score'), 1.0), 0.0, 1.0)
+
         technical_score = float(technical_output.get('score', 0.0) or 0.0)
         technical_signal = str(technical_output.get('signal', '') or '').strip().lower()
         if technical_signal not in {'bullish', 'bearish', 'neutral'}:
@@ -4032,6 +4235,9 @@ class TraderAgent:
                 combined_score = max(combined_score - contradiction_penalty, -1.0)
             elif combined_score < 0.0:
                 combined_score = min(combined_score + contradiction_penalty, 1.0)
+        # Apply market-context execution penalty (halved to avoid over-dampening)
+        if mc_execution_penalty > 0.0:
+            combined_score *= (1.0 - mc_execution_penalty * 0.5)
         combined_score = round(combined_score, 3)
         combined_score_before_memory = combined_score
         pre_memory_candidate_decision = 'BUY' if combined_score_before_memory > 0.0 else 'SELL' if combined_score_before_memory < 0.0 else 'HOLD'
@@ -4233,7 +4439,7 @@ class TraderAgent:
         low_edge = not decision_ready
 
         decision = candidate_decision if decision_ready else 'HOLD'
-        execution_allowed = decision in {'BUY', 'SELL'} and minimum_evidence_ok and not major_contradiction_block and not memory_risk_block
+        execution_allowed = decision in {'BUY', 'SELL'} and minimum_evidence_ok and not major_contradiction_block and not memory_risk_block and not mc_hard_block
 
         # Build human-readable reason for the decision
         if decision in {'BUY', 'SELL'}:
@@ -4291,6 +4497,10 @@ class TraderAgent:
             gate_reasons.append('memory_risk_block')
         if contradiction_level in {'weak', 'moderate', 'major'}:
             gate_reasons.append(f'trend_momentum_contradiction_{contradiction_level}')
+        if mc_hard_block:
+            gate_reasons.append('market_context_hard_block')
+        if mc_execution_penalty > 0.3:
+            gate_reasons.append(f'market_context_penalty_{round(mc_execution_penalty, 2)}')
 
         last_price = ctx.market_snapshot.get('last_price')
         atr = ctx.market_snapshot.get('atr', 0)
@@ -4424,6 +4634,9 @@ class TraderAgent:
             'invalidation_conditions': invalidation_conditions,
             'contradiction_level': contradiction_level,
             'contradiction_penalty': round(contradiction_penalty, 3),
+            'market_context_tradability': round(mc_tradability_score, 3),
+            'market_context_execution_penalty': round(mc_execution_penalty, 3),
+            'market_context_hard_block': mc_hard_block,
             'volume_multiplier': round(volume_multiplier, 3),
             'entry': last_price,
             'stop_loss': stop_loss,

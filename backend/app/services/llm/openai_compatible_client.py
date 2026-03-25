@@ -222,6 +222,14 @@ class OpenAICompatibleClient:
         return normalize_messages(system_prompt, user_prompt, messages)
 
     @staticmethod
+    def _use_max_completion_tokens(model: str) -> bool:
+        """Newer OpenAI models (o1, o3, gpt-4o, gpt-5+) require max_completion_tokens instead of max_tokens."""
+        normalized = model.strip().lower()
+        if normalized.startswith(('o1', 'o3', 'o4', 'gpt-4o', 'gpt-5', 'gpt-6')):
+            return True
+        return False
+
+    @staticmethod
     def _build_chat_payload(
         model: str,
         system_prompt: str,
@@ -243,7 +251,11 @@ class OpenAICompatibleClient:
             if tool_choice is not None:
                 payload['tool_choice'] = tool_choice
         if max_tokens is not None:
-            payload['max_tokens'] = int(max(max_tokens, 1))
+            token_value = int(max(max_tokens, 1))
+            if OpenAICompatibleClient._use_max_completion_tokens(model):
+                payload['max_completion_tokens'] = token_value
+            else:
+                payload['max_tokens'] = token_value
         if temperature is not None:
             payload['temperature'] = float(temperature)
         return payload
