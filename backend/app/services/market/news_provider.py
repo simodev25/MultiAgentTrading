@@ -152,6 +152,20 @@ class MarketProvider:
     }
     crypto_quote_assets: tuple[str, ...] = ('USDT', 'USDC', 'USD', 'BTC', 'ETH')
     crypto_market_fallback_symbols: list[str] = ['BTC-USD', 'ETH-USD']
+    # Retail store / brand names that cause false-positive matches on FX "dollar" keywords
+    _fx_headline_blacklist: tuple[str, ...] = (
+        'dollar tree',
+        'dollar general',
+        'dollar store',
+        'family dollar',
+        'dollar shave',
+        'silver lake',
+        'silver spring',
+        'gold gym',
+        "gold's gym",
+        'golden state',
+        'golden gate',
+    )
     crypto_news_keywords: tuple[str, ...] = (
         'crypto',
         'cryptocurrency',
@@ -574,41 +588,64 @@ class MarketProvider:
         return (normalized.lower(),)
 
     @classmethod
-    def _news_symbol_candidates(cls, pair: str) -> list[str]:
-        candidates: list[str] = []
+    def _news_symbol_candidates_tiered(cls, pair: str) -> tuple[list[str], list[str]]:
+        """Return (direct_symbols, fallback_symbols) for news candidate selection.
+
+        Direct symbols represent the instrument itself (e.g. USDCHF=X, AVAX-USD).
+        Fallback symbols are proxy/sector/macro symbols (e.g. DX-Y.NYB, BTC-USD).
+        """
+        direct: list[str] = []
+        fallback: list[str] = []
+        seen: set[str] = set()
         instrument = normalize_instrument(pair)
         asset_class = instrument.asset_class.value
 
-        def add(symbol: str | None) -> None:
+        def add_direct(symbol: str | None) -> None:
             value = str(symbol or '').strip()
-            if value and value not in candidates:
-                candidates.append(value)
+            if value and value not in seen:
+                seen.add(value)
+                direct.append(value)
+
+        def add_fallback(symbol: str | None) -> None:
+            value = str(symbol or '').strip()
+            if value and value not in seen:
+                seen.add(value)
+                fallback.append(value)
 
         for entry in get_news_candidates_for_instrument(instrument, provider='yfinance'):
             if isinstance(entry, dict):
-                add(entry.get('symbol'))
+                entry_type = str(entry.get('type') or '').strip().lower()
+                if entry_type == 'primary':
+                    add_direct(entry.get('symbol'))
+                else:
+                    add_fallback(entry.get('symbol'))
         for symbol in cls._ticker_candidates(pair):
-            add(symbol)
+            add_direct(symbol)
 
         if asset_class == 'forex':
             base_ccy = instrument.base_asset
             quote_ccy = instrument.quote_asset
             for ccy in (base_ccy, quote_ccy):
                 for symbol in cls.fx_news_fallback_by_currency.get(str(ccy or ''), []):
-                    add(symbol)
+                    add_fallback(symbol)
             for symbol in cls.macro_news_fallback_symbols:
-                add(symbol)
+                add_fallback(symbol)
         elif asset_class == 'crypto':
             base_asset = instrument.base_asset
-            add(base_asset)
+            add_direct(base_asset)
             if base_asset not in {'BTC', 'ETH'}:
                 for symbol in cls.crypto_market_fallback_symbols:
-                    add(symbol)
+                    add_fallback(symbol)
         else:
             for symbol in cls.macro_news_fallback_symbols:
-                add(symbol)
+                add_fallback(symbol)
 
-        return candidates
+        return direct, fallback
+
+    @classmethod
+    def _news_symbol_candidates(cls, pair: str) -> list[str]:
+        direct, fallback = cls._news_symbol_candidates_tiered(pair)
+        return direct + fallback
 
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -853,6 +890,13 @@ class MarketProvider:
         freshness = round(cls._freshness_score(published_iso), 3)
         credibility = round(cls._credibility_score(provider, source_name), 3)
         asset_class = cls._asset_class_for_pair(pair)
+
+        # Filter out retail/brand false positives on FX and commodity pairs
+        if asset_class in {'fx', 'commodity'}:
+            combined_lower = f'{clean_title} {clean_summary or ""}'.lower()
+            if any(brand in combined_lower for brand in cls._fx_headline_blacklist):
+                return None
+
         fx_effects = {
             'impacted_currencies': [],
             'impact_on_base': 'unknown',
@@ -1148,22 +1192,18 @@ class MarketProvider:
             output.append(item)
         return output
 
-    def _fetch_yahoo_news_items(
+    def _fetch_yahoo_news_for_symbols(
         self,
+        symbols: list[str],
         pair: str,
         *,
         max_items: int,
-        timeout_seconds: float,
-        provider_cfg: dict[str, Any] | None = None,
-    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-        selected: list[dict[str, Any]] = []
-        symbols_scanned: list[str] = []
+        min_dt: datetime,
+        symbols_scanned: list[str],
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Try fetching news from a list of symbols, return on first success."""
         last_symbol: str | None = None
-        cfg = provider_cfg if isinstance(provider_cfg, dict) else {}
-        lookback_hours = int(max(self._safe_float(cfg.get('lookback_hours'), 72.0), 1.0))
-        min_dt = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
-
-        for symbol in self._news_symbol_candidates(pair):
+        for symbol in symbols:
             try:
                 last_symbol = symbol
                 symbols_scanned.append(symbol)
@@ -1198,8 +1238,37 @@ class MarketProvider:
                     break
 
             if symbol_selected:
-                selected = symbol_selected[:max_items]
-                break
+                return symbol_selected[:max_items], last_symbol
+
+        return [], last_symbol
+
+    def _fetch_yahoo_news_items(
+        self,
+        pair: str,
+        *,
+        max_items: int,
+        timeout_seconds: float,
+        provider_cfg: dict[str, Any] | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        symbols_scanned: list[str] = []
+        cfg = provider_cfg if isinstance(provider_cfg, dict) else {}
+        lookback_hours = int(max(self._safe_float(cfg.get('lookback_hours'), 72.0), 1.0))
+        min_dt = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
+
+        direct, fallback = self._news_symbol_candidates_tiered(pair)
+
+        # Phase 1: try direct/primary symbols first
+        selected, last_symbol = self._fetch_yahoo_news_for_symbols(
+            direct, pair, max_items=max_items, min_dt=min_dt, symbols_scanned=symbols_scanned,
+        )
+
+        # Phase 2: if no direct results, try fallback/proxy symbols
+        if not selected and fallback:
+            selected, fb_symbol = self._fetch_yahoo_news_for_symbols(
+                fallback, pair, max_items=max_items, min_dt=min_dt, symbols_scanned=symbols_scanned,
+            )
+            if fb_symbol:
+                last_symbol = fb_symbol
 
         return selected, {
             'symbol': str(selected[0].get('source_symbol') or last_symbol or '') if selected else last_symbol,

@@ -1633,6 +1633,7 @@ def _validate_news_output(
     rejected_evidence: list[dict[str, Any]],
     min_directional_relevance: float,
     signal_threshold: float = 0.10,
+    asset_class: str = '',
 ) -> dict[str, Any]:
     actions: list[str] = []
     summary = str(output.get('summary') or '')
@@ -1664,7 +1665,10 @@ def _validate_news_output(
             return has_asset_impact or has_strong_relevance
         return True
 
-    fx_neutral_only = bool(selected_evidence) and all(
+    # FX-only rule: detect when all FX evidence lacks directional pair effect.
+    # Skip entirely for non-FX asset classes (crypto, commodity, index, etc.)
+    _pair_asset_class = asset_class.strip().lower()
+    fx_neutral_only = _pair_asset_class in {'fx', 'forex'} and bool(selected_evidence) and all(
         str(item.get('asset_class') or '').strip().lower() not in {'fx', 'forex'}
         or (
             _directional_effect(item) == 'neutral'
@@ -1785,6 +1789,21 @@ class TechnicalAnalystAgent:
         self.model_selector = AgentModelSelector()
         self.prompt_service = PromptTemplateService()
 
+    @staticmethod
+    def _compute_confidence(score: float, setup_quality: str) -> float:
+        """Quality-weighted confidence: abs(score) adjusted by setup quality.
+
+        - high quality: up to +20% boost (max 0.95)
+        - medium quality: no adjustment
+        - low quality: capped at 0.40
+        """
+        base = abs(float(score))
+        if setup_quality == 'high':
+            return min(base * 1.2, 0.95)
+        if setup_quality == 'low':
+            return min(base, 0.40)
+        return base
+
     def run(self, ctx: AgentContext, db: Session | None = None) -> dict[str, Any]:
         from app.services.agent_runtime.mcp_trading_server import (
             divergence_detector as _mcp_divergence_detector,
@@ -1820,6 +1839,11 @@ class TechnicalAnalystAgent:
             return {
                 'signal': 'neutral',
                 'score': 0.0,
+                'raw_score': 0.0,
+                'confidence': 0.0,
+                'confidence_method': 'degraded',
+                'market_bias': 'neutral',
+                'setup_quality': 'low',
                 'reason': 'Market data unavailable',
                 'degraded': True,
                 'llm_call_attempted': False,
@@ -1988,10 +2012,13 @@ class TechnicalAnalystAgent:
         }
         runtime_skills = _resolve_runtime_skills(self.model_selector, db, self.name)
         llm_enabled = self.model_selector.is_enabled(db, self.name)
+        deterministic_score = round(score, 3)
         output: dict[str, Any] = {
             'signal': signal,
-            'score': round(score, 3),
-            'confidence': round(abs(score), 3),
+            'score': deterministic_score,
+            'raw_score': deterministic_score,
+            'confidence': round(self._compute_confidence(score, setup_quality), 3),
+            'confidence_method': 'deterministic_quality_weighted',
             'summary': None,
             'market_bias': market_bias,
             'setup_quality': setup_quality,
@@ -2178,7 +2205,8 @@ class TechnicalAnalystAgent:
             {
                 'signal': merged_signal,
                 'score': merged_score,
-                'confidence': round(abs(merged_score), 3),
+                'confidence': round(self._compute_confidence(merged_score, setup_quality), 3),
+                'confidence_method': 'llm_merged_quality_weighted',
                 'summary': _compact_prompt_text(llm_text, max_chars=220) if llm_text.strip() else None,
                 'llm_summary': llm_text,
                 'degraded': llm_degraded,
@@ -3055,10 +3083,12 @@ class NewsAnalystAgent:
                 )
 
         resolved_skills = list(prompt_info.get('skills', runtime_skills)) if isinstance(prompt_info, dict) else list(runtime_skills)
+        _news_conf_method = 'llm_semantic' if llm_semantic_mode else ('evidence_weighted' if llm_call_attempted else 'deterministic_evidence')
         output = {
             'signal': signal,
             'score': round(_clamp(score, -1.0, 1.0), 3),
             'confidence': confidence,
+            'confidence_method': _news_conf_method,
             'coverage': coverage,
             'evidence_strength': evidence_strength,
             'information_state': information_state,
@@ -3072,6 +3102,8 @@ class NewsAnalystAgent:
             'provider_status': provider_status,
             'instrument': instrument_context['instrument_dict'],
             'evidence': top_evidence,
+            'evidence_total_count': len(relevant_news) + len(relevant_macro),
+            'evidence_exposed_count': len(top_evidence),
             'selection_trace': {
                 'instrument': instrument_context['instrument_dict'],
                 'collected_news_count': len(valid_news),
@@ -3121,6 +3153,7 @@ class NewsAnalystAgent:
             selected_evidence=relevant_news + relevant_macro,
             rejected_evidence=rejected_evidence,
             min_directional_relevance=min_directional_relevance,
+            asset_class=asset_class,
         )
         _enrich_prompt_meta_debug(
             output['prompt_meta'],
@@ -3306,7 +3339,9 @@ class MarketContextAnalystAgent:
             return {
                 'signal': 'neutral',
                 'score': 0.0,
+                'market_bias': 'neutral',
                 'confidence': 0.0,
+                'confidence_method': 'degraded',
                 'summary': 'Market snapshot degraded; no reliable context bias.',
                 'regime': 'unstable',
                 'momentum_bias': 'neutral',
@@ -3428,10 +3463,14 @@ class MarketContextAnalystAgent:
             or (regime in ('ranging', 'calm') and mixed_context and abs(score) < 0.10)
         )
 
+        # market_bias shows the raw directional lean before thresholding
+        market_bias = 'bullish' if score > 0.03 else 'bearish' if score < -0.03 else 'neutral'
         return {
             'signal': signal,
             'score': score,
+            'market_bias': market_bias,
             'confidence': confidence,
+            'confidence_method': 'magnitude_regime_weighted',
             'summary': reason,
             'regime': regime,
             'momentum_bias': momentum_bias,
@@ -3670,6 +3709,7 @@ class MarketContextAnalystAgent:
                 output['llm_note'] = _compact_prompt_text(llm_text, max_chars=220)
             else:
                 output['llm_fallback_used'] = True
+                output['degraded'] = True
 
         output['llm_summary'] = self._aligned_summary(output)
         output.pop('_mixed_context', None)
