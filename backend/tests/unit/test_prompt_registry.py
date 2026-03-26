@@ -183,9 +183,14 @@ def test_default_prompts_include_structured_contracts_for_priority_agents() -> N
     news_user = DEFAULT_PROMPTS['news-analyst']['user']
     market_context_user = DEFAULT_PROMPTS['market-context-analyst']['user']
 
+    assert 'Faits bruts' in technical_user
+    assert 'Résultats tools pré-exécutés' in technical_user
+    assert 'Règles d\'interprétation' in technical_user
+    assert '[tool:...]' in technical_user
     assert 'setup_quality=high|medium|low' in technical_user
     assert 'validation=<condition principale' in technical_user
     assert 'invalidation=<condition principale' in technical_user
+    assert 'evidence_used=<liste courte des tools/champs réellement utilisés>' in technical_user
 
     assert 'horizon=intraday|swing|uncertain' in news_user
     assert 'impact=high|medium|low' in news_user

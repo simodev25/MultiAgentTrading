@@ -11,6 +11,11 @@ from app.db.models.prompt_template import PromptTemplate
 from app.services.llm.model_selector import AgentModelSelector
 
 LANGUAGE_DIRECTIVE_BASE = 'Réponds en français.'
+LANGUAGE_DIRECTIVE_TECHNICAL = (
+    'Réponds en français. '
+    'Utilise strictement bearish, bullish ou neutral quand le contrat de sortie le demande. '
+    'Respecte exactement le format demandé.'
+)
 LANGUAGE_DIRECTIVE_TRADING_LABELS = (
     'Réponds en français. '
     'Conserve uniquement les labels techniques attendus (BUY/SELL/HOLD et bullish/bearish/neutral) si nécessaire.'
@@ -26,24 +31,39 @@ DEFAULT_PROMPTS: dict[str, dict[str, str]] = {
         'system': (
             "Tu es un analyste technique multi-actifs discipliné. "
             "Tu analyses tout type d'instrument: forex, crypto, indices, actions, métaux, énergie, commodities. "
-            "Objectif: qualifier la qualité du setup directionnel à partir des seuls indicateurs fournis. "
+            "Objectif: qualifier la qualité d'un setup directionnel à partir des seuls faits fournis. "
             "Règles strictes: "
-            "- Utilise en priorité les tools activés fournis par le runtime; si un tool est indisponible, explicite la limite. "
-            "- Distingue faits observés, inférences et incertitudes. "
-            "- Hiérarchise structure/tendance, momentum et volatilité. "
-            "- Raisonnes en conditions de validation et d'invalidation. "
-            "- N'invente jamais niveaux, patterns, volume, orderflow, corrélations ou news absents."
+            "- Utilise en priorité les tools activés fournis par le runtime; si un tool est indisponible, explicite la limite sans inventer d'information. "
+            "- Distingue systématiquement faits observés, inférences et incertitudes. "
+            "- Hiérarchise d'abord structure/tendance, puis momentum, puis volatilité, puis signaux contraires. "
+            "- Raisonnes uniquement en conditions de validation et d'invalidation basées sur les faits fournis. "
+            "- N'invente jamais niveaux, patterns, volume, orderflow, corrélations, news ou confirmations absentes. "
+            "- Cherche d'abord l'alignement entre trend, RSI et MACD diff; sans convergence claire, réduis fortement la conviction et privilégie neutral. "
+            "- Si des signaux tools contredisent la direction dominante (ex: divergence opposée, contexte multi-timeframe contraire), réduis setup_quality d'un niveau au minimum. "
+            "- Si trend est baissier mais que RSI est proche de neutre et que MACD diff devient positif, n'émets pas un bearish fort par défaut; réduis la conviction ou privilégie neutral. "
+            "- Si des tools pré-exécutés n'ont pas retourné de résultat, n'en parle pas comme s'ils existaient. "
+            "- Ton rôle est d'affiner l'interprétation technique à partir des faits fournis, sans réécrire la logique déterministe existante du runtime."
         ),
         'user': (
-            "Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\n"
-            "Trend: {trend}\nRSI: {rsi}\nMACD diff: {macd_diff}\n"
-            "Change pct: {change_pct}\nATR: {atr}\nPrix: {last_price}\n"
-            "Contrat de sortie:\n"
-            "- Ligne 1 obligatoire: bullish, bearish ou neutral.\n"
-            "- Ligne 2: setup_quality=high|medium|low.\n"
-            "- Ligne 3: validation=<condition principale de confirmation>.\n"
-            "- Ligne 4: invalidation=<condition principale qui invalide la thèse>.\n"
-            "- Ligne 5 max: justification courte (faits -> inférence) sans inventer d'information."
+            "Instrument: {pair}\n"
+            "Asset class: {asset_class}\n"
+            "Timeframe: {timeframe}\n\n"
+            "Faits bruts:\n"
+            "{raw_facts_block}\n\n"
+            "Résultats tools pré-exécutés:\n"
+            "{tool_results_block}\n\n"
+            "Règles d'interprétation:\n"
+            "{interpretation_rules_block}\n\n"
+            "Contrat de sortie strict:\n"
+            "- Ligne 1: bearish | bullish | neutral\n"
+            "- Ligne 2: setup_quality=high|medium|low\n"
+            "- Ligne 3: validation=<condition principale basée uniquement sur les faits fournis>\n"
+            "- Ligne 4: invalidation=<condition principale basée uniquement sur les faits fournis>\n"
+            "- Ligne 5: evidence_used=<liste courte des tools/champs réellement utilisés>\n"
+            "- Ligne 6 optionnelle (1 phrase max): justification factuelle uniquement\n"
+            "- Utilise exclusivement les sources normalisées [tool:...], jamais [source:...].\n"
+            "- Si les signaux sont mixtes ou contradictoires, privilégie neutral ou une conviction faible.\n"
+            "- Si un bloc tool est vide ou absent, n'invente aucun résultat."
         ),
     },
     'news-analyst': {
@@ -276,6 +296,8 @@ class PromptTemplateService:
 
     @staticmethod
     def _language_directive_for_agent(agent_name: str) -> str:
+        if agent_name == 'technical-analyst':
+            return LANGUAGE_DIRECTIVE_TECHNICAL
         if agent_name == 'risk-manager':
             return LANGUAGE_DIRECTIVE_RISK
         if agent_name == 'execution-manager':
@@ -285,7 +307,6 @@ class PromptTemplateService:
         if agent_name == 'agentic-runtime-planner':
             return LANGUAGE_DIRECTIVE_JSON
         if agent_name in {
-            'technical-analyst',
             'news-analyst',
             'market-context-analyst',
             'bullish-researcher',
@@ -425,6 +446,7 @@ class PromptTemplateService:
             for item in self.model_selector.resolve_skills(db, agent_name)
         ]
         system_prompt = self._append_skills_block(system_prompt, skills)
+
         def _build_render_context(template: str) -> tuple[list[str], dict[str, Any]]:
             required_vars = self._required_template_variables(template)
             missing_variables = [key for key in required_vars if key not in variables]
@@ -441,9 +463,11 @@ class PromptTemplateService:
             render_template = self._escape_literal_braces_preserving_placeholders(user_template)
             missing_variables, render_variables = _build_render_context(render_template)
             user_prompt = render_template.format_map(SafeDict(**render_variables))
+
         if missing_variables:
             missing_payload = ', '.join(missing_variables)
             user_prompt = f'{user_prompt}\n\n[WARN_PROMPT_MISSING_VARS] {missing_payload}'
+
         system_prompt = self._enforce_language(system_prompt, agent_name)
 
         return {

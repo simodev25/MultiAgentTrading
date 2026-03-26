@@ -86,7 +86,13 @@ def test_technical_agent_injects_tools_into_llm_and_executes_tool_calls(monkeypa
                     ],
                 }
             return {
-                'text': 'bullish\nsetup_quality=medium\nvalidation=ok\ninvalidation=ko',
+                'text': (
+                    'bullish\n'
+                    'setup_quality=medium\n'
+                    'validation=ok\n'
+                    'invalidation=ko\n'
+                    'evidence_used=indicator_bundle,market_snapshot'
+                ),
                 'degraded': False,
             }
 

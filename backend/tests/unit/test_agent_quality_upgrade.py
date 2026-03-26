@@ -394,6 +394,324 @@ def test_technical_neutral_signal_does_not_keep_directional_llm_summary(monkeypa
     assert 'bullish' not in str(out.get('summary') or '').lower()
 
 
+def _price_history_bars(count: int = 60, *, start: float = 1.1530) -> list[dict[str, float]]:
+    bars: list[dict[str, float]] = []
+    price = float(start)
+    for index in range(max(count, 1)):
+        close = price + (0.00003 if index % 2 == 0 else -0.00002)
+        bars.append(
+            {
+                'open': price,
+                'high': max(price, close) + 0.00008,
+                'low': min(price, close) - 0.00008,
+                'close': close,
+            }
+        )
+        price = close
+    return bars
+
+
+def _setup_quality_rank(value: str) -> int:
+    return {'low': 0, 'medium': 1, 'high': 2}.get(str(value or '').lower(), -1)
+
+
+def test_technical_aligned_bearish_keeps_directional_setup(monkeypatch) -> None:
+    import app.services.agent_runtime.mcp_trading_server as mcp
+
+    monkeypatch.setattr(mcp, 'divergence_detector', lambda **_kwargs: {'divergences': []})
+    monkeypatch.setattr(
+        mcp,
+        'pattern_detector',
+        lambda **_kwargs: {
+            'patterns': [
+                {'type': 'bearish_engulfing', 'signal': 'bearish', 'strength': 0.85, 'bar_index': 238},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        mcp,
+        'support_resistance_detector',
+        lambda **_kwargs: {
+            'levels': [{'price': 1.15814, 'distance_pct': 0.43, 'type': 'resistance'}],
+            'count': 1,
+        },
+    )
+    monkeypatch.setattr(
+        mcp,
+        'multi_timeframe_context',
+        lambda **_kwargs: {
+            'dominant_direction': 'bearish',
+            'alignment_score': 1.0,
+            'confluence': 'strong',
+            'all_aligned': True,
+        },
+    )
+
+    agent = TechnicalAnalystAgent()
+    monkeypatch.setattr(agent.model_selector, 'is_enabled', lambda *_a, **_k: False)
+
+    out = agent.run(
+        AgentContext(
+            pair='EURUSD.PRO',
+            timeframe='M15',
+            mode='simulation',
+            risk_percent=1.0,
+            market_snapshot={
+                'trend': 'bearish',
+                'rsi': 34.481,
+                'macd_diff': -0.002,
+                'atr': 0.000734,
+                'last_price': 1.15321,
+                'change_pct': -0.30,
+                'ema_fast': 1.1538,
+                'ema_slow': 1.1550,
+            },
+            news_context={'news': []},
+            memory_context=[],
+            price_history=_price_history_bars(),
+        )
+    )
+
+    assert out['signal'] == 'bearish'
+    assert out['setup_quality'] in {'high', 'medium'}
+    assert 'indicator_bundle' in out.get('evidence_used', [])
+    assert 'market_snapshot' in out.get('evidence_used', [])
+
+
+def test_technical_conflict_divergence_reduces_setup_quality(monkeypatch) -> None:
+    import app.services.agent_runtime.mcp_trading_server as mcp
+
+    monkeypatch.setattr(
+        mcp,
+        'pattern_detector',
+        lambda **_kwargs: {
+            'patterns': [
+                {'type': 'bearish_engulfing', 'signal': 'bearish', 'strength': 0.85, 'bar_index': 238},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        mcp,
+        'support_resistance_detector',
+        lambda **_kwargs: {'levels': [{'price': 1.15814, 'distance_pct': 0.43, 'type': 'resistance'}]},
+    )
+    monkeypatch.setattr(
+        mcp,
+        'multi_timeframe_context',
+        lambda **_kwargs: {'dominant_direction': 'bearish', 'alignment_score': 1.0, 'all_aligned': True},
+    )
+
+    base_agent = TechnicalAnalystAgent()
+    monkeypatch.setattr(base_agent.model_selector, 'is_enabled', lambda *_a, **_k: False)
+    monkeypatch.setattr(mcp, 'divergence_detector', lambda **_kwargs: {'divergences': []})
+    base_out = base_agent.run(
+        AgentContext(
+            pair='EURUSD.PRO',
+            timeframe='H1',
+            mode='simulation',
+            risk_percent=1.0,
+            market_snapshot={
+                'trend': 'bearish',
+                'rsi': 34.0,
+                'macd_diff': -0.002,
+                'atr': 0.001,
+                'last_price': 1.1530,
+                'change_pct': -0.2,
+            },
+            news_context={'news': []},
+            memory_context=[],
+            price_history=_price_history_bars(),
+        )
+    )
+
+    conflict_agent = TechnicalAnalystAgent()
+    monkeypatch.setattr(conflict_agent.model_selector, 'is_enabled', lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        mcp,
+        'divergence_detector',
+        lambda **_kwargs: {
+            'divergences': [
+                {'type': 'bullish', 'bars_apart': 6, 'rsi_low_1': 31.47, 'rsi_low_2': 35.75},
+            ]
+        },
+    )
+    conflict_out = conflict_agent.run(
+        AgentContext(
+            pair='EURUSD.PRO',
+            timeframe='H1',
+            mode='simulation',
+            risk_percent=1.0,
+            market_snapshot={
+                'trend': 'bearish',
+                'rsi': 34.0,
+                'macd_diff': -0.002,
+                'atr': 0.001,
+                'last_price': 1.1530,
+                'change_pct': -0.2,
+            },
+            news_context={'news': []},
+            memory_context=[],
+            price_history=_price_history_bars(),
+        )
+    )
+
+    assert _setup_quality_rank(conflict_out['setup_quality']) < _setup_quality_rank(base_out['setup_quality'])
+
+
+def test_technical_confused_context_prefers_neutral_low_quality(monkeypatch) -> None:
+    import app.services.agent_runtime.mcp_trading_server as mcp
+
+    monkeypatch.setattr(mcp, 'divergence_detector', lambda **_kwargs: {'divergences': []})
+    monkeypatch.setattr(mcp, 'pattern_detector', lambda **_kwargs: {'patterns': []})
+    monkeypatch.setattr(mcp, 'support_resistance_detector', lambda **_kwargs: {'levels': []})
+    monkeypatch.setattr(
+        mcp,
+        'multi_timeframe_context',
+        lambda **_kwargs: {'dominant_direction': 'neutral', 'alignment_score': 0.0, 'all_aligned': False},
+    )
+
+    agent = TechnicalAnalystAgent()
+    monkeypatch.setattr(agent.model_selector, 'is_enabled', lambda *_a, **_k: False)
+    out = agent.run(
+        AgentContext(
+            pair='BTCUSD',
+            timeframe='H1',
+            mode='simulation',
+            risk_percent=1.0,
+            market_snapshot={
+                'trend': 'neutral',
+                'rsi': 50.0,
+                'macd_diff': 0.0,
+                'atr': 10.0,
+                'last_price': 70000.0,
+                'change_pct': 0.0,
+            },
+            news_context={'news': []},
+            memory_context=[],
+            price_history=_price_history_bars(start=70000.0),
+        )
+    )
+
+    assert out['signal'] == 'neutral'
+    assert out['setup_quality'] == 'low'
+
+
+def test_technical_prompt_handles_partial_tools_without_hallucination(monkeypatch) -> None:
+    captured_user_prompts: list[str] = []
+    agent = TechnicalAnalystAgent()
+    monkeypatch.setattr(agent.model_selector, 'is_enabled', lambda *_a, **_k: True)
+    monkeypatch.setattr(agent.model_selector, 'resolve', lambda *_a, **_k: 'test-model')
+    monkeypatch.setattr(agent.model_selector, 'resolve_decision_mode', lambda *_a, **_k: 'conservative')
+    monkeypatch.setattr(
+        agent.model_selector,
+        'resolve_enabled_tools',
+        lambda *_a, **_k: ['market_snapshot', 'indicator_bundle'],
+    )
+
+    def _fake_chat(_system: str, _user: str, **kwargs):
+        captured_user_prompts.append(_user)
+        if kwargs.get('tool_choice') == 'required':
+            return {
+                'text': '',
+                'degraded': False,
+                'tool_calls': [{'id': 'call_market_snapshot', 'name': 'market_snapshot', 'arguments': {}}],
+            }
+        return {
+            'text': (
+                'neutral\n'
+                'setup_quality=low\n'
+                'validation=ok\n'
+                'invalidation=ok\n'
+                'evidence_used=indicator_bundle,market_snapshot'
+            ),
+            'degraded': False,
+        }
+
+    monkeypatch.setattr(agent.llm, 'chat', _fake_chat)
+    out = agent.run(
+        AgentContext(
+            pair='XAUUSD',
+            timeframe='M15',
+            mode='simulation',
+            risk_percent=1.0,
+            market_snapshot={
+                'trend': 'bearish',
+                'atr': 0.8,
+                'last_price': 2175.4,
+            },
+            news_context={'news': []},
+            memory_context=[],
+        )
+    )
+
+    assert out['degraded'] is False
+    assert captured_user_prompts, 'prompt utilisateur attendu'
+    prompt = captured_user_prompts[0]
+    assert '[source:' not in prompt.lower()
+    assert '[tool:' in prompt
+    assert 'RSI:' not in prompt
+    assert 'MACD diff:' not in prompt
+
+
+def test_technical_prompt_sections_order_and_contract_format(monkeypatch) -> None:
+    captured_user_prompts: list[str] = []
+    agent = TechnicalAnalystAgent()
+    monkeypatch.setattr(agent.model_selector, 'is_enabled', lambda *_a, **_k: True)
+    monkeypatch.setattr(agent.model_selector, 'resolve', lambda *_a, **_k: 'test-model')
+    monkeypatch.setattr(agent.model_selector, 'resolve_decision_mode', lambda *_a, **_k: 'conservative')
+
+    def _fake_chat(_system: str, _user: str, **kwargs):
+        captured_user_prompts.append(_user)
+        if kwargs.get('tool_choice') == 'required':
+            return {
+                'text': '',
+                'degraded': False,
+                'tool_calls': [{'id': 'call_market_snapshot', 'name': 'market_snapshot', 'arguments': {}}],
+            }
+        return {
+            'text': (
+                'bearish\n'
+                'setup_quality=medium\n'
+                'validation=test\n'
+                'invalidation=test\n'
+                'evidence_used=indicator_bundle,market_snapshot'
+            ),
+            'degraded': False,
+        }
+
+    monkeypatch.setattr(agent.llm, 'chat', _fake_chat)
+    agent.run(
+        AgentContext(
+            pair='EURUSD.PRO',
+            timeframe='M15',
+            mode='simulation',
+            risk_percent=1.0,
+            market_snapshot={
+                'trend': 'bearish',
+                'rsi': 36.481,
+                'macd_diff': -0.000241,
+                'atr': 0.000734,
+                'last_price': 1.15321,
+            },
+            news_context={'news': []},
+            memory_context=[],
+            price_history=_price_history_bars(),
+        )
+    )
+
+    assert captured_user_prompts, 'prompt utilisateur attendu'
+    prompt = captured_user_prompts[0]
+    facts_idx = prompt.find('Faits bruts:')
+    tools_idx = prompt.find('Résultats tools pré-exécutés:')
+    rules_idx = max(prompt.find("Règles d'interprétation:"), prompt.find('Règles d interprétation:'))
+    contract_idx = prompt.find('Contrat de sortie strict:')
+    assert -1 not in {facts_idx, tools_idx, rules_idx, contract_idx}
+    assert facts_idx < tools_idx < rules_idx < contract_idx
+    assert '[source:' not in prompt.lower()
+    assert '[tool:' in prompt
+    assert 'evidence_used=<liste courte des tools/champs réellement utilisés>' in prompt
+
+
 # ---------------------------------------------------------------------------
 # TG7 — Market-context market_bias clarity
 # ---------------------------------------------------------------------------

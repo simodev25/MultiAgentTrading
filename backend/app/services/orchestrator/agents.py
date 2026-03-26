@@ -1843,6 +1843,14 @@ def _validate_news_output(
 
 class TechnicalAnalystAgent:
     name = 'technical-analyst'
+    _TOOL_ORDER = (
+        'indicator_bundle',
+        'market_snapshot',
+        'divergence_detector',
+        'pattern_detector',
+        'multi_timeframe_context',
+        'support_resistance_or_structure_detector',
+    )
 
     def __init__(self) -> None:
         self.llm = LlmClient()
@@ -1887,6 +1895,220 @@ class TechnicalAnalystAgent:
             f'{signal}\nsetup_quality={setup_quality}\n'
             f'Biais technique {signal} confirmé par les indicateurs principaux.'
         )
+
+    @classmethod
+    def _ordered_tools(cls, tools: list[str] | set[str] | tuple[str, ...]) -> list[str]:
+        seen = {str(item or '').strip() for item in tools if str(item or '').strip()}
+        ordered = [tool_id for tool_id in cls._TOOL_ORDER if tool_id in seen]
+        extras = sorted(seen.difference(cls._TOOL_ORDER))
+        return ordered + extras
+
+    @staticmethod
+    def _downgrade_setup_quality(setup_quality: str) -> str:
+        normalized = str(setup_quality or '').strip().lower()
+        if normalized == 'high':
+            return 'medium'
+        if normalized == 'medium':
+            return 'low'
+        return 'low'
+
+    @staticmethod
+    def _format_prompt_value(value: Any, *, decimals: int = 6) -> str:
+        if isinstance(value, (int, float)):
+            rendered = f'{float(value):.{max(0, int(decimals))}f}'
+            return rendered.rstrip('0').rstrip('.') or '0'
+        return str(value).strip()
+
+    @staticmethod
+    def _extract_contract_line(text: str, label: str) -> str | None:
+        pattern = re.compile(rf'^\s*{re.escape(label)}\s*=\s*(.+?)\s*$', re.IGNORECASE)
+        for line in (text or '').splitlines():
+            match = pattern.match(line.strip())
+            if match:
+                value = str(match.group(1) or '').strip()
+                if value:
+                    return value
+        return None
+
+    @staticmethod
+    def _fact_only_contract_line(value: str) -> bool:
+        lowered = str(value or '').lower()
+        forbidden = (
+            'volume',
+            'orderflow',
+            'order flow',
+            'news',
+            'corrélation',
+            'correlation',
+            'sentiment',
+            'macro',
+            'fed',
+            'etf',
+        )
+        return not any(marker in lowered for marker in forbidden)
+
+    @classmethod
+    def _parse_evidence_used(
+        cls,
+        evidence_line: str | None,
+        *,
+        allowed_tools: set[str],
+        fallback_tools: list[str],
+    ) -> list[str]:
+        if not evidence_line:
+            return cls._ordered_tools(fallback_tools)
+
+        parsed: set[str] = set()
+        for token in re.split(r'[\s,;|]+', str(evidence_line or '').strip()):
+            candidate = str(token or '').strip().lower()
+            if not candidate:
+                continue
+            if candidate.startswith('[tool:') and candidate.endswith(']'):
+                candidate = candidate[6:-1].strip().lower()
+            if candidate in allowed_tools:
+                parsed.add(candidate)
+
+        if not parsed:
+            return cls._ordered_tools(fallback_tools)
+        intersection = parsed.intersection(set(fallback_tools))
+        if intersection:
+            return cls._ordered_tools(intersection)
+        return cls._ordered_tools(parsed)
+
+    @classmethod
+    def _build_prompt_sections(
+        cls,
+        *,
+        indicator_payload: dict[str, Any],
+        market_payload: dict[str, Any],
+        divergence_payload: dict[str, Any],
+        pattern_payload: dict[str, Any],
+        multi_timeframe_payload: dict[str, Any],
+        structure_payload: dict[str, Any],
+    ) -> tuple[str, str, str]:
+        raw_lines: list[str] = []
+        tool_lines: list[str] = []
+
+        def _append_fact(label: str, value: Any, tool_id: str, *, decimals: int = 6) -> None:
+            if value is None:
+                return
+            rendered = cls._format_prompt_value(value, decimals=decimals)
+            if not rendered:
+                return
+            raw_lines.append(f'- {label}: {rendered} [tool:{tool_id}]')
+
+        trend_value = indicator_payload.get('trend')
+        trend_tool = 'indicator_bundle'
+        if trend_value in (None, ''):
+            trend_value = market_payload.get('trend')
+            trend_tool = 'market_snapshot'
+        _append_fact('Trend', trend_value, trend_tool, decimals=3)
+
+        rsi_value = indicator_payload.get('rsi')
+        if rsi_value not in (None, ''):
+            _append_fact('RSI', rsi_value, 'indicator_bundle', decimals=3)
+
+        macd_value = indicator_payload.get('macd_diff')
+        if macd_value not in (None, ''):
+            _append_fact('MACD diff', macd_value, 'indicator_bundle', decimals=6)
+
+        atr_value = indicator_payload.get('atr')
+        if atr_value in (None, ''):
+            atr_value = market_payload.get('atr')
+        if atr_value not in (None, ''):
+            _append_fact('ATR', atr_value, 'indicator_bundle' if indicator_payload.get('atr') not in (None, '') else 'market_snapshot', decimals=6)
+
+        last_price = market_payload.get('last_price')
+        if last_price in (None, ''):
+            last_price = indicator_payload.get('last_price')
+        if last_price not in (None, ''):
+            _append_fact('Prix', last_price, 'market_snapshot' if market_payload.get('last_price') not in (None, '') else 'indicator_bundle', decimals=6)
+
+        divergences = divergence_payload.get('divergences')
+        if isinstance(divergences, list):
+            for divergence in divergences[:3]:
+                if not isinstance(divergence, dict):
+                    continue
+                div_type = str(divergence.get('type') or '?').strip().lower()
+                details: list[str] = []
+                bars_apart = divergence.get('bars_apart')
+                if isinstance(bars_apart, (int, float)):
+                    details.append(f'{int(bars_apart)} bars')
+                rsi_low_1 = divergence.get('rsi_low_1')
+                rsi_low_2 = divergence.get('rsi_low_2')
+                if isinstance(rsi_low_1, (int, float)) and isinstance(rsi_low_2, (int, float)):
+                    details.append(
+                        'RSI low_1='
+                        f"{cls._format_prompt_value(rsi_low_1, decimals=3)} -> low_2={cls._format_prompt_value(rsi_low_2, decimals=3)}"
+                    )
+                suffix = f" ({', '.join(details)})" if details else ''
+                tool_lines.append(f'- [tool:divergence_detector] {div_type} divergence{suffix}')
+
+        patterns = pattern_payload.get('patterns')
+        if isinstance(patterns, list):
+            for pattern in patterns[:5]:
+                if not isinstance(pattern, dict):
+                    continue
+                pat_type = str(pattern.get('type') or '?').strip()
+                details: list[str] = []
+                if pattern.get('bar_index') is not None:
+                    details.append(f"bar_index={pattern.get('bar_index')}")
+                if pattern.get('signal') is not None:
+                    details.append(f"signal={pattern.get('signal')}")
+                if pattern.get('strength') is not None:
+                    details.append(f"strength={cls._format_prompt_value(pattern.get('strength'), decimals=3)}")
+                suffix = f" ({', '.join(details)})" if details else ''
+                tool_lines.append(f'- [tool:pattern_detector] {pat_type}{suffix}')
+
+        dominant = str(multi_timeframe_payload.get('dominant_direction') or '').strip().lower()
+        alignment = multi_timeframe_payload.get('alignment_score')
+        if not isinstance(alignment, (int, float)) and multi_timeframe_payload.get('all_aligned'):
+            alignment = 1.0
+        if dominant or isinstance(alignment, (int, float)):
+            parts: list[str] = []
+            if dominant:
+                parts.append(f'dominant={dominant}')
+            if isinstance(alignment, (int, float)):
+                parts.append(f'alignment={cls._format_prompt_value(alignment, decimals=3)}')
+            if multi_timeframe_payload.get('confluence'):
+                parts.append(f"confluence={multi_timeframe_payload.get('confluence')}")
+            if parts:
+                tool_lines.append(f"- [tool:multi_timeframe_context] {', '.join(parts)}")
+
+        levels = structure_payload.get('levels')
+        if isinstance(levels, list):
+            first_level = next((item for item in levels if isinstance(item, dict)), None)
+            if isinstance(first_level, dict):
+                level_type = str(first_level.get('type') or 'level').strip().lower()
+                price = first_level.get('price')
+                distance_pct = first_level.get('distance_pct')
+                details: list[str] = []
+                if isinstance(price, (int, float)):
+                    details.append(f'{level_type}={cls._format_prompt_value(price, decimals=6)}')
+                if isinstance(distance_pct, (int, float)):
+                    details.append(f'distance_pct={cls._format_prompt_value(distance_pct, decimals=3)}')
+                if details:
+                    tool_lines.append(
+                        "- [tool:support_resistance_or_structure_detector] "
+                        + ', '.join(details)
+                    )
+
+        if not raw_lines:
+            raw_lines.append('- Aucun fait brut exploitable.')
+        if not tool_lines:
+            tool_lines.append('- Aucun résultat tool pré-exécuté exploitable.')
+
+        interpretation_rules_block = '\n'.join(
+            [
+                '- Prioriser d abord la structure / tendance, puis le momentum, puis les signaux contraires.',
+                '- En cas de conflit entre divergence et tendance dominante, réduire la conviction.',
+                '- Si multi_timeframe_context confirme fortement la direction dominante, éviter un renversement rapide.',
+                '- En absence de convergence claire entre trend, RSI et MACD diff, privilégier neutral ou conviction faible.',
+                '- N inventer aucun niveau, pattern, volume, orderflow, news, corrélation ou signal absent.',
+                '- Utiliser uniquement les faits et tools listés ci-dessus.',
+            ]
+        )
+        return '\n'.join(raw_lines), '\n'.join(tool_lines), interpretation_rules_block
 
     def run(self, ctx: AgentContext, db: Session | None = None) -> dict[str, Any]:
         from app.services.agent_runtime.mcp_trading_server import (
@@ -1939,6 +2161,9 @@ class TechnicalAnalystAgent:
                 'llm_fallback_used': False,
                 'evidence_total_count': 0,
                 'evidence_exposed_count': 0,
+                'evidence_used': [],
+                'validation': None,
+                'invalidation': None,
                 'diagnostics': {
                     'llm': {
                         'attempted': False,
@@ -2060,33 +2285,66 @@ class TechnicalAnalystAgent:
         tool_invocations['pattern_detector'] = pattern_tool
 
         # Enrich score with divergence/pattern data from pre-executed tools
-        _div_result = divergence_tool.get('data') or {}
-        _pat_result = pattern_tool.get('data') or {}
-        if isinstance(_div_result.get('divergences'), list):
-            for div in _div_result['divergences']:
-                if div.get('type') == 'bullish':
-                    score += 0.06
-                elif div.get('type') == 'bearish':
-                    score -= 0.06
-        if isinstance(_pat_result.get('patterns'), list):
-            for pat in _pat_result['patterns']:
-                strength = _safe_float(pat.get('strength'), 0.0)
-                if pat.get('signal') == 'bullish':
-                    score += strength * 0.04
-                elif pat.get('signal') == 'bearish':
-                    score -= strength * 0.04
+        _div_result = dict(divergence_tool.get('data') or {})
+        _pat_result = dict(pattern_tool.get('data') or {})
+        _structure_result = dict(structure_tool.get('data') or {})
+        _mtf_result = dict(multi_timeframe_tool.get('data') or {})
+        _divergences = _div_result.get('divergences') if isinstance(_div_result.get('divergences'), list) else []
+        _patterns = _pat_result.get('patterns') if isinstance(_pat_result.get('patterns'), list) else []
+
+        for div in _divergences:
+            if not isinstance(div, dict):
+                continue
+            if div.get('type') == 'bullish':
+                score += 0.06
+            elif div.get('type') == 'bearish':
+                score -= 0.06
+        for pat in _patterns:
+            if not isinstance(pat, dict):
+                continue
+            strength = _safe_float(pat.get('strength'), 0.0)
+            if pat.get('signal') == 'bullish':
+                score += strength * 0.04
+            elif pat.get('signal') == 'bearish':
+                score -= strength * 0.04
         score = round(max(-1.0, min(1.0, score)), 4)
+
+        _trend_directional = trend in {'bullish', 'bearish'}
+        _macd_aligned = (trend == 'bullish' and macd_diff > 0) or (trend == 'bearish' and macd_diff < 0)
+        _rsi_aligned = (trend == 'bullish' and rsi >= 50) or (trend == 'bearish' and rsi <= 50)
+        _indicator_convergence = int(_trend_directional) + int(_rsi_aligned) + int(_macd_aligned)
+        _has_bullish_divergence = any(
+            isinstance(div, dict) and str(div.get('type') or '').strip().lower() == 'bullish'
+            for div in _divergences
+        )
+        _has_bearish_divergence = any(
+            isinstance(div, dict) and str(div.get('type') or '').strip().lower() == 'bearish'
+            for div in _divergences
+        )
+        _divergence_conflict = (
+            (trend == 'bullish' and _has_bearish_divergence)
+            or (trend == 'bearish' and _has_bullish_divergence)
+        )
+
+        _mtf_dominant = str(_mtf_result.get('dominant_direction') or '').strip().lower()
+        _mtf_alignment = _safe_float(_mtf_result.get('alignment_score'), 0.0)
+        if _mtf_alignment <= 0.0 and _mtf_result.get('all_aligned'):
+            _mtf_alignment = 1.0
+        _mtf_strong_confirmation = (
+            _mtf_dominant in {'bullish', 'bearish'}
+            and _mtf_alignment >= 0.66
+        )
 
         # --- market_bias vs trade_signal separation ---
         market_bias = 'bullish' if score > 0.05 else 'bearish' if score < -0.05 else 'neutral'
 
         # Setup quality: how many indicators converge clearly
         _quality_factors = 0
-        if rsi > 60 or rsi < 40:       # RSI clearly directional
+        if rsi > 60 or rsi < 40:
             _quality_factors += 1
-        if (trend == 'bullish' and macd_diff > 0) or (trend == 'bearish' and macd_diff < 0):
-            _quality_factors += 1       # MACD aligned with trend
-        if abs(score) >= 0.35:          # strong composite edge
+        if _macd_aligned:
+            _quality_factors += 1
+        if abs(score) >= 0.35:
             _quality_factors += 1
 
         if _quality_factors >= 3:
@@ -2096,11 +2354,23 @@ class TechnicalAnalystAgent:
         else:
             setup_quality = 'low'
 
+        if _divergence_conflict:
+            setup_quality = self._downgrade_setup_quality(setup_quality)
+        if _indicator_convergence <= 1:
+            setup_quality = 'low'
+
         # trade_signal: when setup is low-quality and edge is weak, force neutral
         if setup_quality == 'low' and abs(score) < 0.30:
             signal = 'neutral'
         else:
             signal = 'bullish' if score > 0.15 else 'bearish' if score < -0.15 else 'neutral'
+        if (
+            _mtf_strong_confirmation
+            and signal in {'bullish', 'bearish'}
+            and signal != _mtf_dominant
+            and abs(score) < 0.45
+        ):
+            signal = 'neutral'
 
         m_effective = {
             **m,
@@ -2108,6 +2378,80 @@ class TechnicalAnalystAgent:
             'rsi': round(rsi, 3),
             'macd_diff': round(macd_diff, 6),
         }
+        raw_facts_block, tool_results_block, interpretation_rules_block = self._build_prompt_sections(
+            indicator_payload=indicator_payload,
+            market_payload=m,
+            divergence_payload=_div_result,
+            pattern_payload=_pat_result,
+            multi_timeframe_payload=_mtf_result,
+            structure_payload=_structure_result,
+        )
+
+        _structure_levels = _structure_result.get('levels')
+        _primary_level = None
+        if isinstance(_structure_levels, list):
+            _primary_level = next((item for item in _structure_levels if isinstance(item, dict)), None)
+        _primary_level_price = (
+            _safe_float(_primary_level.get('price'), 0.0)
+            if isinstance(_primary_level, dict) and _primary_level.get('price') is not None
+            else 0.0
+        )
+        _has_primary_level = _primary_level_price > 0.0
+        _level_label = str((_primary_level or {}).get('type') or 'niveau').strip().lower() if isinstance(_primary_level, dict) else 'niveau'
+
+        if trend == 'bullish':
+            validation_condition = 'Maintenir bullish si MACD diff reste >= 0 et RSI reste >= 45.'
+            invalidation_condition = (
+                f'Invalider si clôture repasse sous {_level_label} {self._format_prompt_value(_primary_level_price, decimals=6)} '
+                'ou si MACD diff passe durablement sous 0.'
+                if _has_primary_level
+                else 'Invalider si MACD diff passe durablement sous 0 et RSI rechute sous 45.'
+            )
+        elif trend == 'bearish':
+            validation_condition = 'Maintenir bearish si MACD diff reste <= 0 et RSI reste <= 55.'
+            invalidation_condition = (
+                f'Invalider si clôture repasse au-dessus de {_level_label} {self._format_prompt_value(_primary_level_price, decimals=6)} '
+                'ou si MACD diff passe durablement au-dessus de 0.'
+                if _has_primary_level
+                else 'Invalider si MACD diff passe durablement au-dessus de 0 et RSI repasse au-dessus de 55.'
+            )
+        else:
+            validation_condition = 'Valider un biais seulement si trend et MACD diff convergent avec RSI hors zone 45-55.'
+            invalidation_condition = (
+                f'Invalider toute thèse directionnelle tant que le prix reste autour de {_level_label} {self._format_prompt_value(_primary_level_price, decimals=6)}.'
+                if _has_primary_level
+                else 'Invalider toute thèse directionnelle en absence de convergence trend/RSI/MACD.'
+            )
+
+        deterministic_evidence_set: set[str] = set()
+        if indicator_bundle_tool.get('status') == 'ok' and indicator_payload:
+            deterministic_evidence_set.add('indicator_bundle')
+        if market_snapshot_tool.get('status') == 'ok' and isinstance(m, dict) and m:
+            deterministic_evidence_set.add('market_snapshot')
+        if _divergences:
+            deterministic_evidence_set.add('divergence_detector')
+        if _patterns:
+            deterministic_evidence_set.add('pattern_detector')
+        if _mtf_result:
+            deterministic_evidence_set.add('multi_timeframe_context')
+        if _has_primary_level:
+            deterministic_evidence_set.add('support_resistance_or_structure_detector')
+        deterministic_evidence_used = self._ordered_tools(deterministic_evidence_set)
+
+        available_evidence_tools: set[str] = set()
+        if indicator_bundle_tool.get('status') == 'ok':
+            available_evidence_tools.add('indicator_bundle')
+        if market_snapshot_tool.get('status') == 'ok':
+            available_evidence_tools.add('market_snapshot')
+        if divergence_tool.get('status') == 'ok':
+            available_evidence_tools.add('divergence_detector')
+        if pattern_tool.get('status') == 'ok':
+            available_evidence_tools.add('pattern_detector')
+        if multi_timeframe_tool.get('status') == 'ok':
+            available_evidence_tools.add('multi_timeframe_context')
+        if structure_tool.get('status') == 'ok':
+            available_evidence_tools.add('support_resistance_or_structure_detector')
+
         runtime_skills = _resolve_runtime_skills(self.model_selector, db, self.name)
         llm_enabled = self.model_selector.is_enabled(db, self.name)
         deterministic_score = round(score, 3)
@@ -2145,8 +2489,11 @@ class TechnicalAnalystAgent:
             'llm_enabled': llm_enabled,
             'llm_call_attempted': False,
             'llm_fallback_used': False,
-            'evidence_total_count': 0,
-            'evidence_exposed_count': 0,
+            'evidence_total_count': len(deterministic_evidence_used),
+            'evidence_exposed_count': len(deterministic_evidence_used),
+            'evidence_used': deterministic_evidence_used,
+            'validation': validation_condition,
+            'invalidation': invalidation_condition,
             'llm_summary': None,
             'diagnostics': {
                 'llm': {
@@ -2214,15 +2561,18 @@ class TechnicalAnalystAgent:
             'N invente jamais niveaux, patterns, volume, corrélations ou news absents.'
         )
         fallback_user = (
-            'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\n'
-            'Trend: {trend}\nRSI: {rsi}\nMACD diff: {macd_diff}\n'
-            'Change pct: {change_pct}\nATR: {atr}\nPrix: {last_price}\n'
-            'Contrat de sortie:\n'
-            '- Ligne 1: bullish|bearish|neutral.\n'
-            '- Ligne 2: setup_quality=high|medium|low.\n'
-            '- Ligne 3: validation=<condition principale>.\n'
-            '- Ligne 4: invalidation=<condition principale>.\n'
-            '- Ligne 5 max: justification courte faits -> inférence.'
+            'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\n\n'
+            'Faits bruts:\n{raw_facts_block}\n\n'
+            'Résultats tools pré-exécutés:\n{tool_results_block}\n\n'
+            'Règles d interprétation:\n{interpretation_rules_block}\n\n'
+            'Contrat de sortie strict:\n'
+            '- Ligne 1: bearish | bullish | neutral\n'
+            '- Ligne 2: setup_quality=high|medium|low\n'
+            '- Ligne 3: validation=<condition principale basée uniquement sur les faits fournis>\n'
+            '- Ligne 4: invalidation=<condition principale basée uniquement sur les faits fournis>\n'
+            '- Ligne 5: evidence_used=<liste courte des tools/champs réellement utilisés>\n'
+            '- Ligne 6 optionnelle (1 phrase max): justification factuelle uniquement\n'
+            '- Utilise uniquement [tool:...] comme source.'
         )
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
         if db is not None:
@@ -2241,6 +2591,9 @@ class TechnicalAnalystAgent:
                     'change_pct': m_effective.get('change_pct'),
                     'atr': m_effective.get('atr'),
                     'last_price': m_effective.get('last_price'),
+                    'raw_facts_block': raw_facts_block,
+                    'tool_results_block': tool_results_block,
+                    'interpretation_rules_block': interpretation_rules_block,
                 },
             )
             system_prompt = prompt_info['system_prompt']
@@ -2257,20 +2610,11 @@ class TechnicalAnalystAgent:
                     'change_pct': m_effective.get('change_pct'),
                     'atr': m_effective.get('atr'),
                     'last_price': m_effective.get('last_price'),
+                    'raw_facts_block': raw_facts_block,
+                    'tool_results_block': tool_results_block,
+                    'interpretation_rules_block': interpretation_rules_block,
                 },
             ))
-        # Inject pre-computed divergence/pattern results into user prompt context
-        _extra_context_parts: list[str] = []
-        _div_data = divergence_tool.get('data') or {}
-        if isinstance(_div_data.get('divergences'), list) and _div_data['divergences']:
-            _div_lines = [f"  - {d.get('type', '?')} divergence ({d.get('bars_apart', '?')} bars)" for d in _div_data['divergences'][:3]]
-            _extra_context_parts.append('Divergences détectées:\n' + '\n'.join(_div_lines))
-        _pat_data = pattern_tool.get('data') or {}
-        if isinstance(_pat_data.get('patterns'), list) and _pat_data['patterns']:
-            _pat_lines = [f"  - {p.get('type', '?')} ({p.get('signal', '?')}, strength={p.get('strength', '?')})" for p in _pat_data['patterns'][:5]]
-            _extra_context_parts.append('Patterns chandeliers détectés:\n' + '\n'.join(_pat_lines))
-        if _extra_context_parts:
-            user_prompt += '\n\n' + '\n'.join(_extra_context_parts)
 
         system_prompt = _append_tools_prompt_guidance(system_prompt, enabled_tools=enabled_tools)
         decision_mode = self.model_selector.resolve_decision_mode(db)
@@ -2342,9 +2686,34 @@ class TechnicalAnalystAgent:
                 setup_quality = _sq_match.group(1).strip().lower()
                 break
 
+        if _divergence_conflict:
+            setup_quality = self._downgrade_setup_quality(setup_quality)
+        if _indicator_convergence <= 1:
+            setup_quality = 'low'
+
         # Override trade signal when LLM confirms low quality
         if setup_quality == 'low' and abs(merged_score) < 0.30:
             merged_signal = 'neutral'
+        if (
+            _mtf_strong_confirmation
+            and merged_signal in {'bullish', 'bearish'}
+            and merged_signal != _mtf_dominant
+            and abs(merged_score) < 0.45
+        ):
+            merged_signal = 'neutral'
+
+        llm_validation = self._extract_contract_line(llm_text, 'validation')
+        llm_invalidation = self._extract_contract_line(llm_text, 'invalidation')
+        if llm_validation and self._fact_only_contract_line(llm_validation):
+            validation_condition = _compact_prompt_text(llm_validation, max_chars=220)
+        if llm_invalidation and self._fact_only_contract_line(llm_invalidation):
+            invalidation_condition = _compact_prompt_text(llm_invalidation, max_chars=220)
+
+        evidence_used = self._parse_evidence_used(
+            self._extract_contract_line(llm_text, 'evidence_used'),
+            allowed_tools=available_evidence_tools,
+            fallback_tools=deterministic_evidence_used,
+        )
 
         summary_text = _compact_prompt_text(llm_text, max_chars=220) if llm_text.strip() else None
         if llm_degraded:
@@ -2374,6 +2743,11 @@ class TechnicalAnalystAgent:
         output['llm_fallback_used'] = llm_degraded
         output['market_bias'] = market_bias
         output['setup_quality'] = setup_quality
+        output['validation'] = validation_condition
+        output['invalidation'] = invalidation_condition
+        output['evidence_used'] = evidence_used
+        output['evidence_total_count'] = len(evidence_used)
+        output['evidence_exposed_count'] = len(evidence_used)
         output['diagnostics']['llm'] = {
             'attempted': True,
             'fallback_used': llm_degraded,
