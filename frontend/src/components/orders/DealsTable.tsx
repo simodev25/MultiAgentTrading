@@ -43,7 +43,7 @@ export function DealsTable({
             <TableSkeletonRows prefix="deals" columns={7} rows={6} />
           ) : deals.length === 0 ? (
             <tr>
-              <td colSpan={7}>Aucun deal remonté sur la fenêtre sélectionnée.</td>
+              <td colSpan={7}>No deals found in the selected window.</td>
             </tr>
           ) : (
             pagedDeals.map((deal, idx) => (
@@ -64,17 +64,17 @@ export function DealsTable({
       {deals.length > 0 && (
         <div className="flex items-center justify-between mt-4 pt-3 border-t border-border">
           <span className="text-[10px] font-mono text-text-muted">
-            {(dealsPage - 1) * dealsPerPage + 1}-{Math.min(deals.length, dealsPage * dealsPerPage)} sur {deals.length}
+            {(dealsPage - 1) * dealsPerPage + 1}-{Math.min(deals.length, dealsPage * dealsPerPage)} of {deals.length}
           </span>
           <div className="flex items-center gap-2">
             <button className="btn-ghost btn-small" type="button" disabled={dealsPage <= 1} onClick={onPreviousPage}>
-              Précédent
+              Previous
             </button>
             <span className="text-[10px] font-mono text-text-muted">
-              Page {dealsPage} / {dealsTotalPages} ({dealsPerPage} par page)
+              Page {dealsPage} / {dealsTotalPages} ({dealsPerPage} per page)
             </span>
             <button className="btn-ghost btn-small" type="button" disabled={dealsPage >= dealsTotalPages} onClick={onNextPage}>
-              Suivant
+              Next
             </button>
           </div>
         </div>

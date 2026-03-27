@@ -102,7 +102,7 @@ export function useOpenOrdersMarketChart(
 
   const chartNextRefreshAtLabel = useMemo(() => {
     if (chartSecondsToNextCandle == null) return '-';
-    return new Date(chartClockMs + chartSecondsToNextCandle * 1000).toLocaleTimeString('fr-FR', {
+    return new Date(chartClockMs + chartSecondsToNextCandle * 1000).toLocaleTimeString('en-US', {
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
@@ -194,7 +194,7 @@ export function useOpenOrdersMarketChart(
         if (returnedSymbol && !symbolsLikelyMatch(returnedSymbol, requestedSymbol)) {
           if (queryChanged) setMarketCandles([]);
           setMarketProvider(typeof payload.provider === 'string' ? payload.provider : '');
-          setMarketError(`Réponse marché incohérente (${returnedSymbol} au lieu de ${requestedSymbol})`);
+          setMarketError(`Incoherent market response (${returnedSymbol} instead of ${requestedSymbol})`);
           return;
         }
         setMarketCandles(Array.isArray(payload.candles) ? payload.candles : []);

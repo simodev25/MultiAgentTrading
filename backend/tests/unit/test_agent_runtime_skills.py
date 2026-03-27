@@ -31,7 +31,7 @@ def test_market_context_agent_applies_deterministic_skill_guardrails() -> None:
                     'agent_llm_enabled': {'market-context-analyst': False},
                     'agent_skills': {
                         'market-context-analyst': [
-                            "Ne présente une lecture directionnelle que si plusieurs éléments convergent; sinon parle d'incertitude."
+                            "Only present a directional reading if multiple elements converge; otherwise discuss uncertainty."
                         ]
                     },
                 },
@@ -121,7 +121,7 @@ def test_news_agent_uses_skill_aware_fallback_when_llm_disabled() -> None:
                     'agent_llm_enabled': {'news-analyst': False},
                     'agent_skills': {
                         'news-analyst': [
-                            'Réduis le poids des titres vagues et privilégie les signaux crédibles.',
+                            'Reduce the weight of vague headlines and prioritize credible signals.',
                         ]
                     },
                 },
@@ -187,11 +187,11 @@ def test_news_agent_timeout_case_matches_live_payload(monkeypatch) -> None:
                     'agent_llm_enabled': {'news-analyst': True},
                     'agent_skills': {
                         'news-analyst': [
-                            "Pondère chaque news selon son impact probable sur la devise de base et la devise de cotation du pair, pas selon son importance médiatique générale.",
-                            "Donne la priorité aux banques centrales, inflation, emploi, croissance, matières premières et géopolitique lorsqu'ils ont un lien crédible avec le pair analysé.",
-                            "Réduis le poids des titres vagues, repris sans confirmation ou trop éloignés du marché FX; une news peu spécifique ne doit pas forcer une direction.",
-                            "Accorde plus de valeur aux news récentes et aux événements encore actifs dans le pricing; les anciennes news servent surtout de contexte.",
-                            "Utilise la mémoire comme toile de fond pour la continuité narrative, jamais comme preuve supérieure à une news fraîche et pertinente.",
+                            "Evaluate each news item by its probable impact on the analyzed instrument, not by its media visibility, narrative tone or popularity.",
+                            "Prioritize catalysts with credible transmission: central banks, inflation, employment, growth, energy, commodities, geopolitical risk, global risk flows.",
+                            "Strongly reduce the weight of headlines without a clear primary source, generic summaries, non-specific articles and content too far from actual pair pricing.",
+                            "Actual freshness matters more than narrative noise; an old news item serves as context, not as dominant evidence.",
+                            "Never use memory as superior evidence over a fresh, relevant and traceable news item; memory serves as secondary context only.",
                         ]
                     },
                 },
@@ -260,8 +260,8 @@ def test_trader_agent_uses_skill_hold_guardrail_when_llm_disabled() -> None:
                     'decision_mode': 'conservative',
                     'agent_skills': {
                         'trader-agent': [
-                            "Synthétise l'ensemble en BUY, SELL ou HOLD; HOLD est la réponse par défaut quand l'avantage n'est pas net.",
-                            'Ne transforme jamais un signal isolé en décision exécutable; exige une convergence raisonnable.',
+                            "Synthesize everything into BUY, SELL or HOLD; HOLD remains the default answer whenever the informational or structural edge is not sufficiently clean.",
+                            'A single dominant factor, even if strong, is not sufficient by itself to transform a contradictory case into an executable decision.',
                         ]
                     },
                 },

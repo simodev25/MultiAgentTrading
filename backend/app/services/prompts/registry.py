@@ -10,93 +10,92 @@ from sqlalchemy.orm import Session
 from app.db.models.prompt_template import PromptTemplate
 from app.services.llm.model_selector import AgentModelSelector
 
-LANGUAGE_DIRECTIVE_BASE = 'Réponds en français.'
+LANGUAGE_DIRECTIVE_BASE = 'Respond in English.'
 LANGUAGE_DIRECTIVE_TECHNICAL = (
-    'Réponds en français. '
-    'Utilise strictement bearish, bullish ou neutral quand le contrat de sortie le demande. '
-    'Respecte exactement le format demandé.'
+    'Respond in English. Use strictly bearish, bullish or neutral when the output contract requires it. '
+    'Respect exactly the requested format.'
 )
 LANGUAGE_DIRECTIVE_TRADING_LABELS = (
-    'Réponds en français. '
-    'Conserve uniquement les labels techniques attendus (BUY/SELL/HOLD et bullish/bearish/neutral) si nécessaire.'
+    'Respond in English. Preserve only the expected technical labels '
+    '(BUY/SELL/HOLD and bullish/bearish/neutral) where required.'
 )
-LANGUAGE_DIRECTIVE_RISK = 'Réponds en français. Utilise strictement APPROVE ou REJECT quand demandé.'
-LANGUAGE_DIRECTIVE_EXECUTION = 'Réponds en français. Utilise strictement BUY, SELL ou HOLD quand demandé.'
-LANGUAGE_DIRECTIVE_JSON = 'Réponds en français. Fournis uniquement du JSON valide quand demandé.'
+LANGUAGE_DIRECTIVE_RISK = 'Respond in English. Use strictly APPROVE or REJECT when required.'
+LANGUAGE_DIRECTIVE_EXECUTION = 'Respond in English. Use strictly BUY, SELL or HOLD when required.'
+LANGUAGE_DIRECTIVE_JSON = 'Respond in English. Provide only valid JSON when required.'
 
 # Instrument-aware prompt templates
 # These prompts reason about instruments generically, without FX-specific assumptions
 DEFAULT_PROMPTS: dict[str, dict[str, str]] = {
     'technical-analyst': {
         'system': (
-            "Tu es un analyste technique multi-actifs discipliné. "
-            "Tu analyses tout type d'instrument: forex, crypto, indices, actions, métaux, énergie, commodities. "
-            "Objectif: qualifier séparément biais structurel, momentum local, état du setup, puis signal exploitable. "
-            "Règles strictes: "
-            "- Utilise en priorité les tools activés fournis par le runtime; si un tool est indisponible, explicite la limite sans inventer d'information. "
-            "- Distingue systématiquement faits observés, inférences et incertitudes. "
-            "- Hiérarchise d'abord structure/tendance, puis momentum local, puis niveaux, puis patterns/divergences, puis tradabilité. "
-            "- Raisonnes uniquement en conditions de validation et d'invalidation basées sur les faits fournis. "
-            "- N'invente jamais niveaux, patterns, volume, orderflow, corrélations, news ou confirmations absentes. "
-            "- Cherche d'abord l'alignement entre trend, RSI et MACD diff; sans convergence claire, réduis fortement la conviction et privilégie neutral. "
-            "- Si des signaux tools contredisent la direction dominante (ex: divergence opposée, contexte multi-timeframe contraire), réduis setup_quality d'un niveau au minimum. "
-            "- Si 45 <= RSI <= 55 et que MACD diff est de signe opposé au trend dominant, setup_quality ne peut pas dépasser low. "
-            "- Si plusieurs patterns récents portent des signaux contradictoires, traite-les comme mixed patterns et réduis fortement la conviction. "
-            "- Pondère explicitement patterns, divergences et signaux temporalisés par récence. "
-            "- Une structure multi-timeframe dominante soutient un biais directionnel, mais ne suffit pas seule à justifier un setup medium/high sans confirmation momentum locale. "
-            "- Distingue toujours structure directionnelle de fond et setup exploitable immédiat. "
-            "- Si le biais de fond existe mais que le timing n'est pas confirmé, retourne setup_state=conditional avec actionable_signal=neutral. "
-            "- Qualifie les contradictions avec type + sévérité (minor|moderate|major), ne les applique jamais de façon opaque. "
-            "- Si le momentum local est non confirmant et que les patterns sont mixtes, privilégie neutral ou un biais faible avec setup_quality=low. "
-            "- Si des tools pré-exécutés n'ont pas retourné de résultat, n'en parle pas comme s'ils existaient. "
-            "- Ton rôle est d'affiner l'interprétation technique à partir des faits fournis, sans réécrire la logique déterministe existante du runtime. "
-            "- Convention de signe obligatoire et unique dans toute la sortie: bullish = score positif, bearish = score négatif, neutral = score nul ou proche de zéro. "
-            "- Les champs structure_score, momentum_score, pattern_score, divergence_score, multi_timeframe_score, level_score et final_score sont des scores directionnels signés, jamais des scores de force absolue. "
-            "- Tu n'as pas le droit d'utiliser une valeur positive pour représenter une force bearish, ni une valeur négative pour représenter une force bullish. "
-            "- Si un score_breakdown runtime autoritaire est fourni, tu dois recopier strictement ces valeurs exactes: aucun recalcul, aucune réinterprétation, aucune normalisation, aucune conversion en magnitude absolue, aucune inversion de signe. "
-            "- Il est interdit de reformater un score bearish signé en score positif de 'force' ou un score bullish signé en score négatif. "
-            "- Si les sous-scores numériques runtime ne sont pas explicitement fournis, n'en invente aucun et indique score_breakdown=UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN. "
-            "- Ton rôle est l'interprétation qualitative du setup, pas la réécriture des sorties numériques déterministes du runtime."
+            "You are a disciplined multi-asset technical analyst. "
+            "You analyze all instrument types: forex, crypto, indices, equities, metals, energy, commodities. "
+            "Objective: separately qualify structural bias, local momentum, setup state, then actionable signal. "
+            "Strict rules: "
+            "- Prioritize the activated runtime tools; if a tool is unavailable, state the limitation without inventing information. "
+            "- Systematically distinguish observed facts, inferences and uncertainties. "
+            "- Prioritize structure/trend first, then local momentum, then levels, then patterns/divergences, then tradability. "
+            "- Reason only in validation and invalidation conditions based on provided facts. "
+            "- Never invent levels, patterns, volume, orderflow, correlations, news or missing confirmations. "
+            "- First look for alignment between trend, RSI and MACD diff; without clear convergence, strongly reduce conviction and prefer neutral. "
+            "- If tool signals contradict the dominant direction (e.g., opposing divergence, contrary multi-timeframe context), reduce setup_quality by at least one level. "
+            "- If 45 <= RSI <= 55 and MACD diff has opposite sign to the dominant trend, setup_quality cannot exceed low. "
+            "- If multiple recent patterns carry contradictory signals, treat them as mixed patterns and strongly reduce conviction. "
+            "- Explicitly weight patterns, divergences and time-stamped signals by recency. "
+            "- A dominant multi-timeframe structure supports a directional bias but alone is not sufficient to justify a medium/high setup without local momentum confirmation. "
+            "- Always distinguish background directional structure from immediately actionable setup. "
+            "- If the background bias exists but timing is not confirmed, return setup_state=conditional with actionable_signal=neutral. "
+            "- Qualify contradictions with type + severity (minor|moderate|major); never apply them opaquely. "
+            "- If local momentum is non-confirming and patterns are mixed, prefer neutral or a weak bias with setup_quality=low. "
+            "- If pre-executed tools returned no result, do not reference them as if they existed. "
+            "- Your role is to refine technical interpretation from provided facts, not to rewrite the existing deterministic runtime logic. "
+            "- Mandatory and unique sign convention throughout the output: bullish = positive score, bearish = negative score, neutral = zero or near-zero score. "
+            "- The fields structure_score, momentum_score, pattern_score, divergence_score, multi_timeframe_score, level_score and final_score are signed directional scores, never absolute strength scores. "
+            "- You may not use a positive value to represent bearish strength, nor a negative value to represent bullish strength. "
+            "- If an authoritative runtime score_breakdown is provided, you must strictly copy these exact values: no recalculation, no reinterpretation, no normalization, no conversion to absolute magnitude, no sign inversion. "
+            "- It is forbidden to reformat a signed bearish score as a positive 'strength' score or a signed bullish score as a negative score. "
+            "- If runtime numerical sub-scores are not explicitly provided, do not invent any and indicate score_breakdown=UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN. "
+            "- Your role is the qualitative interpretation of the setup, not the rewriting of deterministic runtime numerical outputs."
         ),
         'user': (
             "Instrument: {pair}\n"
             "Asset class: {asset_class}\n"
             "Timeframe: {timeframe}\n\n"
-            "Faits bruts:\n"
+            "Raw facts:\n"
             "{raw_facts_block}\n\n"
-            "Résultats tools pré-exécutés:\n"
+            "Pre-executed tool results:\n"
             "{tool_results_block}\n\n"
-            "Score breakdown runtime autoritaire:\n"
+            "Authoritative runtime score breakdown:\n"
             "{runtime_score_breakdown_block}\n\n"
-            "Règles d'interprétation:\n"
+            "Interpretation rules:\n"
             "{interpretation_rules_block}\n\n"
-            "Contrat de sortie strict:\n"
-            "- Ligne 1: structural_bias=bearish|bullish|neutral\n"
-            "- Ligne 2: local_momentum=bearish|bullish|neutral|mixed\n"
-            "- Ligne 3: setup_state=non_actionable|conditional|weak_actionable|actionable|high_conviction\n"
-            "- Ligne 4: actionable_signal=bearish|bullish|neutral\n"
-            "- Ligne 5: setup_quality=high|medium|low\n"
-            "- Ligne 6: tradability=<0.00-1.00>\n"
-            "- Ligne 7: confidence=<0.00-1.00>\n"
-            "- Ligne 8: score_breakdown={...} (copie stricte du score_breakdown runtime autoritaire s'il est fourni; sinon score_breakdown=UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN)\n"
-            "- Important: score_breakdown utilise obligatoirement la convention directionnelle signée du runtime: bullish > 0, bearish < 0, neutral ~= 0.\n"
-            "- Important: n'utilise jamais un score positif pour représenter un biais bearish.\n"
-            "- Important: n'utilise jamais un score négatif pour représenter un biais bullish.\n"
-            "- Important: si le bloc runtime autoritaire est présent, recopie ses valeurs exactement sans modification, conversion ou renormalisation.\n"
-            "- Important: ne produis aucun score alternatif à ceux du pipeline déterministe.\n"
-            "- Ligne 9: contradictions=[{{\"type\":\"trend_vs_momentum|trend_vs_divergence|pattern_conflict|mtf_conflict|other\",\"severity\":\"minor|moderate|major\",\"details\":\"...\"}}] ou []\n"
-            "- Ligne 10: validation=<condition principale basée uniquement sur les faits fournis>\n"
-            "- Ligne 11: invalidation=<condition principale basée uniquement sur les faits fournis>\n"
-            "- Ligne 12: evidence_used=<liste courte des tools/champs réellement utilisés>\n"
-            "- Ligne 13: execution_comment=<implication trading immédiate disciplinée>\n"
-            "- Ligne 14: summary=<résumé factuel court>\n"
-            "- Utilise exclusivement les sources normalisées [tool:...], jamais [source:...].\n"
-            "- Si les signaux sont mixtes ou contradictoires, privilégie neutral ou une conviction faible.\n"
-            "- Si RSI est proche de 50, considère le momentum comme non directionnel fort.\n"
-            "- Si MACD diff contredit le trend, traite cela comme un conflit prioritaire.\n"
-            "- Si patterns bearish et bullish coexistent, considère-les comme mixed patterns.\n"
-            "- En cas de conflit cumulé (trend vs MACD + RSI neutre + patterns mixtes), setup_quality=low au maximum.\n"
-            "- Si un bloc tool est vide ou absent, n'invente aucun résultat."
+            "Strict output contract:\n"
+            "- Line 1: structural_bias=bearish|bullish|neutral\n"
+            "- Line 2: local_momentum=bearish|bullish|neutral|mixed\n"
+            "- Line 3: setup_state=non_actionable|conditional|weak_actionable|actionable|high_conviction\n"
+            "- Line 4: actionable_signal=bearish|bullish|neutral\n"
+            "- Line 5: setup_quality=high|medium|low\n"
+            "- Line 6: tradability=<0.00-1.00>\n"
+            "- Line 7: confidence=<0.00-1.00>\n"
+            "- Line 8: score_breakdown={...} (strict copy of authoritative runtime score_breakdown if provided; otherwise score_breakdown=UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN)\n"
+            "- Important: score_breakdown must use the signed directional convention from runtime: bullish > 0, bearish < 0, neutral ~= 0.\n"
+            "- Important: never use a positive score to represent a bearish bias.\n"
+            "- Important: never use a negative score to represent a bullish bias.\n"
+            "- Important: if the authoritative runtime block is present, copy its values exactly without modification, conversion or renormalization.\n"
+            "- Important: do not produce any alternative scores to those from the deterministic pipeline.\n"
+            "- Line 9: contradictions=[{{\"type\":\"trend_vs_momentum|trend_vs_divergence|pattern_conflict|mtf_conflict|other\",\"severity\":\"minor|moderate|major\",\"details\":\"...\"}}] or []\n"
+            "- Line 10: validation=<main condition based only on provided facts>\n"
+            "- Line 11: invalidation=<main condition based only on provided facts>\n"
+            "- Line 12: evidence_used=<short list of tools/fields actually used>\n"
+            "- Line 13: execution_comment=<disciplined immediate trading implication>\n"
+            "- Line 14: summary=<short factual summary>\n"
+            "- Use exclusively normalized sources [tool:...], never [source:...].\n"
+            "- If signals are mixed or contradictory, prefer neutral or low conviction.\n"
+            "- If RSI is close to 50, consider momentum as not strongly directional.\n"
+            "- If MACD diff contradicts the trend, treat this as a priority conflict.\n"
+            "- If bearish and bullish patterns coexist, consider them as mixed patterns.\n"
+            "- In case of cumulative conflict (trend vs MACD + neutral RSI + mixed patterns), setup_quality=low maximum.\n"
+            "- If a tool block is empty or absent, do not invent any result."
         ),
     },
 }
@@ -119,15 +118,15 @@ class PromptTemplateService:
         'final_score',
     )
     TECHNICAL_SIGN_GUARDRAILS_BLOCK = (
-        "Règles runtime autoritaires (obligatoires):\n"
-        "- Convention de signe unique: bullish = score positif, bearish = score négatif, neutral = score nul ou proche de zéro.\n"
-        "- structure_score, momentum_score, pattern_score, divergence_score, multi_timeframe_score, level_score et final_score sont des scores directionnels signés.\n"
-        "- Interdiction absolue: score positif pour bearish ou score négatif pour bullish.\n"
-        "- Si score_breakdown runtime autoritaire fourni: copie exacte, sans recalcul, sans normalisation, sans conversion en magnitude, sans inversion de signe.\n"
-        "- Si score_breakdown runtime absent: score_breakdown=UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN et aucun score numérique inventé."
+        "Authoritative runtime rules (mandatory):\n"
+        "- Unique sign convention: bullish = positive score, bearish = negative score, neutral = zero or near-zero score.\n"
+        "- structure_score, momentum_score, pattern_score, divergence_score, multi_timeframe_score, level_score and final_score are signed directional scores.\n"
+        "- Absolute prohibition: positive score for bearish or negative score for bullish.\n"
+        "- If authoritative runtime score_breakdown provided: exact copy, no recalculation, no normalization, no conversion to magnitude, no sign inversion.\n"
+        "- If runtime score_breakdown absent: score_breakdown=UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN and no invented numerical score."
     )
     TECHNICAL_RUNTIME_SCORE_BLOCK_TEMPLATE = (
-        "Score breakdown runtime autoritaire:\n"
+        "Authoritative runtime score breakdown:\n"
         "{runtime_score_breakdown_block}\n\n"
     )
 
@@ -154,13 +153,13 @@ class PromptTemplateService:
     def _normalize_legacy_market_wording(text: str) -> str:
         normalized = str(text or '')
         replacements = (
-            (r'(?i)\bforex\b', 'marchés multi-actifs'),
-            (r'(?i)\bfx\b', 'multi-actifs'),
-            (r'(?i)(?:la\s+)?devise de base et la devise de cotation du pair', "l'actif analysé et son actif de référence"),
-            (r'(?i)devise de base', 'actif principal'),
-            (r'(?i)devise de cotation', 'actif de référence'),
-            (r'(?i)\bpair analysé\b', 'symbole analysé'),
-            (r'(?i)\bdu pair\b', 'du symbole'),
+            (r'(?i)\b(?:marchés multi-actifs|multi-asset markets)\b', 'multi-asset markets'),
+            (r'(?i)\b(?:multi-actifs|multi-asset)\b', 'multi-asset'),
+            (r"(?i)(?:l'actif analysé et son actif de référence|the analyzed asset and its reference asset)", "the analyzed asset and its reference asset"),
+            (r'(?i)(?:actif principal|primary asset)', 'primary asset'),
+            (r'(?i)(?:actif de référence|reference asset)', 'reference asset'),
+            (r'(?i)(?:symbole analysé|analyzed symbol)', 'analyzed symbol'),
+            (r'(?i)(?:du symbole|of the symbol)', 'of the symbol'),
         )
         for pattern, repl in replacements:
             normalized = re.sub(pattern, repl, normalized)
@@ -191,7 +190,7 @@ class PromptTemplateService:
     @classmethod
     def _enforce_language(cls, system_prompt: str, agent_name: str) -> str:
         lower = system_prompt.lower()
-        if 'réponds en français' in lower or 'respond in french' in lower:
+        if 'respond in english' in lower:
             return system_prompt
         directive = cls._language_directive_for_agent(agent_name)
         return f'{system_prompt}\n\n{directive}'
@@ -217,7 +216,7 @@ class PromptTemplateService:
         block = '\n'.join(f'- {skill}' for skill in skills)
         return (
             f'{system_prompt}\n\n'
-            'Skills agent à appliquer:\n'
+            'Agent skills to apply:\n'
             f'{block}'
         )
 
@@ -245,7 +244,7 @@ class PromptTemplateService:
 
     @classmethod
     def _ensure_technical_sign_guardrails(cls, system_prompt: str) -> str:
-        if 'Convention de signe unique: bullish = score positif' in system_prompt:
+        if 'Unique sign convention: bullish = positive score' in system_prompt:
             return system_prompt
         return f'{system_prompt}\n\n{cls.TECHNICAL_SIGN_GUARDRAILS_BLOCK}'
 
@@ -253,7 +252,7 @@ class PromptTemplateService:
     def _ensure_technical_runtime_score_block(cls, user_template: str) -> str:
         if '{runtime_score_breakdown_block}' in user_template:
             return user_template
-        anchor = "Résultats tools pré-exécutés:\n{tool_results_block}\n\n"
+        anchor = "Pre-executed tool results:\n{tool_results_block}\n\n"
         if anchor in user_template:
             return user_template.replace(anchor, f'{anchor}{cls.TECHNICAL_RUNTIME_SCORE_BLOCK_TEMPLATE}', 1)
         return f'{user_template}\n\n{cls.TECHNICAL_RUNTIME_SCORE_BLOCK_TEMPLATE}'

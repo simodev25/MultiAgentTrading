@@ -1,88 +1,88 @@
-# Rapport d'audit approfondi — Multi-Agent Trading Platform
-# Architecture IA, Prompt Engineering, Runtime Agentique & Logique Trading
+# In-Depth Audit Report — Multi-Agent Trading Platform
+# AI Architecture, Prompt Engineering, Agentic Runtime & Trading Logic
 
-**Date** : 2026-03-23
-**Périmètre** : `backend/`, `infra/`, `frontend/` (lecture seule)
-**Branche** : `feature/claude`
-**Tests** : 357 passed, 0 failed
-**Méthode** : Lecture exhaustive du code source, pas d'inférence depuis la documentation
+**Date**: 2026-03-23
+**Scope**: `backend/`, `infra/`, `frontend/` (read-only)
+**Branch**: `feature/claude`
+**Tests**: 357 passed, 0 failed
+**Method**: Exhaustive source code review, no inference from documentation
 
 ---
 
-## 1. Résumé exécutif
+## 1. Executive Summary
 
-La plateforme est un **système multi-agent de trading multi-produit** piloté par LLM, composé de 8 agents spécialisés orchestrés en pipeline avec parallélisme partiel. L'architecture repose sur un serveur MCP exposant 19 outils déterministes, un moteur de risque indépendant du LLM, une mémoire vectorielle Qdrant 64 dimensions avec pondération par outcome, et une observabilité Prometheus/Grafana.
+The platform is a **multi-agent, multi-product trading system** driven by LLM, consisting of 8 specialized agents orchestrated in a pipeline with partial parallelism. The architecture relies on an MCP server exposing 19 deterministic tools, a risk engine independent of the LLM, a 64-dimension Qdrant vector memory with outcome-based weighting, and Prometheus/Grafana observability.
 
-**Forces principales observées** :
-- Frontière LLM/déterministe exemplaire : 4 agents LLM OFF par défaut, RiskEngine 100% déterministe
-- Logique de décision trading sophistiquée : 3 politiques (conservative/balanced/permissive), détection de contradictions, gating multi-sources
-- Prompts structurés avec contrats de sortie explicites et gardes anti-hallucination
-- Mémoire outcome-weighted avec risk blocks automatiques
+**Key strengths observed**:
+- Exemplary LLM/deterministic boundary: 4 agents with LLM OFF by default, RiskEngine 100% deterministic
+- Sophisticated trading decision logic: 3 policies (conservative/balanced/permissive), contradiction detection, multi-source gating
+- Structured prompts with explicit output contracts and anti-hallucination guards
+- Outcome-weighted memory with automatic risk blocks
 
-**Faiblesses principales observées** :
-- Prompts recherche bull/bear quasi-identiques → risque de débat symétrique stérile
-- Embedding 64-dim SHA256 sans sémantique réelle → recall mémoire limité
-- Fichiers monolithiques (agents.py: 4 773L, engine.py: 1 657L)
-- Position sizing dupliqué entre MCP tool et RiskEngine
+**Key weaknesses observed**:
+- Bull/bear research prompts nearly identical → risk of sterile symmetric debate
+- 64-dim SHA256 embedding without real semantics → limited memory recall
+- Monolithic files (agents.py: 4,773L, engine.py: 1,657L)
+- Position sizing duplicated between MCP tool and RiskEngine
 
-### Scores par dimension (0-5)
+### Scores by dimension (0-5)
 
-| Dimension | Score | Justification (preuve observée) |
+| Dimension | Score | Justification (observed evidence) |
 |-----------|-------|--------------------------------|
-| Qualité des prompts | 3.5 | Contrats de sortie explicites, gardes anti-hallucination, mais prompts bull/bear identiques et certains trop longs |
-| Clarté des rôles | 4.0 | 8 agents distincts, séparation claire analyse/débat/décision/risque/exécution |
-| Qualité du runtime | 4.0 | Second-pass, stagnation guard, bundle selection, mais complexité du fichier engine.py |
-| Gouvernance outils | 4.5 | enabled_tools enforced, alias resolution, double-check alias+canonical |
-| Qualité du contexte | 3.5 | Compaction pour débat, mémoire injectée, mais contexte parfois trop large |
-| Design mémoire | 3.0 | Outcome weighting, risk blocks, mais embedding SHA256 sans sémantique réelle |
-| Qualité du raisonnement | 3.5 | Contradiction detection, multi-source alignment, mais dépendance au LLM pour synthèse |
-| Logique trading | 4.0 | 3 modes décision, gating multi-niveaux, SL/TP ATR-based, memory risk blocks |
-| Contrôle du risque | 4.5 | RiskEngine 100% déterministe, 8 classes d'actifs, barrière live, volume clamping |
-| Sécurité d'exécution | 4.0 | Side flip blocked, degraded→HOLD, JSON contract strict, live abort on degradation |
-| Actionnabilité sortie | 3.5 | Décisions BUY/SELL/HOLD claires, SL/TP calculés, mais rationale parfois verbose |
-| Efficience LLM | 3.5 | 4 agents LLM OFF, token limits (96/384), mais débat bull/bear coûteux vs valeur |
-| Observabilité | 3.0 | Prometheus metrics, trace context, mais OpenTelemetry OFF, pas d'alerting |
-| Testabilité | 3.5 | 357 tests, bonne couverture agents, mais gaps E2E et cascading degradation |
-| Production readiness | 3.0 | Simulation/paper solides, live gate robuste, mais credentials en clair, naming forex résiduel |
+| Prompt quality | 3.5 | Explicit output contracts, anti-hallucination guards, but identical bull/bear prompts and some too long |
+| Role clarity | 4.0 | 8 distinct agents, clear separation of analysis/debate/decision/risk/execution |
+| Runtime quality | 4.0 | Second-pass, stagnation guard, bundle selection, but engine.py file complexity |
+| Tool governance | 4.5 | enabled_tools enforced, alias resolution, double-check alias+canonical |
+| Context quality | 3.5 | Compaction for debate, injected memory, but sometimes overly large context |
+| Memory design | 3.0 | Outcome weighting, risk blocks, but SHA256 embedding without real semantics |
+| Reasoning quality | 3.5 | Contradiction detection, multi-source alignment, but dependency on LLM for synthesis |
+| Trading logic | 4.0 | 3 decision modes, multi-level gating, ATR-based SL/TP, memory risk blocks |
+| Risk control | 4.5 | RiskEngine 100% deterministic, 8 asset classes, live barrier, volume clamping |
+| Execution safety | 4.0 | Side flip blocked, degraded→HOLD, strict JSON contract, live abort on degradation |
+| Output actionability | 3.5 | Clear BUY/SELL/HOLD decisions, calculated SL/TP, but sometimes verbose rationale |
+| LLM efficiency | 3.5 | 4 agents with LLM OFF, token limits (96/384), but costly bull/bear debate vs value |
+| Observability | 3.0 | Prometheus metrics, trace context, but OpenTelemetry OFF, no alerting |
+| Testability | 3.5 | 357 tests, good agent coverage, but E2E and cascading degradation gaps |
+| Production readiness | 3.0 | Solid simulation/paper, robust live gate, but plaintext credentials, residual forex naming |
 
-**Score moyen : 3.63/5**
+**Average score: 3.63/5**
 
 ---
 
-## 2. Périmètre réellement analysé
+## 2. Scope actually analyzed
 
-| Couche | Fichiers lus intégralement | Lignes |
+| Layer | Files read in full | Lines |
 |--------|---------------------------|--------|
-| Agents (prompts, logique, contrats) | `agents.py` | 4 773 |
-| Orchestrateur (pipeline, autonomy) | `engine.py` | 1 657 |
-| MCP server (19 outils) | `mcp_trading_server.py` | ~1 200 |
+| Agents (prompts, logic, contracts) | `agents.py` | 4,773 |
+| Orchestrator (pipeline, autonomy) | `engine.py` | 1,657 |
+| MCP server (19 tools) | `mcp_trading_server.py` | ~1,200 |
 | MCP client (adapter, alias) | `mcp_client.py` | 358 |
 | LangChain tools (wrappers) | `langchain_tools.py` | ~300 |
 | Risk engine | `rules.py` | ~800 |
 | Order guardian | `order_guardian.py` | ~600 |
-| Mémoire vectorielle | `vector_memory.py` | 1 182 |
-| Mémoire Memori | `memori_memory.py` | 328 |
+| Vector memory | `vector_memory.py` | 1,182 |
+| Memori memory | `memori_memory.py` | 328 |
 | Model selector | `model_selector.py` | 538 |
 | LLM helpers + clients | `base_llm_helpers.py`, `openai_compatible_client.py`, `ollama_client.py` | ~800 |
 | Prompt registry | `registry.py` | 456 |
 | Config | `config.py` | 307 |
-| DB models (15 fichiers) | `db/models/*.py` | ~1 500 |
-| Routes API (12 fichiers) | `api/routes/*.py` | ~2 500 |
-| Tests (33 fichiers) | `tests/unit/`, `tests/integration/` | ~4 500 |
+| DB models (15 files) | `db/models/*.py` | ~1,500 |
+| API routes (12 files) | `api/routes/*.py` | ~2,500 |
+| Tests (33 files) | `tests/unit/`, `tests/integration/` | ~4,500 |
 | Infra | `Chart.yaml`, `docker-compose.yml`, `Dockerfile` | ~300 |
-| **Total** | **~116 fichiers Python** | **~29 900** |
+| **Total** | **~116 Python files** | **~29,900** |
 
 ---
 
-## 3. Architecture réellement observée
+## 3. Architecture actually observed
 
-### 3.1 Fait vérifié : la plateforme est multi-produit
+### 3.1 Verified fact: the platform is multi-product
 
-**Preuve** : `_CONTRACT_SPECS` dans `rules.py` définit 8 classes d'actifs (forex, crypto, index, metal, energy, commodity, equity, etf). `InstrumentClassifier` dans `instrument_helpers.py` classifie automatiquement les symboles. `Settings` configure forex + crypto pairs par défaut.
+**Evidence**: `_CONTRACT_SPECS` in `rules.py` defines 8 asset classes (forex, crypto, index, metal, energy, commodity, equity, etf). `InstrumentClassifier` in `instrument_helpers.py` automatically classifies symbols. `Settings` configures forex + crypto pairs by default.
 
-**Divergence naming** : `forex.db` (SQLite default), `forex_long_term_memory` (Qdrant collection), Docker credentials `forex:forex` — naming résiduel incohérent avec l'architecture multi-produit réelle.
+**Naming divergence**: `forex.db` (SQLite default), `forex_long_term_memory` (Qdrant collection), Docker credentials `forex:forex` — residual naming inconsistent with the actual multi-product architecture.
 
-### 3.2 Pipeline d'agents vérifié
+### 3.2 Verified agent pipeline
 
 ```
 ┌──────────────── Parallel Group 1 ─────────────────┐
@@ -96,268 +96,268 @@ La plateforme est un **système multi-agent de trading multi-produit** piloté p
                       ▼ Full analysis_outputs + debate results
               ┌─── Sequential ───┐
               │  TraderAgent      │ (LLM OFF default)
-              │  RiskManager      │ (LLM OFF default, RiskEngine 100% déterministe)
+              │  RiskManager      │ (LLM OFF default, RiskEngine 100% deterministic)
               │  ExecutionManager │ (LLM OFF default)
               └──────────────────┘
 ```
 
-**Fait observé** (`model_selector.py:74-85`) : `DEFAULT_AGENT_LLM_ENABLED` montre trader-agent LLM **OFF** par défaut — la décision trading est donc déterministe par défaut, pas LLM-driven. C'est un choix fort et correct.
+**Observed fact** (`model_selector.py:74-85`): `DEFAULT_AGENT_LLM_ENABLED` shows trader-agent LLM **OFF** by default — the trading decision is therefore deterministic by default, not LLM-driven. This is a strong and correct design choice.
 
-### 3.3 Autonomy loop vérifié
+### 3.3 Verified autonomy loop
 
-**Preuve** (`engine.py:1306-1437`) :
+**Evidence** (`engine.py:1306-1437`):
 - `max_cycles` configurable (default 3), stagnation guard, bundle selection
-- Memory refresh progressif (limit_step increment)
-- Model override boost pour agents dégradés
-- Second-pass avec contrôle d'attempt limits
+- Progressive memory refresh (limit_step increment)
+- Model override boost for degraded agents
+- Second-pass with attempt limit control
 
 ---
 
-## 4. Analyse des prompts
+## 4. Prompt Analysis
 
-### 4.1 Structure hiérarchique observée
+### 4.1 Observed hierarchical structure
 
-**3 niveaux de prompts** :
-1. **Prompt registry** (`registry.py`) : 11 templates DB-backed avec versioning et activation
-2. **Fallback prompts** : Hardcodés dans chaque agent class (agents.py)
-3. **Language directives** : Injections françaises (`LANGUAGE_DIRECTIVE_BASE`, `_TRADING_LABELS`, `_RISK`, `_EXECUTION`, `_JSON`)
+**3 levels of prompts**:
+1. **Prompt registry** (`registry.py`): 11 DB-backed templates with versioning and activation
+2. **Fallback prompts**: Hardcoded in each agent class (agents.py)
+3. **Language directives**: French injections (`LANGUAGE_DIRECTIVE_BASE`, `_TRADING_LABELS`, `_RISK`, `_EXECUTION`, `_JSON`)
 
-**Fait observé** : Les prompts sont rendus via `PromptTemplateService.render()` qui :
-- Charge depuis DB si disponible
-- Fallback vers les constantes hardcodées
-- Substitue les variables avec `SafeDict` (variables manquantes marquées `{missing_key}`)
-- Injecte les skills (`_append_skills_block`) et la directive langue
+**Observed fact**: Prompts are rendered via `PromptTemplateService.render()` which:
+- Loads from DB if available
+- Falls back to hardcoded constants
+- Substitutes variables with `SafeDict` (missing variables marked `{missing_key}`)
+- Injects skills (`_append_skills_block`) and language directive
 
-### 4.2 Table : Revue des prompts par agent
+### 4.2 Table: Prompt review by agent
 
-| Agent/Prompt | Usage actuel | Best practice | Gap | Opportunité | Priorité |
+| Agent/Prompt | Current usage | Best practice | Gap | Opportunity | Priority |
 |-------------|-------------|---------------|-----|-------------|----------|
-| **TechnicalAnalyst** system | 4 instructions : sépare faits/inférences, conditions validation/invalidation, n'invente pas | Anti-hallucination explicite, contrat de sortie 5 lignes | Pas de format JSON strict, sortie textuelle parsée | Migrer vers JSON strict avec schema validation | P2 |
-| **TechnicalAnalyst** user | Variables interpolées (pair, RSI, MACD, ATR, trend, price) | Données structurées injectées | Pas de section "données manquantes" explicite | Ajouter `missing_data: []` pour traçabilité | P3 |
-| **NewsAnalyst** system | 7 instructions : isoler catalyseurs, pas de causalité, distinguer no/weak/directional signal | Robuste, anti-surinterprétation | Prompt long (>500 tokens system), FX-spécifique (actif principal/référence) | Raccourcir, extraire logique FX dans un pré-filtre | P2 |
-| **NewsAnalyst** user | Variables + headlines, contrat 5 lignes, règle FX séparée | Contrat de sortie explicite | Beaucoup de règles textuelles, pas de JSON strict | Migrer contrat vers JSON schema | P2 |
-| **MarketContext** system | 4 instructions : régime, momentum, lisibilité, volatilité | Focalisé, clair | Très court (3 phrases) — peut manquer de cadrage | Ajouter contrainte de format JSON | P3 |
-| **MarketContext** user | Variables techniques + contrat 5 lignes | Structuré | Contrat textuel, pas JSON | Aligner sur JSON comme Risk/Execution | P3 |
-| **BullishResearcher** system | 4 instructions : thèse haussière, preuves, pas d'invention | Anti-hallucination | **Quasi-identique au BearishResearcher** (seul "haussière"→"baissière" change) | Fusionner en un seul prompt paramétré `{direction}` | P1 |
-| **BearishResearcher** system | 4 instructions : thèse baissière, preuves, pas d'invention | Anti-hallucination | **Identique au Bullish** sauf direction | Fusionner | P1 |
-| **TraderAgent** system | 2 instructions : résume justification, pas d'invention | Minimaliste | **Trop court** — ne cadre pas la logique de décision (c'est le code qui décide) | Acceptable car trader est LLM OFF par défaut | P3 |
-| **RiskManager** user | Sortie JSON strict `{"decision":"APPROVE|REJECT","justification":"..."}` | JSON contract enforced | Bien structuré | — | — |
-| **ExecutionManager** user | Sortie JSON strict `{"decision":"BUY|SELL|HOLD","justification":"..."}` | JSON contract enforced | Bien structuré | — | — |
+| **TechnicalAnalyst** system | 4 instructions: separate facts/inferences, validation/invalidation conditions, never invent | Explicit anti-hallucination, 5-line output contract | No strict JSON format, textual output parsed | Migrate to strict JSON with schema validation | P2 |
+| **TechnicalAnalyst** user | Interpolated variables (pair, RSI, MACD, ATR, trend, price) | Structured data injected | No explicit "missing data" section | Add `missing_data: []` for traceability | P3 |
+| **NewsAnalyst** system | 7 instructions: isolate catalysts, no causality, distinguish no/weak/directional signal | Robust, anti-overinterpretation | Long prompt (>500 tokens system), FX-specific (primary/reference asset) | Shorten, extract FX logic into a pre-filter | P2 |
+| **NewsAnalyst** user | Variables + headlines, 5-line contract, separate FX rule | Explicit output contract | Many textual rules, no strict JSON | Migrate contract to JSON schema | P2 |
+| **MarketContext** system | 4 instructions: regime, momentum, readability, volatility | Focused, clear | Very short (3 sentences) — may lack framing | Add JSON format constraint | P3 |
+| **MarketContext** user | Technical variables + 5-line contract | Structured | Textual contract, not JSON | Align with JSON like Risk/Execution | P3 |
+| **BullishResearcher** system | 4 instructions: bullish thesis, evidence, never invent | Anti-hallucination | **Nearly identical to BearishResearcher** (only "bullish"→"bearish" changes) | Merge into a single parameterized prompt `{direction}` | P1 |
+| **BearishResearcher** system | 4 instructions: bearish thesis, evidence, never invent | Anti-hallucination | **Identical to Bullish** except direction | Merge | P1 |
+| **TraderAgent** system | 2 instructions: summarize justification, never invent | Minimalist | **Too short** — does not frame decision logic (code decides) | Acceptable since trader is LLM OFF by default | P3 |
+| **RiskManager** user | Strict JSON output `{"decision":"APPROVE|REJECT","justification":"..."}` | JSON contract enforced | Well structured | — | — |
+| **ExecutionManager** user | Strict JSON output `{"decision":"BUY|SELL|HOLD","justification":"..."}` | JSON contract enforced | Well structured | — | — |
 
-### 4.3 Observations critiques sur les prompts
+### 4.3 Critical observations on prompts
 
-**Fait observé** (`agents.py:3268-3432` vs `3435-3599`) : Les classes `BullishResearcherAgent` et `BearishResearcherAgent` partagent **la même structure exacte**. Seuls changent :
-- Le mot "haussière"/"baissière" dans le prompt
-- Le target signal ('bullish'/'bearish') dans `_build_research_view()`
+**Observed fact** (`agents.py:3268-3432` vs `3435-3599`): The `BullishResearcherAgent` and `BearishResearcherAgent` classes share **the exact same structure**. Only the following differ:
+- The word "bullish"/"bearish" in the prompt
+- The target signal ('bullish'/'bearish') in `_build_research_view()`
 
-**Inférence** : Le débat bull/bear risque de produire des arguments **symétriques** car les prompts sont identiques en structure. Un chercheur haussier et un chercheur baissier avec le même template, les mêmes outils, et les mêmes données verront les mêmes patterns — seule la directive de direction diffère.
+**Inference**: The bull/bear debate risks producing **symmetric** arguments because the prompts are structurally identical. A bullish researcher and a bearish researcher with the same template, the same tools, and the same data will see the same patterns — only the direction directive differs.
 
-**Recommandation** : Paramétrer un seul `ResearcherAgent(direction='bullish'|'bearish')` et différencier les prompts au-delà de la simple direction (ex: le bearish devrait chercher les divergences, le bullish les confirmations).
+**Recommendation**: Parameterize a single `ResearcherAgent(direction='bullish'|'bearish')` and differentiate the prompts beyond the simple direction (e.g., bearish should look for divergences, bullish for confirmations).
 
-### 4.4 Résistance aux hallucinations
+### 4.4 Hallucination resistance
 
-| Mécanisme | Agent(s) | Preuve |
+| Mechanism | Agent(s) | Evidence |
 |-----------|----------|--------|
-| "N'invente jamais" | Technical, News, Bullish, Bearish | Prompt system explicite |
-| Contrat de sortie strict | Tous | User prompt avec format imposé |
-| JSON strict | Risk, Execution | `{"decision":"APPROVE|REJECT"}` |
-| Validation post-LLM | News | `_validate_news_output()` force neutral si pas d'évidence |
-| Fallback déterministe | Tous | Si LLM OFF ou dégradé, score calculé sans LLM |
-| Sign consistency | News | Score forcé positif si bullish, négatif si bearish |
-| Side flip blocking | Execution | `same_side_confirmation` obligatoire |
+| "Never invent" | Technical, News, Bullish, Bearish | Explicit system prompt |
+| Strict output contract | All | User prompt with enforced format |
+| Strict JSON | Risk, Execution | `{"decision":"APPROVE|REJECT"}` |
+| Post-LLM validation | News | `_validate_news_output()` forces neutral if no evidence |
+| Deterministic fallback | All | If LLM OFF or degraded, score computed without LLM |
+| Sign consistency | News | Score forced positive if bullish, negative if bearish |
+| Side flip blocking | Execution | `same_side_confirmation` required |
 
-**Fait observé** : La validation post-LLM est **bien implémentée** pour le NewsAnalyst (`_validate_news_output`, agents.py:1517-1630) mais **absente** pour les chercheurs bull/bear. Si le LLM bullish renvoie "bearish", le système ne corrige pas.
+**Observed fact**: Post-LLM validation is **well implemented** for the NewsAnalyst (`_validate_news_output`, agents.py:1517-1630) but **absent** for the bull/bear researchers. If the bullish LLM returns "bearish", the system does not correct it.
 
 ---
 
-## 5. Analyse de la spécialisation des agents
+## 5. Agent Specialization Analysis
 
-### 5.1 Table : Clarté des rôles
+### 5.1 Table: Role clarity
 
-| Agent | Rôle intentionnel | Rôle observé (code) | Chevauchement/conflit | Ajustement recommandé | Priorité |
+| Agent | Intended role | Observed role (code) | Overlap/conflict | Recommended adjustment | Priority |
 |-------|-------------------|---------------------|----------------------|----------------------|----------|
-| TechnicalAnalyst | Analyse indicateurs techniques | Score déterministe (trend±0.35, RSI±0.25, MACD±0.2), LLM bias optionnel 0.15 | Aucun, rôle distinct | Garder LLM OFF par défaut — valeur ajoutée LLM marginale ici | — |
-| NewsAnalyst | Filtrage et scoring des news | Evidence weighting (relevance 0.62 + freshness 0.20 + credibility 0.18), LLM pour synthèse | Léger avec MarketContext sur macro events | Séparer clairement : News = micro-catalyseurs, Context = macro-régime | P3 |
-| MarketContext | Régime de marché | Score déterministe (trend±0.12, momentum, EMA, RSI), régime 5 classes | Calculs RSI/EMA déjà faits par Technical → **duplication partielle** | Recevoir output Technical plutôt que recalculer | P2 |
-| BullishResearcher | Thèse haussière | Agrège arguments bull, LLM pour debate text | **Identique en structure au Bearish** | Paramétrer un seul ResearcherAgent | P1 |
-| BearishResearcher | Thèse baissière | Agrège arguments bear, LLM pour debate text | **Identique au Bullish** | Fusionner | P1 |
-| TraderAgent | Décision finale | Scoring multi-source, contradiction detection, policy gating | Rôle clair et distinct — **c'est le cœur décisionnel** | Prompt trop court si LLM ON — enrichir | P3 |
-| RiskManager | Validation risque | RiskEngine.evaluate() + LLM review optionnel | **LLM ne peut PAS override un rejet déterministe** — correct | Garder LLM OFF — apport marginal | — |
-| ExecutionManager | Exécution ordre | JSON contract LLM + side confirmation gate | Side flip blocked — correct | Garder LLM OFF — logique suffisamment déterministe | — |
+| TechnicalAnalyst | Analyze technical indicators | Deterministic score (trend±0.35, RSI±0.25, MACD±0.2), optional LLM bias 0.15 | None, distinct role | Keep LLM OFF by default — marginal LLM added value here | — |
+| NewsAnalyst | Filter and score news | Evidence weighting (relevance 0.62 + freshness 0.20 + credibility 0.18), LLM for synthesis | Slight overlap with MarketContext on macro events | Clearly separate: News = micro-catalysts, Context = macro-regime | P3 |
+| MarketContext | Market regime | Deterministic score (trend±0.12, momentum, EMA, RSI), 5-class regime | RSI/EMA calculations already done by Technical → **partial duplication** | Receive Technical output rather than recalculate | P2 |
+| BullishResearcher | Bullish thesis | Aggregates bull arguments, LLM for debate text | **Structurally identical to Bearish** | Parameterize a single ResearcherAgent | P1 |
+| BearishResearcher | Bearish thesis | Aggregates bear arguments, LLM for debate text | **Identical to Bullish** | Merge | P1 |
+| TraderAgent | Final decision | Multi-source scoring, contradiction detection, policy gating | Clear and distinct role — **this is the decision-making core** | Prompt too short if LLM ON — enrich | P3 |
+| RiskManager | Risk validation | RiskEngine.evaluate() + optional LLM review | **LLM cannot override a deterministic rejection** — correct | Keep LLM OFF — marginal contribution | — |
+| ExecutionManager | Order execution | JSON contract LLM + side confirmation gate | Side flip blocked — correct | Keep LLM OFF — logic is sufficiently deterministic | — |
 
-### 5.2 Valeur réelle de chaque agent dans la décision finale
+### 5.2 Actual value of each agent in the final decision
 
-**Fait observé** (`agents.py:3602-4441`, méthode `run()` du TraderAgent) :
+**Observed fact** (`agents.py:3602-4441`, TraderAgent `run()` method):
 
-Le TraderAgent calcule `combined_score` en pondérant :
-- Technical analyst score (poids direct)
+The TraderAgent computes `combined_score` by weighting:
+- Technical analyst score (direct weight)
 - News analyst score × coverage_multiplier (none=0%, low=35%, medium-high=100%)
-- Market context score (poids direct)
-- Debate score = `debate_sign * source_alignment * 0.12` (débat pèse ~12% max)
+- Market context score (direct weight)
+- Debate score = `debate_sign * source_alignment * 0.12` (debate weighs ~12% max)
 - Memory signal adjustment (±0.08 max)
 
-**Inférence** : Le **débat bull/bear** a un impact de **±0.12 maximum** sur le score combiné. Comparé au technical analyst (±0.80) et au news analyst (±0.35 ajusté par coverage), le débat est un **facteur tertiaire**. Son coût en latence (2 appels LLM) est disproportionné par rapport à son influence.
+**Inference**: The **bull/bear debate** has a **±0.12 maximum** impact on the combined score. Compared to the technical analyst (±0.80) and the news analyst (±0.35 adjusted by coverage), the debate is a **tertiary factor**. Its latency cost (2 LLM calls) is disproportionate relative to its influence.
 
-**Hypothèse** : Le débat pourrait être remplacé par une agrégation déterministe des arguments, sans perte significative de qualité décisionnelle, avec un gain de latence de ~30-50%.
+**Hypothesis**: The debate could be replaced by a deterministic aggregation of arguments, without significant loss of decision quality, with a latency gain of ~30-50%.
 
-### 5.3 Duplication MarketContext ↔ TechnicalAnalyst
+### 5.3 MarketContext ↔ TechnicalAnalyst duplication
 
-**Fait observé** :
-- `TechnicalAnalystAgent.run()` calcule `trend_component ± 0.35` à partir de `market_snapshot['trend']`
-- `MarketContextAnalystAgent.run()` recalcule `trend_component ± 0.12` à partir du **même** `market_snapshot['trend']`
-- Les deux utilisent RSI, MACD, EMA du même snapshot
+**Observed fact**:
+- `TechnicalAnalystAgent.run()` computes `trend_component ± 0.35` from `market_snapshot['trend']`
+- `MarketContextAnalystAgent.run()` recomputes `trend_component ± 0.12` from the **same** `market_snapshot['trend']`
+- Both use RSI, MACD, EMA from the same snapshot
 
-**Recommandation** : MarketContext devrait **recevoir** l'output Technical au lieu de recalculer. Sa valeur ajoutée est le **régime** (trending/ranging/calm/volatile/unstable) et le **contexte de session**, pas la re-lecture des mêmes indicateurs.
+**Recommendation**: MarketContext should **receive** the Technical output instead of recalculating. Its added value is the **regime** (trending/ranging/calm/volatile/unstable) and the **session context**, not re-reading the same indicators.
 
 ---
 
-## 6. Analyse du runtime agentique
+## 6. Agentic Runtime Analysis
 
-### 6.1 Valeur réelle du runtime
+### 6.1 Actual runtime value
 
-| Composant runtime | Valeur observée | Justification |
+| Runtime component | Observed value | Justification |
 |-------------------|-----------------|---------------|
-| Parallélisme Group 1 (3 agents) | **Haute** | Réduit latence de ~3x pour l'analyse initiale |
-| Parallélisme Group 2 (2 researchers) | **Moyenne** | Gain modéré, mais le débat lui-même a un impact faible (±0.12) |
-| Tool-calling loop (`_chat_with_runtime_tools`) | **Haute** | Permet aux agents LLM d'enrichir leur analyse dynamiquement |
-| Second-pass | **Moyenne** | Améliore qualité sur cas marginaux, mais double la latence |
-| Stagnation guard | **Haute** | Évite les boucles infinies, détection par 5 critères |
-| Bundle selection (`_prefer_autonomy_bundle`) | **Haute** | Sélectionne le meilleur cycle parmi N |
-| Memory refresh entre passes | **Moyenne** | Apport limité si embedding peu sémantique |
-| Model override boost | **Basse** | Complexité additionnelle pour un gain incertain |
+| Group 1 parallelism (3 agents) | **High** | Reduces latency by ~3x for initial analysis |
+| Group 2 parallelism (2 researchers) | **Medium** | Moderate gain, but the debate itself has low impact (±0.12) |
+| Tool-calling loop (`_chat_with_runtime_tools`) | **High** | Allows LLM agents to dynamically enrich their analysis |
+| Second-pass | **Medium** | Improves quality on marginal cases, but doubles latency |
+| Stagnation guard | **High** | Prevents infinite loops, detection by 5 criteria |
+| Bundle selection (`_prefer_autonomy_bundle`) | **High** | Selects the best cycle among N |
+| Memory refresh between passes | **Medium** | Limited contribution if embedding lacks semantics |
+| Model override boost | **Low** | Additional complexity for uncertain gain |
 
-### 6.2 Table : Gouvernance outils
+### 6.2 Table: Tool governance
 
-| Agent | Outils autorisés | Usage observé | Problème | Changement recommandé | Priorité |
+| Agent | Allowed tools | Observed usage | Issue | Recommended change | Priority |
 |-------|-----------------|---------------|----------|----------------------|----------|
-| technical-analyst | market_snapshot, indicator_bundle, divergence, S/R, patterns, MTF | `require_tool_call=True`, `default_tool_id='market_snapshot'` | Aucun — bien contraint | — | — |
-| news-analyst | news_search, macro_feed, symbol_filter, sentiment | Tool loop avec LLM, circuit breaker (3 failures → 180s open) | news_search reçoit des items pré-chargés, pas d'appel API réel | Clarifier que c'est un scoring tool, pas un fetcher | P3 |
-| market-context | regime, session, correlation, volatility | `require_tool_call=True`, `default_tool_id='market_regime_context'` | correlation_analyzer requiert secondary_closes rarement fourni | Vérifier si l'outil est réellement appelé ou toujours en fallback | P2 |
-| bullish-researcher | evidence_query, thesis_support, scenario, memory | LLM-driven selection | Outils debate sont essentiellement des agrégateurs passthrough | Acceptable — outils structurent la réflexion | P3 |
-| bearish-researcher | evidence_query, thesis_support, scenario, memory | Identique au bullish | Même observation | — | — |
-| trader-agent | evidence, scenario, position_size, memory | Position_size_calculator **duplique** RiskEngine | **Duplication de sizing logic** | Supprimer position_size du trader, déléguer au Risk | P1 |
-| risk-manager | scenario, position_size | RiskEngine.evaluate() est la vraie source | Position_size non utilisé si RiskEngine fait le sizing | Confirmer que RiskEngine est la seule source | P2 |
-| execution-manager | scenario, position_size | JSON contract parsing | Outils rarement appelés (LLM OFF par défaut) | Acceptable | — |
+| technical-analyst | market_snapshot, indicator_bundle, divergence, S/R, patterns, MTF | `require_tool_call=True`, `default_tool_id='market_snapshot'` | None — well constrained | — | — |
+| news-analyst | news_search, macro_feed, symbol_filter, sentiment | Tool loop with LLM, circuit breaker (3 failures → 180s open) | news_search receives pre-loaded items, no actual API call | Clarify that it is a scoring tool, not a fetcher | P3 |
+| market-context | regime, session, correlation, volatility | `require_tool_call=True`, `default_tool_id='market_regime_context'` | correlation_analyzer requires secondary_closes rarely provided | Verify whether the tool is actually called or always in fallback | P2 |
+| bullish-researcher | evidence_query, thesis_support, scenario, memory | LLM-driven selection | Debate tools are essentially passthrough aggregators | Acceptable — tools structure reasoning | P3 |
+| bearish-researcher | evidence_query, thesis_support, scenario, memory | Identical to bullish | Same observation | — | — |
+| trader-agent | evidence, scenario, position_size, memory | Position_size_calculator **duplicates** RiskEngine | **Sizing logic duplication** | Remove position_size from trader, delegate to Risk | P1 |
+| risk-manager | scenario, position_size | RiskEngine.evaluate() is the actual source | Position_size unused if RiskEngine handles sizing | Confirm that RiskEngine is the sole source | P2 |
+| execution-manager | scenario, position_size | JSON contract parsing | Tools rarely called (LLM OFF by default) | Acceptable | — |
 
-### 6.3 Boucle tool-calling (`_chat_with_runtime_tools`)
+### 6.3 Tool-calling loop (`_chat_with_runtime_tools`)
 
-**Fait observé** (`agents.py:703-941`) :
-- `max_tool_rounds=2` par défaut
-- `require_tool_call=True` force un appel outil même si le LLM n'en fait pas
-- Fallback : si pas de tool_call, exécute `default_tool_id` automatiquement
-- Filtrage kwargs : drops les arguments inconnus du handler (évite TypeError)
+**Observed fact** (`agents.py:703-941`):
+- `max_tool_rounds=2` by default
+- `require_tool_call=True` forces a tool call even if the LLM does not make one
+- Fallback: if no tool_call, executes `default_tool_id` automatically
+- Kwargs filtering: drops unknown arguments from the handler (prevents TypeError)
 
-**Qualité** : Robuste. Le fallback tool_call évite les réponses LLM vides. Le filtrage kwargs protège contre les hallucinations de paramètres.
+**Quality**: Robust. The fallback tool_call prevents empty LLM responses. The kwargs filtering protects against parameter hallucinations.
 
 ---
 
-## 7. Analyse du contexte, de la mémoire et du cache
+## 7. Context, Memory, and Cache Analysis
 
-### 7.1 Table : Flux de contexte
+### 7.1 Table: Context flow
 
-| Flux | Contexte actuel | Problème | Stratégie recommandée | Bénéfice attendu |
+| Flow | Current context | Issue | Recommended strategy | Expected benefit |
 |------|----------------|----------|----------------------|------------------|
-| Technical → Debate | `_compact_analysis_outputs_for_debate()` : signal, score, reason, summary | Compaction correcte — **bon pattern** | — | — |
-| News → Trader | Score pondéré par coverage (none=0%, low=35%) | Bon downweighting du bruit | — | — |
-| Memory → Trader | `memory_signal` : direction, edge, risk_blocks, adjustments ±0.08 | **Embedding SHA256 sans sémantique** → recall limité | Migrer vers embedding pré-entraîné (sentence-transformers) | +30-50% recall précision |
-| All → Trader | `analysis_outputs` complet (non compacté) | Contexte potentiellement large (tous les indicateurs raw) | Compacter aussi pour le trader | Réduction tokens LLM si trader LLM ON |
-| Autonomy loop | Memory refresh avec limit_step croissant | **Pas de résumé intermédiaire** entre cycles | Ajouter un résumé du cycle précédent | Réduction contamination context |
+| Technical → Debate | `_compact_analysis_outputs_for_debate()`: signal, score, reason, summary | Correct compaction — **good pattern** | — | — |
+| News → Trader | Score weighted by coverage (none=0%, low=35%) | Good noise downweighting | — | — |
+| Memory → Trader | `memory_signal`: direction, edge, risk_blocks, adjustments ±0.08 | **SHA256 embedding without semantics** → limited recall | Migrate to pre-trained embedding (sentence-transformers) | +30-50% recall precision |
+| All → Trader | Full `analysis_outputs` (not compacted) | Potentially large context (all raw indicators) | Also compact for the trader | LLM token reduction if trader LLM ON |
+| Autonomy loop | Memory refresh with increasing limit_step | **No intermediate summary** between cycles | Add a previous cycle summary | Reduced context contamination |
 
-### 7.2 Analyse de la mémoire vectorielle
+### 7.2 Vector memory analysis
 
-**Fait observé** (`vector_memory.py`) :
+**Observed fact** (`vector_memory.py`):
 
-**Embedding** : SHA256 hash des tokens et bigrams, projeté dans 64 dimensions.
+**Embedding**: SHA256 hash of tokens and bigrams, projected into 64 dimensions.
 
 ```python
-# Résumé de _embed():
+# Summary of _embed():
 digest = sha256(feature.encode('utf-8')).digest()
 dim = int.from_bytes(digest[:2], byteorder='big') % 64
 sign = 1.0 if (digest[2] % 2 == 0) else -1.0
 values[dim] += sign * weight
 ```
 
-**Problème** : Ce n'est **pas** un embedding sémantique. "EURUSD bullish breakout" et "EUR/USD haussier cassure" auront des embeddings **complètement différents** car les tokens sont hashés individuellement. Le seul rapprochement sémantique vient de l'alias map (`buy→bullish`, `sell→bearish`, `hold→neutral`), qui est très limité.
+**Issue**: This is **not** a semantic embedding. "EURUSD bullish breakout" and "EUR/USD haussier cassure" will have **completely different** embeddings because tokens are hashed individually. The only semantic approximation comes from the alias map (`buy→bullish`, `sell→bearish`, `hold→neutral`), which is very limited.
 
-**Score composition** : `0.45 * vector + 0.38 * business + 0.17 * recency`
-- Le score **business** (38%) compense partiellement la faiblesse du vector score en comparant RSI bucket, trend, MACD state, ATR bucket, etc.
-- Le score **recency** (17%) ajoute un biais vers les mémoires récentes
+**Score composition**: `0.45 * vector + 0.38 * business + 0.17 * recency`
+- The **business** score (38%) partially compensates for the vector score weakness by comparing RSI bucket, trend, MACD state, ATR bucket, etc.
+- The **recency** score (17%) adds a bias toward recent memories
 
-**Outcome weighting** : `75% label_score + 25% RR_ratio` — bien conçu pour favoriser les mémoires gagnantes.
+**Outcome weighting**: `75% label_score + 25% RR_ratio` — well designed to favor winning memories.
 
-**Risk blocks** : `buy_risk_block si win_rate ≤ 0.20 ET avg_rr ≤ -0.20 ET count ≥ 3` — barrière déterministe contre la répétition d'erreurs.
+**Risk blocks**: `buy_risk_block if win_rate ≤ 0.20 AND avg_rr ≤ -0.20 AND count ≥ 3` — deterministic barrier against repeating errors.
 
-**Verdict mémoire** : L'architecture est **bien conçue** (score multi-composant, outcome weighting, risk blocks) mais l'**embedding est le maillon faible**. La valeur réelle de la mémoire repose sur le score business (déterministe), pas sur la recherche vectorielle.
+**Memory verdict**: The architecture is **well designed** (multi-component score, outcome weighting, risk blocks) but the **embedding is the weak link**. The actual value of the memory relies on the business score (deterministic), not on the vector search.
 
-### 7.3 Mémoire Memori
+### 7.3 Memori memory
 
-**Fait observé** (`memori_memory.py`, `config.py`) : `MEMORI_ENABLED=False` par défaut. Service Memori est un backend alternatif (graphe sémantique) mais non activé en production. La recall fonctionne mais n'est pas intégrée dans le pipeline principal sauf si explicitement activée.
+**Observed fact** (`memori_memory.py`, `config.py`): `MEMORI_ENABLED=False` by default. The Memori service is an alternative backend (semantic graph) but is not activated in production. Recall works but is not integrated into the main pipeline unless explicitly enabled.
 
 ---
 
-## 8. Analyse de la frontière LLM vs déterministe
+## 8. LLM vs Deterministic Boundary Analysis
 
-### 8.1 Table complète
+### 8.1 Complete table
 
-| Composant/Flux | Mode actuel | Problème | Mode recommandé | Raison | Priorité |
+| Component/Flow | Current mode | Issue | Recommended mode | Reason | Priority |
 |----------------|------------|----------|-----------------|--------|----------|
-| TechnicalAnalyst scoring | Déterministe (LLM OFF) | Aucun | **Garder déterministe** | Score (trend±0.35, RSI±0.25, MACD±0.2) est précis et reproductible | — |
-| TechnicalAnalyst LLM bias | LLM optionnel (bias 0.15) | LLM bias marginal (10% blend) | Garder optionnel | Bon ratio coût/valeur quand activé | — |
-| NewsAnalyst evidence scoring | Déterministe (relevance*0.62 + freshness*0.20 + credibility*0.18) | Aucun | **Garder déterministe** | Formule pondérée robuste | — |
-| NewsAnalyst LLM summary | LLM ON | LLM tokens limités (96 premier appel, 384 retry) | Garder LLM pour synthèse narrative | Valeur ajoutée pour explicabilité | — |
-| MarketContext regime | Déterministe (ATR ratio, slope) | Aucun | **Garder déterministe** | Régime calculé sans ambiguïté | — |
-| Bullish/Bearish debate | **LLM ON** | **Impact faible (±0.12) vs coût (2 appels LLM)** | Évaluer remplacement par agrégation déterministe | Ratio coût/valeur défavorable | P1 |
-| TraderAgent decision | **Déterministe** (LLM OFF default) | Aucun — **excellent choix** | **Garder déterministe** | Décision reproductible, policy-gated | — |
-| TraderAgent LLM note | LLM optionnel pour rationale | Validation de cohérence post-LLM | Garder optionnel | Explicabilité | — |
-| RiskEngine.evaluate() | **100% déterministe** | Aucun | **Ne jamais migrer vers LLM** | Barrière de sécurité critique | — |
-| RiskManager LLM review | LLM OFF default, LLM **ne peut pas** override rejet déterministe | Correct — LLM en lecture seule | Garder | Architecture sûre | — |
-| ExecutionManager JSON | LLM pour confirmation side | Side flip **bloqué** même si LLM le demande | Correct | Sécurité d'exécution | — |
-| JSON schema validation | **Absent** comme layer séparé | JSON parsé inline avec fallback HOLD | Ajouter validation JSON schema formelle | Robustesse accrue | P2 |
-| SL/TP geometry | Déterministe (`validate_sl_tp_update`) | Correct | Garder | Pas de LLM dans les niveaux de prix | — |
-| Position sizing | **Dupliqué** : MCP `position_size_calculator` + `RiskEngine.evaluate()` | Deux sources de vérité potentiellement divergentes | **Unifier** : MCP tool délègue au RiskEngine | Cohérence | P1 |
-| Live-trade gate | Déterministe (`_is_live_trade_candidate`) | Correct — 4 conditions vérifiées | Garder | Pas de LLM dans le gate | — |
-| Tool allowlist | Déterministe (`_run_agent_tool` + `enabled_tools`) | Correct | Garder | Gouvernance fiable | — |
+| TechnicalAnalyst scoring | Deterministic (LLM OFF) | None | **Keep deterministic** | Score (trend±0.35, RSI±0.25, MACD±0.2) is precise and reproducible | — |
+| TechnicalAnalyst LLM bias | Optional LLM (bias 0.15) | Marginal LLM bias (10% blend) | Keep optional | Good cost/value ratio when enabled | — |
+| NewsAnalyst evidence scoring | Deterministic (relevance*0.62 + freshness*0.20 + credibility*0.18) | None | **Keep deterministic** | Robust weighted formula | — |
+| NewsAnalyst LLM summary | LLM ON | LLM tokens limited (96 first call, 384 retry) | Keep LLM for narrative synthesis | Added value for explainability | — |
+| MarketContext regime | Deterministic (ATR ratio, slope) | None | **Keep deterministic** | Regime computed unambiguously | — |
+| Bullish/Bearish debate | **LLM ON** | **Low impact (±0.12) vs cost (2 LLM calls)** | Evaluate replacement with deterministic aggregation | Unfavorable cost/value ratio | P1 |
+| TraderAgent decision | **Deterministic** (LLM OFF default) | None — **excellent choice** | **Keep deterministic** | Reproducible decision, policy-gated | — |
+| TraderAgent LLM note | Optional LLM for rationale | Post-LLM consistency validation | Keep optional | Explainability | — |
+| RiskEngine.evaluate() | **100% deterministic** | None | **Never migrate to LLM** | Critical safety barrier | — |
+| RiskManager LLM review | LLM OFF default, LLM **cannot** override deterministic rejection | Correct — LLM in read-only mode | Keep | Safe architecture | — |
+| ExecutionManager JSON | LLM for side confirmation | Side flip **blocked** even if LLM requests it | Correct | Execution safety | — |
+| JSON schema validation | **Absent** as a separate layer | JSON parsed inline with HOLD fallback | Add formal JSON schema validation | Increased robustness | P2 |
+| SL/TP geometry | Deterministic (`validate_sl_tp_update`) | Correct | Keep | No LLM in price levels | — |
+| Position sizing | **Duplicated**: MCP `position_size_calculator` + `RiskEngine.evaluate()` | Two potentially divergent sources of truth | **Unify**: MCP tool delegates to RiskEngine | Consistency | P1 |
+| Live-trade gate | Deterministic (`_is_live_trade_candidate`) | Correct — 4 conditions verified | Keep | No LLM in the gate | — |
+| Tool allowlist | Deterministic (`_run_agent_tool` + `enabled_tools`) | Correct | Keep | Reliable governance | — |
 
-### 8.2 Le RiskEngine est-il une vraie barrière ?
+### 8.2 Is the RiskEngine a real barrier?
 
-**Fait observé** (`agents.py:4444-4602`) :
+**Observed fact** (`agents.py:4444-4602`):
 ```python
 # RiskManagerAgent.run():
 risk_eval = self.risk_engine.evaluate(mode, decision, risk_percent, price, stop_loss, pair)
 # LLM review:
 llm_approved = parsed_json.get('decision') == 'APPROVE'
 # Final:
-final_accepted = risk_eval.accepted AND llm_approved  # (si LLM ON)
-# Mais si LLM OFF:
-final_accepted = risk_eval.accepted  # ← déterministe seul
+final_accepted = risk_eval.accepted AND llm_approved  # (if LLM ON)
+# But if LLM OFF:
+final_accepted = risk_eval.accepted  # ← deterministic only
 ```
 
-**Fait observé** (`engine.py:1485-1514`) : L'exécution ne se déclenche que si `execution_plan['should_execute'] AND side in {'BUY', 'SELL'}`.
+**Observed fact** (`engine.py:1485-1514`): Execution only triggers if `execution_plan['should_execute'] AND side in {'BUY', 'SELL'}`.
 
-**Fait observé** (`engine.py:294-310`) : `_is_live_trade_candidate` exige `decision in {BUY,SELL} AND execution_allowed AND risk_accepted AND volume > 0`.
+**Observed fact** (`engine.py:294-310`): `_is_live_trade_candidate` requires `decision in {BUY,SELL} AND execution_allowed AND risk_accepted AND volume > 0`.
 
-**Verdict** : Le RiskEngine est une **vraie barrière** — pas une validation cosmétique. Avec LLM OFF (default), c'est la **seule** source de vérité pour l'acceptation du risque. Avec LLM ON, le LLM peut *ajouter* un rejet mais ne peut **jamais** forcer une acceptation que le déterministe a rejetée.
+**Verdict**: The RiskEngine is a **real barrier** — not cosmetic validation. With LLM OFF (default), it is the **sole** source of truth for risk acceptance. With LLM ON, the LLM can *add* a rejection but can **never** force an acceptance that the deterministic engine has rejected.
 
 ---
 
-## 9. Analyse de la logique trading multi-produit
+## 9. Multi-Product Trading Logic Analysis
 
-### 9.1 Table : Flux de décision
+### 9.1 Table: Decision flow
 
-| Flux de décision | Logique actuelle | Risque/Faiblesse | Amélioration recommandée | Priorité |
+| Decision flow | Current logic | Risk/Weakness | Recommended improvement | Priority |
 |-----------------|-----------------|------------------|-------------------------|----------|
-| Signal → Score | Weighted sum : tech + news*coverage + context | **News coverage=none → 0%** : ignore les news même si elles existent mais sont non scorées | Distinguer "pas de news" vs "news non pertinentes" | P2 |
-| Source alignment | `(aligned - opposing) / total * coverage_factor * independence_factor` | Facteurs multiplicatifs peuvent se combiner de manière opaque | Logger les facteurs intermédiaires pour audit | P3 |
-| Contradiction detection | `macd_atr_ratio` : major ≥0.12, moderate ≥0.05, weak >0 | **macd_atr_ratio** dépend de l'échelle de l'instrument — crypto BTC (ATR ~1000) vs forex (ATR ~0.005) | Normaliser par asset class ou utiliser le ratio price-relative | P2 |
-| Memory risk block | `win_rate ≤ 0.20 AND avg_rr ≤ -0.20 AND count ≥ 3` | **Seuil count=3** est bas — peut bloquer sur un échantillon insuffisant | Augmenter à count≥5 pour significativité | P2 |
-| SL/TP calculation | `SL = price ± ATR*1.5, TP = price ± ATR*2.5` | **Risk/reward = 2.5/1.5 ≈ 1.67** — acceptable mais fixe | Paramétrer R:R par asset class (crypto = plus large) | P3 |
-| Decision gating | 3 modes (conservative: score≥0.30, balanced: ≥0.25, permissive: ≥0.12) | Conservative mode strictement paramétré | Bien conçu — pas de changement | — |
-| Debate balance | `debate_score = debate_sign * source_alignment * 0.12` | **Impact maximal de ±0.12** — faible vs technical (±0.80) | Si debate_score doit avoir plus d'impact, augmenter le coefficient | P3 |
-| HOLD decision | Si `!minimum_evidence_ok OR !quality_gate_ok` | HOLD est **le défaut sûr** — correct | — | — |
+| Signal → Score | Weighted sum: tech + news*coverage + context | **News coverage=none → 0%**: ignores news even if they exist but are unscored | Distinguish "no news" vs "irrelevant news" | P2 |
+| Source alignment | `(aligned - opposing) / total * coverage_factor * independence_factor` | Multiplicative factors can combine opaquely | Log intermediate factors for auditing | P3 |
+| Contradiction detection | `macd_atr_ratio`: major ≥0.12, moderate ≥0.05, weak >0 | **macd_atr_ratio** depends on instrument scale — crypto BTC (ATR ~1000) vs forex (ATR ~0.005) | Normalize by asset class or use price-relative ratio | P2 |
+| Memory risk block | `win_rate ≤ 0.20 AND avg_rr ≤ -0.20 AND count ≥ 3` | **Threshold count=3** is low — can block on an insufficient sample | Increase to count≥5 for statistical significance | P2 |
+| SL/TP calculation | `SL = price ± ATR*1.5, TP = price ± ATR*2.5` | **Risk/reward = 2.5/1.5 ≈ 1.67** — acceptable but fixed | Parameterize R:R by asset class (crypto = wider) | P3 |
+| Decision gating | 3 modes (conservative: score≥0.30, balanced: ≥0.25, permissive: ≥0.12) | Conservative mode strictly parameterized | Well designed — no change needed | — |
+| Debate balance | `debate_score = debate_sign * source_alignment * 0.12` | **Maximum impact of ±0.12** — low vs technical (±0.80) | If debate_score should have more impact, increase the coefficient | P3 |
+| HOLD decision | If `!minimum_evidence_ok OR !quality_gate_ok` | HOLD is **the safe default** — correct | — | — |
 
-### 9.2 Cohérence multi-produit dans le sizing
+### 9.2 Multi-product sizing consistency
 
-**Fait observé** (`rules.py`) :
+**Observed fact** (`rules.py`):
 
 | Asset Class | pip_size | pip_value/lot | contract_size | min/max volume |
 |-------------|----------|---------------|---------------|----------------|
@@ -368,28 +368,28 @@ final_accepted = risk_eval.accepted  # ← déterministe seul
 | energy | 0.01 | 10.0 | 1000 | 0.01-10.0 |
 | equity | 0.01 | 1.0 | 1 | 1.0-1000.0 |
 
-**Fait observé** : MCP `position_size_calculator` a ses **propres** specs :
+**Observed fact**: MCP `position_size_calculator` has its **own** specs:
 - forex max_volume=10 (vs RiskEngine max=10.0) ✓
 - crypto max_volume=100 (vs RiskEngine max=100.0) ✓
 - equity max_volume=1000 (vs RiskEngine max=1000.0) ✓
 
-**Les specs sont alignées actuellement**, mais cette duplication est un risque de divergence future.
+**The specs are currently aligned**, but this duplication is a risk for future divergence.
 
 ### 9.3 Margin estimation
 
-**Fait observé** (`rules.py`) : `margin_required = volume * contract_size * price / 100` — assume leverage 1:100 **hardcodé**. Pas de paramètre leverage configurable.
+**Observed fact** (`rules.py`): `margin_required = volume * contract_size * price / 100` — assumes leverage 1:100 **hardcoded**. No configurable leverage parameter.
 
-**Risque** : Leverage varie par instrument et broker. Un equity à leverage 1:5 sera sous-estimé en marge de 20x.
+**Risk**: Leverage varies by instrument and broker. An equity at leverage 1:5 will have its margin underestimated by 20x.
 
 ---
 
-## 10. Analyse du risk management et de l'exécution
+## 10. Risk Management and Execution Analysis
 
-### 10.1 Chaîne de validation complète
+### 10.1 Complete validation chain
 
 ```
 TraderAgent.run()
-  → decision = BUY/SELL/HOLD (déterministe, policy-gated)
+  → decision = BUY/SELL/HOLD (deterministic, policy-gated)
   → entry, stop_loss, take_profit (ATR-based)
   → volume_multiplier (contradiction-adjusted)
     ↓
@@ -400,290 +400,290 @@ RiskManagerAgent.run()
     → volume clamped [min, max]
     → risk_percent checked vs mode limits (sim:5%, paper:3%, live:2%)
     → stop_distance >= 0.05% minimum
-  → LLM review (optionnel, ne peut pas override rejet)
+  → LLM review (optional, cannot override rejection)
   → final_accepted = deterministic AND llm_approved
     ↓
 ExecutionManagerAgent.run()
   → JSON contract: {"decision":"BUY|SELL|HOLD"}
-  → same_side_confirmation obligatoire
-  → side flip → HOLD (bloqué)
+  → same_side_confirmation required
+  → side flip → HOLD (blocked)
   → degraded LLM → HOLD
     ↓
 _is_live_trade_candidate()
   → decision in {BUY,SELL} AND execution_allowed AND risk_accepted AND volume > 0
     ↓
 Live mode degradation check
-  → Si agent critique dégradé → RuntimeError (abort)
+  → If critical agent degraded → RuntimeError (abort)
     ↓
 ExecutionService.execute()
-  → MetaAPI order (live/paper) ou simulation log
+  → MetaAPI order (live/paper) or simulation log
 ```
 
-### 10.2 Protection contre les décisions faibles
+### 10.2 Protection against weak decisions
 
-| Protection | Implémentation | Preuve |
+| Protection | Implementation | Evidence |
 |-----------|---------------|--------|
-| Score minimum | `min_combined_score` par policy (0.12-0.30) | `agents.py:1068-1135` DECISION_POLICIES |
-| Confidence minimum | `min_confidence` par policy (0.22-0.35) | Idem |
-| Sources alignées minimum | `min_aligned_sources` (1-2) | Idem |
-| Major contradiction block | `block_major_contradiction=True` en conservative | Idem |
-| Memory risk block | `buy/sell_risk_block` si historique perdant | `vector_memory.py` |
-| Volume multiplier | Contradiction penalty : major → volume×0.45-0.55 | `agents.py:1089-1098` |
+| Minimum score | `min_combined_score` per policy (0.12-0.30) | `agents.py:1068-1135` DECISION_POLICIES |
+| Minimum confidence | `min_confidence` per policy (0.22-0.35) | Same |
+| Minimum aligned sources | `min_aligned_sources` (1-2) | Same |
+| Major contradiction block | `block_major_contradiction=True` in conservative | Same |
+| Memory risk block | `buy/sell_risk_block` if losing history | `vector_memory.py` |
+| Volume multiplier | Contradiction penalty: major → volume×0.45-0.55 | `agents.py:1089-1098` |
 | Live mode 2% max risk | `mode=='live' → max 2.0%` | `rules.py` evaluate() |
-| Stop distance minimum | `≥ 0.05% du prix` | `rules.py` evaluate() |
+| Minimum stop distance | `≥ 0.05% of price` | `rules.py` evaluate() |
 
 ---
 
-## 11. Analyse des modes de défaillance
+## 11. Failure Mode Analysis
 
-| Composant/Flux | Mode de défaillance | Cause | Impact | Mitigation recommandée | Priorité |
+| Component/Flow | Failure mode | Cause | Impact | Recommended mitigation | Priority |
 |---------------|--------------------|----|--------|----------------------|----------|
-| LLM provider | Timeout/503 | Serveur Ollama/OpenAI down | Agent dégradé → HOLD | Circuit breaker (existe pour News), étendre à tous | P2 |
-| LLM response | JSON invalide | Hallucination de format | Risk/Execution → HOLD (fallback) | Ajouter JSON schema validation formelle (jsonschema) | P2 |
-| LLM response | Surconfiance | LLM affirme avec certitude sans données | Score gonflé | Validation post-LLM (existe pour News, **absente pour Researchers**) | P1 |
-| LLM response | Contradiction direction | LLM bullish dit "bearish" | Incohérence | Vérifier cohérence LLM signal vs prompted direction | P2 |
-| MCP tool | Exception | Données manquantes/invalides | Tool returns error dict | Fallback implémenté dans langchain_tools.py wrappers — correct | — |
-| MetaAPI | Timeout | Broker API down | Pas de données marché | Circuit breaker 20s + yfinance fallback — correct | — |
-| Qdrant | Indisponible | Service down | Mémoire ignorée | Analyse continue sans mémoire — correct | — |
-| Memory | Mémoire obsolète | Conditions marché changées | Signal mémoire incorrect | risk_blocks limités à 3+ trades + score ±0.08 max — **acceptable** | — |
-| Concurrent runs | Double exécution | 2 runs même pair simultanés | Double position | **Aucun mutex** — risque réel | P1 |
-| Position sizing | Divergence MCP ↔ RiskEngine | Specs désynchronisées | Volume incorrect | **Unifier** les sources | P1 |
-| Stagnation | Boucle autonomy | Même output entre cycles | Latence gaspillée | Stagnation guard (5 critères) — correct | — |
-| Live degradation | Agent critique dégradé | LLM partiel failure | Trade non exécuté | RuntimeError abort — correct | — |
+| LLM provider | Timeout/503 | Ollama/OpenAI server down | Agent degraded → HOLD | Circuit breaker (exists for News), extend to all | P2 |
+| LLM response | Invalid JSON | Format hallucination | Risk/Execution → HOLD (fallback) | Add formal JSON schema validation (jsonschema) | P2 |
+| LLM response | Overconfidence | LLM asserts with certainty without data | Inflated score | Post-LLM validation (exists for News, **absent for Researchers**) | P1 |
+| LLM response | Direction contradiction | Bullish LLM says "bearish" | Inconsistency | Verify LLM signal consistency vs prompted direction | P2 |
+| MCP tool | Exception | Missing/invalid data | Tool returns error dict | Fallback implemented in langchain_tools.py wrappers — correct | — |
+| MetaAPI | Timeout | Broker API down | No market data | Circuit breaker 20s + yfinance fallback — correct | — |
+| Qdrant | Unavailable | Service down | Memory ignored | Analysis continues without memory — correct | — |
+| Memory | Stale memory | Changed market conditions | Incorrect memory signal | risk_blocks limited to 3+ trades + score ±0.08 max — **acceptable** | — |
+| Concurrent runs | Double execution | 2 runs on same pair simultaneously | Double position | **No mutex** — real risk | P1 |
+| Position sizing | MCP ↔ RiskEngine divergence | Desynchronized specs | Incorrect volume | **Unify** the sources | P1 |
+| Stagnation | Autonomy loop | Same output between cycles | Wasted latency | Stagnation guard (5 criteria) — correct | — |
+| Live degradation | Critical agent degraded | LLM partial failure | Trade not executed | RuntimeError abort — correct | — |
 
 ---
 
-## 12. Analyse de l'observabilité
+## 12. Observability Analysis
 
-### 12.1 Métriques présentes
+### 12.1 Present metrics
 
-| Métrique | Type | Labels | Couverture |
+| Metric | Type | Labels | Coverage |
 |----------|------|--------|-----------|
-| `analysis_runs_total` | Counter | status | Runs complétés/échoués |
-| `orchestrator_step_duration_seconds` | Histogram | agent | Latence par agent |
-| `mcp_tool_calls_total` | Counter | tool, status | Appels outils MCP |
-| `mcp_tool_duration_seconds` | Histogram | tool, status | Latence outils |
-| `agentic_runtime_runs_total` | Counter | — | Runs agentic V2 |
-| `agentic_runtime_tool_calls_total` | Counter | tool | Outils runtime |
+| `analysis_runs_total` | Counter | status | Completed/failed runs |
+| `orchestrator_step_duration_seconds` | Histogram | agent | Latency per agent |
+| `mcp_tool_calls_total` | Counter | tool, status | MCP tool calls |
+| `mcp_tool_duration_seconds` | Histogram | tool, status | Tool latency |
+| `agentic_runtime_runs_total` | Counter | — | Agentic V2 runs |
+| `agentic_runtime_tool_calls_total` | Counter | tool | Runtime tools |
 | `agentic_runtime_final_decisions_total` | Counter | decision | BUY/SELL/HOLD |
-| `agentic_runtime_execution_outcomes_total` | Counter | outcome | Exécutions |
-| `risk_evaluation_total` | Counter | accepted, asset_class, mode | Évaluations risque |
-| LLM call log (DB) | Table | provider, model, tokens, cost, latency | Chaque appel LLM |
+| `agentic_runtime_execution_outcomes_total` | Counter | outcome | Executions |
+| `risk_evaluation_total` | Counter | accepted, asset_class, mode | Risk evaluations |
+| LLM call log (DB) | Table | provider, model, tokens, cost, latency | Each LLM call |
 
-### 12.2 Métriques manquantes
+### 12.2 Missing metrics
 
-| Métrique manquante | Pourquoi elle est importante | Priorité |
+| Missing metric | Why it matters | Priority |
 |-------------------|---------------------------|----------|
-| `debate_impact_score` | Mesurer l'impact réel du débat bull/bear sur la décision | P1 |
-| `memory_recall_quality` | Mesurer la précision de la mémoire (hits pertinents / total) | P2 |
-| `contradiction_detection_total` | Fréquence des contradictions (major/moderate/weak) | P2 |
-| `decision_gate_blocking_total` | Quel gate bloque le plus souvent (score/confidence/sources) | P2 |
-| `llm_token_waste_ratio` | Tokens consommés pour un HOLD final vs coût total | P2 |
-| `autonomy_second_pass_improvement` | Score delta entre cycle 1 et cycle final | P2 |
-| `prompt_template_version` | Quelle version de prompt est active par agent | P3 |
+| `debate_impact_score` | Measure the actual impact of the bull/bear debate on the decision | P1 |
+| `memory_recall_quality` | Measure memory precision (relevant hits / total) | P2 |
+| `contradiction_detection_total` | Frequency of contradictions (major/moderate/weak) | P2 |
+| `decision_gate_blocking_total` | Which gate blocks most often (score/confidence/sources) | P2 |
+| `llm_token_waste_ratio` | Tokens consumed for a final HOLD vs total cost | P2 |
+| `autonomy_second_pass_improvement` | Score delta between cycle 1 and final cycle | P2 |
+| `prompt_template_version` | Which prompt version is active per agent | P3 |
 
 ### 12.3 Debug traces
 
-**Fait observé** : 13 traces JSON enregistrées dans `debug-traces/` (jusqu'à 439 KB). Format structuré avec `schema_version`, `run`, `context`, `workflow`, `agent_steps`, `analysis_bundle`, `final_decision`. C'est un **excellent** mécanisme de diagnostic mais il est désactivé par défaut (`debug_trade_json=False`).
+**Observed fact**: 13 JSON traces recorded in `debug-traces/` (up to 439 KB). Structured format with `schema_version`, `run`, `context`, `workflow`, `agent_steps`, `analysis_bundle`, `final_decision`. This is an **excellent** diagnostic mechanism but it is disabled by default (`debug_trade_json=False`).
 
 ---
 
-## 13. Analyse de la qualité des sorties
+## 13. Output Quality Analysis
 
-### 13.1 Contrats de sortie par agent
+### 13.1 Output contracts by agent
 
-| Agent | Format sortie | Validation | Robustesse |
+| Agent | Output format | Validation | Robustness |
 |-------|--------------|-----------|-----------|
-| TechnicalAnalyst | Dict structuré (signal, score, indicators, structure) | Score clamped [-1,1], signal enum vérifié | **Haute** — déterministe |
-| NewsAnalyst | Dict structuré (signal, score, evidence, coverage) | `_validate_news_output()` : force neutral, sign consistency, score compression | **Haute** — validé post-LLM |
-| MarketContext | Dict structuré (signal, score, regime, momentum) | Score clamped [-0.35, 0.35], regime enum | **Haute** — déterministe |
-| BullishResearcher | Dict (arguments, confidence, counter_args, invalidation) | Pas de validation post-LLM | **Moyenne** — LLM non contraint |
-| BearishResearcher | Dict (arguments, confidence, counter_args, invalidation) | Pas de validation post-LLM | **Moyenne** — LLM non contraint |
-| TraderAgent | Dict (decision, confidence, combined_score, entry, SL, TP, gates) | Decision enum, gates list, score bounds | **Haute** — déterministe |
-| RiskManager | Dict (accepted, reasons, suggested_volume) | RiskEngine + optional LLM JSON | **Haute** — déterministe barrière |
-| ExecutionManager | Dict (decision, should_execute, side, volume) | JSON contract strict, side confirmation | **Haute** — side flip blocked |
+| TechnicalAnalyst | Structured dict (signal, score, indicators, structure) | Score clamped [-1,1], signal enum verified | **High** — deterministic |
+| NewsAnalyst | Structured dict (signal, score, evidence, coverage) | `_validate_news_output()`: forces neutral, sign consistency, score compression | **High** — post-LLM validated |
+| MarketContext | Structured dict (signal, score, regime, momentum) | Score clamped [-0.35, 0.35], regime enum | **High** — deterministic |
+| BullishResearcher | Dict (arguments, confidence, counter_args, invalidation) | No post-LLM validation | **Medium** — unconstrained LLM |
+| BearishResearcher | Dict (arguments, confidence, counter_args, invalidation) | No post-LLM validation | **Medium** — unconstrained LLM |
+| TraderAgent | Dict (decision, confidence, combined_score, entry, SL, TP, gates) | Decision enum, gates list, score bounds | **High** — deterministic |
+| RiskManager | Dict (accepted, reasons, suggested_volume) | RiskEngine + optional LLM JSON | **High** — deterministic barrier |
+| ExecutionManager | Dict (decision, should_execute, side, volume) | Strict JSON contract, side confirmation | **High** — side flip blocked |
 
-### 13.2 Risques de sortie
+### 13.2 Output risks
 
-| Risque | Agent(s) | Fréquence estimée | Impact |
+| Risk | Agent(s) | Estimated frequency | Impact |
 |--------|---------|-------------------|--------|
-| Score hors bornes | Aucun (clamped) | Nulle | — |
-| Signal incohérent avec score | NewsAnalyst | Rare (sign consistency enforced) | Faible |
-| Arguments inventés | Bull/Bear Researchers | **Possible si LLM hallucine** | Moyen — le trader ne se fie qu'au score, pas aux arguments textuels |
-| JSON malformé | Risk/Execution LLM | Rare mais possible | Faible — fallback HOLD |
-| SL/TP aberrants | TraderAgent | Rare (ATR-based) | Moyen — RiskEngine vérifie distance minimum |
+| Score out of bounds | None (clamped) | None | — |
+| Signal inconsistent with score | NewsAnalyst | Rare (sign consistency enforced) | Low |
+| Fabricated arguments | Bull/Bear Researchers | **Possible if LLM hallucinates** | Medium — trader relies only on the score, not textual arguments |
+| Malformed JSON | Risk/Execution LLM | Rare but possible | Low — HOLD fallback |
+| Aberrant SL/TP | TraderAgent | Rare (ATR-based) | Medium — RiskEngine verifies minimum distance |
 
 ---
 
-## 14. Plan de tests d'intégration
+## 14. Integration Test Plan
 
-| Test | Scope | Dépendances | Résultat attendu | Priorité |
+| Test | Scope | Dependencies | Expected result | Priority |
 |------|-------|------------|------------------|----------|
-| Pipeline complet simulation EURUSD | 8 agents, MCP tools, RiskEngine | Mock LLM, mock market data | Decision BUY/SELL/HOLD + trace complète | P0 |
-| Pipeline complet BTCUSD (crypto) | Multi-produit, adaptive pip sizing | Mock LLM, mock market data | pip_size=1.0, asset_class='crypto' | P0 |
+| Full simulation pipeline EURUSD | 8 agents, MCP tools, RiskEngine | Mock LLM, mock market data | Decision BUY/SELL/HOLD + complete trace | P0 |
+| Full pipeline BTCUSD (crypto) | Multi-product, adaptive pip sizing | Mock LLM, mock market data | pip_size=1.0, asset_class='crypto' | P0 |
 | Pipeline AAPL (equity) | Equity sizing, min_volume=1.0 | Mock LLM, mock market data | volume ≥ 1.0, pip_size=0.01 | P1 |
-| Gouvernance outil interdit | Agent appelle outil hors allowlist | Mock LLM | Tool disabled, agent fallback | P0 |
-| Risk rejet → HOLD propagé | risk_percent=5% en live | Aucun mock | RiskEngine reject, ExecutionManager HOLD | P0 |
-| LLM dégradé → HOLD | LLM timeout | Mock LLM raise TimeoutError | Agents degraded, final HOLD | P0 |
-| Contradiction majeure → HOLD | Trend bullish + MACD strongly bearish | Mock market data | `major_contradiction_block=True`, HOLD | P1 |
-| Memory risk block → HOLD | 3+ trades perdants sur même pair | Qdrant avec mémoires mock | `risk_blocks.buy=True`, HOLD | P1 |
-| Second-pass amélioration | Cycle 1 HOLD → cycle 2 BUY | Mock LLM, memory refresh | `selected_cycle=2`, decision BUY | P1 |
-| Stagnation guard | 2 cycles identiques | Mock LLM même output | `stagnation_guardrail`, stop rerun | P1 |
-| Live mode abort degraded | Agent critique dégradé en live | Mock LLM degraded | RuntimeError raised | P0 |
-| Side flip blocked | LLM execution dit SELL quand trader dit BUY | Mock LLM | HOLD final (flip blocked) | P1 |
+| Forbidden tool governance | Agent calls tool outside allowlist | Mock LLM | Tool disabled, agent fallback | P0 |
+| Risk rejection → HOLD propagated | risk_percent=5% in live | No mock | RiskEngine reject, ExecutionManager HOLD | P0 |
+| Degraded LLM → HOLD | LLM timeout | Mock LLM raise TimeoutError | Agents degraded, final HOLD | P0 |
+| Major contradiction → HOLD | Trend bullish + MACD strongly bearish | Mock market data | `major_contradiction_block=True`, HOLD | P1 |
+| Memory risk block → HOLD | 3+ losing trades on same pair | Qdrant with mock memories | `risk_blocks.buy=True`, HOLD | P1 |
+| Second-pass improvement | Cycle 1 HOLD → cycle 2 BUY | Mock LLM, memory refresh | `selected_cycle=2`, decision BUY | P1 |
+| Stagnation guard | 2 identical cycles | Mock LLM same output | `stagnation_guardrail`, stop rerun | P1 |
+| Live mode abort degraded | Critical agent degraded in live | Mock LLM degraded | RuntimeError raised | P0 |
+| Side flip blocked | LLM execution says SELL when trader says BUY | Mock LLM | HOLD final (flip blocked) | P1 |
 
 ---
 
-## 15. Plan de tests E2E
+## 15. E2E Test Plan
 
-| Test | Scope | Dépendances | Résultat attendu | Priorité |
+| Test | Scope | Dependencies | Expected result | Priority |
 |------|-------|------------|------------------|----------|
-| API → Celery → Orchestrateur → DB | Full stack docker | PostgreSQL, Redis, RabbitMQ | Run complété, status='completed' en DB | P0 |
-| Celery queue → worker → websocket notification | Task queue lifecycle | Redis, RabbitMQ | WS message reçu par client | P1 |
-| MetaAPI indisponible → circuit breaker → yfinance fallback | Market data fallback chain | Mock MetaAPI (503) | Analysis complétée avec données yfinance | P1 |
-| Qdrant indisponible → analyse dégradée | Memory degradation | Qdrant down | Analysis complétée sans mémoire, `memory_signal.used=False` | P1 |
-| Run live refusé → risk check | Live gate | risk_percent > 2% | Run status='completed', decision=HOLD | P0 |
-| Concurrent runs même pair | Race condition | 2 tasks simultanées | Pas de double position (à implémenter) | P1 |
+| API → Celery → Orchestrator → DB | Full stack docker | PostgreSQL, Redis, RabbitMQ | Run completed, status='completed' in DB | P0 |
+| Celery queue → worker → websocket notification | Task queue lifecycle | Redis, RabbitMQ | WS message received by client | P1 |
+| MetaAPI unavailable → circuit breaker → yfinance fallback | Market data fallback chain | Mock MetaAPI (503) | Analysis completed with yfinance data | P1 |
+| Qdrant unavailable → degraded analysis | Memory degradation | Qdrant down | Analysis completed without memory, `memory_signal.used=False` | P1 |
+| Live run refused → risk check | Live gate | risk_percent > 2% | Run status='completed', decision=HOLD | P0 |
+| Concurrent runs same pair | Race condition | 2 simultaneous tasks | No double position (to be implemented) | P1 |
 
 ---
 
-## 16. Plan d'évaluation et de performance
+## 16. Evaluation and Performance Plan
 
-| Scénario | Composant cible | Métrique | Profil de charge | Critère de succès | Priorité |
+| Scenario | Target component | Metric | Load profile | Success criterion | Priority |
 |----------|----------------|---------|-----------------|-------------------|----------|
-| Latence pipeline complet | Orchestrateur | P95 latency | 1 run, simulation | < 30s (Ollama local), < 15s (LLM OFF) | P0 |
-| Latence par agent | Chaque agent | P95 latency | 1 run | Technical < 2s, News < 5s, Trader < 3s | P1 |
-| Latence MCP tool | 19 tools | P99 latency | 100 appels | < 50ms chacun | P1 |
-| Impact second-pass | Autonomy loop | Score delta cycle1→cycleN | 20 runs varied | Score improvement > 0.05 dans > 30% des cas | P1 |
-| Impact débat bull/bear | Researchers | debate_score contribution | 50 runs | debate_score > 0.06 dans > 40% des cas | P1 |
-| Contexte long vs court | Agent prompts | Token count + latency | Même scénario, contexte ±50% | Latence proportionnelle, qualité stable | P2 |
-| Charge concurrente | Celery workers | Throughput runs/min | 10 runs parallèles | > 5 runs/min complétés | P2 |
-| Coût LLM par run | LLM calls | Total tokens + cost_usd | 20 runs variés | < 0.05$ par run (Ollama), < 0.50$ (OpenAI) | P1 |
-| Coût marginal agent supplémentaire | LLM layer | Token delta | Avec/sans researchers | Quantifier le coût des researchers | P2 |
-| Memory search performance | VectorMemoryService | P95 latency | 1000 entries, 10 queries | < 50ms par query | P2 |
+| Full pipeline latency | Orchestrator | P95 latency | 1 run, simulation | < 30s (local Ollama), < 15s (LLM OFF) | P0 |
+| Per-agent latency | Each agent | P95 latency | 1 run | Technical < 2s, News < 5s, Trader < 3s | P1 |
+| MCP tool latency | 19 tools | P99 latency | 100 calls | < 50ms each | P1 |
+| Second-pass impact | Autonomy loop | Score delta cycle1→cycleN | 20 varied runs | Score improvement > 0.05 in > 30% of cases | P1 |
+| Bull/bear debate impact | Researchers | debate_score contribution | 50 runs | debate_score > 0.06 in > 40% of cases | P1 |
+| Long vs short context | Agent prompts | Token count + latency | Same scenario, context ±50% | Proportional latency, stable quality | P2 |
+| Concurrent load | Celery workers | Throughput runs/min | 10 parallel runs | > 5 runs/min completed | P2 |
+| LLM cost per run | LLM calls | Total tokens + cost_usd | 20 varied runs | < $0.05 per run (Ollama), < $0.50 (OpenAI) | P1 |
+| Marginal cost of additional agent | LLM layer | Token delta | With/without researchers | Quantify the cost of researchers | P2 |
+| Memory search performance | VectorMemoryService | P95 latency | 1000 entries, 10 queries | < 50ms per query | P2 |
 
 ---
 
-## 17. Top bottlenecks
+## 17. Top Bottlenecks
 
-| # | Bottleneck | Impact | Preuve | Remédiation |
+| # | Bottleneck | Impact | Evidence | Remediation |
 |---|-----------|--------|--------|-------------|
-| 1 | **Débat bull/bear : coût élevé, impact faible** | 2 appels LLM pour ±0.12 max sur combined_score | `agents.py:3602` — `debate_score = debate_sign * source_alignment * 0.12` | Évaluer remplacement par agrégation déterministe |
-| 2 | **Embedding SHA256 sans sémantique** | Recall mémoire limité aux correspondances lexicales exactes | `vector_memory.py:_embed()` — hash-based, pas de sémantique | Migrer vers sentence-transformers (même 384-dim) |
-| 3 | **Position sizing dupliqué** | Risque de divergence MCP tool vs RiskEngine | `mcp_trading_server.py` position_size_calculator + `rules.py` evaluate() | Faire déléguer le MCP tool au RiskEngine |
-| 4 | **agents.py = 4 773 lignes** | Maintenabilité, revue de code, testing isolé | Fichier unique avec 8 classes + helpers | Extraire chaque agent dans son module |
-| 5 | **Pas de mutex concurrent runs** | Double position sur même pair possible | Aucun mécanisme observé | Ajouter lock par pair (Redis ou DB) |
+| 1 | **Bull/bear debate: high cost, low impact** | 2 LLM calls for ±0.12 max on combined_score | `agents.py:3602` — `debate_score = debate_sign * source_alignment * 0.12` | Evaluate replacement with deterministic aggregation |
+| 2 | **SHA256 embedding without semantics** | Memory recall limited to exact lexical matches | `vector_memory.py:_embed()` — hash-based, no semantics | Migrate to sentence-transformers (even 384-dim) |
+| 3 | **Duplicated position sizing** | Risk of divergence between MCP tool and RiskEngine | `mcp_trading_server.py` position_size_calculator + `rules.py` evaluate() | Have the MCP tool delegate to RiskEngine |
+| 4 | **agents.py = 4,773 lines** | Maintainability, code review, isolated testing | Single file with 8 classes + helpers | Extract each agent into its own module |
+| 5 | **No mutex for concurrent runs** | Double position on same pair possible | No mechanism observed | Add per-pair lock (Redis or DB) |
 
 ---
 
-## 18. Quick wins
+## 18. Quick Wins
 
 | # | Action | Effort | Impact |
 |---|--------|--------|--------|
-| 1 | Ajouter validation post-LLM pour Researchers (cohérence direction) | 2h | Réduction hallucinations débat |
-| 2 | Logger `debate_impact_score` en métrique Prometheus | 1h | Mesure de la valeur réelle du débat |
-| 3 | Ajouter `contradiction_detection_total` metric | 1h | Visibilité sur la fréquence des contradictions |
-| 4 | Renommer `forex.db` → `trading.db`, `forex_long_term_memory` → `trading_memory` | 30min | Cohérence naming multi-produit |
-| 5 | Paramétrer leverage par asset class au lieu de hardcoder 1:100 | 1h | Margin estimation correcte pour equities |
-| 6 | Activer `debug_trade_json=True` en simulation/paper par défaut | 5min | Diagnostic facilité |
-| 7 | Ajouter test E2E pipeline complet avec mock LLM | 4h | Couverture flux critique manquante |
+| 1 | Add post-LLM validation for Researchers (direction consistency) | 2h | Reduced debate hallucinations |
+| 2 | Log `debate_impact_score` as a Prometheus metric | 1h | Measure the actual value of the debate |
+| 3 | Add `contradiction_detection_total` metric | 1h | Visibility into contradiction frequency |
+| 4 | Rename `forex.db` → `trading.db`, `forex_long_term_memory` → `trading_memory` | 30min | Multi-product naming consistency |
+| 5 | Parameterize leverage by asset class instead of hardcoding 1:100 | 1h | Correct margin estimation for equities |
+| 6 | Enable `debug_trade_json=True` in simulation/paper by default | 5min | Easier diagnostics |
+| 7 | Add E2E full pipeline test with mock LLM | 4h | Missing critical flow coverage |
 
 ---
 
-## 19. Recommandations prioritaires
+## 19. Priority Recommendations
 
-### P0 — Critique
+### P0 — Critical
 
-1. **Unifier position sizing** : Faire déléguer `position_size_calculator` MCP au `RiskEngine.evaluate()` pour éliminer la duplication et le risque de divergence
-2. **Ajouter mutex concurrent runs** : Implémenter un lock Redis par pair pour éviter les doubles positions
+1. **Unify position sizing**: Have `position_size_calculator` MCP delegate to `RiskEngine.evaluate()` to eliminate duplication and divergence risk
+2. **Add concurrent runs mutex**: Implement a Redis lock per pair to prevent double positions
 
-### P1 — Haute
+### P1 — High
 
-3. **Évaluer le ratio coût/valeur du débat bull/bear** : Mesurer sur 50 runs si `debate_score > 0.06` dans plus de 40% des cas. Si non, remplacer par agrégation déterministe
-4. **Fusionner BullishResearcher et BearishResearcher** en un seul `ResearcherAgent(direction)` avec prompts différenciés au-delà de la simple inversion de direction
-5. **Migrer embedding mémoire** vers un modèle pré-entraîné (sentence-transformers, dimension 384+) pour un recall sémantique réel
-6. **Ajouter validation post-LLM pour Researchers** : Vérifier que le signal retourné par le LLM correspond à la direction demandée
+3. **Evaluate the cost/value ratio of the bull/bear debate**: Measure over 50 runs whether `debate_score > 0.06` in more than 40% of cases. If not, replace with deterministic aggregation
+4. **Merge BullishResearcher and BearishResearcher** into a single `ResearcherAgent(direction)` with prompts differentiated beyond simple direction inversion
+5. **Migrate memory embedding** to a pre-trained model (sentence-transformers, dimension 384+) for real semantic recall
+6. **Add post-LLM validation for Researchers**: Verify that the signal returned by the LLM matches the requested direction
 
-### P2 — Moyenne
+### P2 — Medium
 
-7. **Normaliser contradiction detection par asset class** : `macd_atr_ratio` doit être relatif au prix pour être comparable entre forex et crypto
-8. **Extraire chaque agent dans son propre fichier** : Réduire `agents.py` de 4 773 lignes à 8 fichiers de ~500 lignes
-9. **Activer OpenTelemetry** pour distributed tracing
-10. **Paramétrer leverage** par instrument/broker au lieu du hardcode 1:100
+7. **Normalize contradiction detection by asset class**: `macd_atr_ratio` must be price-relative to be comparable between forex and crypto
+8. **Extract each agent into its own file**: Reduce `agents.py` from 4,773 lines to 8 files of ~500 lines
+9. **Enable OpenTelemetry** for distributed tracing
+10. **Parameterize leverage** by instrument/broker instead of hardcoding 1:100
 
-### P3 — Basse
+### P3 — Low
 
-11. **MarketContext** : Recevoir output TechnicalAnalyst au lieu de recalculer les mêmes indicateurs
-12. **Migrer contrats de sortie textuels** vers JSON schema strict pour Technical/News/Context
-13. **Ajouter alerting Grafana** basé sur les métriques existantes
+11. **MarketContext**: Receive TechnicalAnalyst output instead of recalculating the same indicators
+12. **Migrate textual output contracts** to strict JSON schema for Technical/News/Context
+13. **Add Grafana alerting** based on existing metrics
 
 ---
 
-## 20. Décisions d'architecture recommandées
+## 20. Recommended Architecture Decisions
 
-### Questions posées et réponses
+### Questions asked and answers
 
-| Question | Réponse | Preuve |
+| Question | Answer | Evidence |
 |----------|---------|--------|
-| Les prompts sont-ils assez précis et contrôlables ? | **Oui pour Risk/Execution (JSON strict), partiellement pour les autres (contrat textuel)** | `agents.py:4444` JSON contract, `agents.py:1633` textual contract |
-| Les rôles sont-ils bien séparés ? | **Oui sauf Bull/Bear (identiques) et MarketContext/Technical (duplication partielle)** | `agents.py:3268` vs `3435` (même structure), `agents.py:2772` vs `1633` (mêmes indicateurs) |
-| Le runtime apporte-t-il une vraie valeur ? | **Oui : parallélisme, stagnation guard, bundle selection. Le second-pass a une valeur marginale** | `engine.py:1064-1239` parallel groups, `engine.py:1382` stagnation |
-| Le débat bull/bear améliore-t-il la décision ? | **Impact observable limité à ±0.12 sur combined_score. À mesurer empiriquement** | `agents.py:3602` — `debate_score = debate_sign * alignment * 0.12` |
-| La mémoire améliore-t-elle la décision ? | **Architecture bien conçue (outcome weighting, risk blocks) mais embedding trop faible pour un recall sémantique réel** | `vector_memory.py:_embed()` SHA256 hash, `compute_memory_signal()` risk_blocks |
-| Le RiskEngine est-il la vraie source de vérité ? | **Oui, 100%. Le LLM ne peut pas override un rejet déterministe** | `agents.py:4500` — `final_accepted = risk_eval.accepted AND llm_approved` |
-| Y a-t-il des duplications de logique ? | **Oui : position_size_calculator MCP duplique RiskEngine, MarketContext recalcule les indicateurs de Technical** | `mcp_trading_server.py` position_size vs `rules.py` evaluate(), `agents.py:2772` vs `1633` |
-| L'exécution est-elle protégée ? | **Oui : side flip blocked, degraded→HOLD, live abort, JSON contract strict, 4 conditions live gate** | `agents.py:4605-4773` side confirmation, `engine.py:294-310` live gate |
-| Le système est-il production-ready ? | **Simulation/paper : oui. Live : conditions nécessaires remplies (risk gate, abort, degraded mode) mais mutex manquant et naming incohérent** | Pas de lock concurrent + `forex.db` naming |
+| Are prompts precise and controllable enough? | **Yes for Risk/Execution (strict JSON), partially for others (textual contract)** | `agents.py:4444` JSON contract, `agents.py:1633` textual contract |
+| Are roles well separated? | **Yes except Bull/Bear (identical) and MarketContext/Technical (partial duplication)** | `agents.py:3268` vs `3435` (same structure), `agents.py:2772` vs `1633` (same indicators) |
+| Does the runtime provide real value? | **Yes: parallelism, stagnation guard, bundle selection. Second-pass has marginal value** | `engine.py:1064-1239` parallel groups, `engine.py:1382` stagnation |
+| Does the bull/bear debate improve the decision? | **Observable impact limited to ±0.12 on combined_score. Should be measured empirically** | `agents.py:3602` — `debate_score = debate_sign * alignment * 0.12` |
+| Does memory improve the decision? | **Well-designed architecture (outcome weighting, risk blocks) but embedding too weak for real semantic recall** | `vector_memory.py:_embed()` SHA256 hash, `compute_memory_signal()` risk_blocks |
+| Is the RiskEngine the real source of truth? | **Yes, 100%. The LLM cannot override a deterministic rejection** | `agents.py:4500` — `final_accepted = risk_eval.accepted AND llm_approved` |
+| Are there logic duplications? | **Yes: position_size_calculator MCP duplicates RiskEngine, MarketContext recalculates Technical's indicators** | `mcp_trading_server.py` position_size vs `rules.py` evaluate(), `agents.py:2772` vs `1633` |
+| Is execution protected? | **Yes: side flip blocked, degraded→HOLD, live abort, strict JSON contract, 4 live gate conditions** | `agents.py:4605-4773` side confirmation, `engine.py:294-310` live gate |
+| Is the system production-ready? | **Simulation/paper: yes. Live: necessary conditions met (risk gate, abort, degraded mode) but mutex missing and naming inconsistent** | No concurrent lock + `forex.db` naming |
 
 ---
 
-## 21. Modifications réellement effectuées (session précédente + actuelle)
+## 21. Changes actually made (previous session + current)
 
-| # | Fichier(s) | Modification | Type |
+| # | File(s) | Change | Type |
 |---|-----------|-------------|------|
-| 1 | 15 fichiers `db/models/*.py` | `datetime.utcnow` → `datetime.now(timezone.utc)` | Correction |
-| 2 | 4 fichiers services/routes | Idem | Correction |
-| 3 | `mcp_client.py` | Ajout `TOOL_ID_ALIASES`, alias resolution dans `build_tool_specs()`, `call_tool()`, `has_tool()` | Refactoring |
-| 4 | `Chart.yaml` | `forex-platform` → `trading-platform` | Généricisation |
-| 5 | 4 fichiers racine vides | Suppression fichiers parasites (`agent,`, `décision`, etc.) | Nettoyage |
-| 6 | `test_mcp_client_alias.py` (nouveau) | 12 tests alias resolution + gouvernance | Tests |
-| 7 | `test_risk_engine_multiproduct.py` (nouveau) | 14 tests multi-produit (forex/crypto/index/metal/equity/SL-TP) | Tests |
+| 1 | 15 files `db/models/*.py` | `datetime.utcnow` → `datetime.now(timezone.utc)` | Fix |
+| 2 | 4 services/routes files | Same | Fix |
+| 3 | `mcp_client.py` | Added `TOOL_ID_ALIASES`, alias resolution in `build_tool_specs()`, `call_tool()`, `has_tool()` | Refactoring |
+| 4 | `Chart.yaml` | `forex-platform` → `trading-platform` | Generalization |
+| 5 | 4 empty root files | Deleted stale files (`agent,`, `decision`, etc.) | Cleanup |
+| 6 | `test_mcp_client_alias.py` (new) | 12 tests for alias resolution + governance | Tests |
+| 7 | `test_risk_engine_multiproduct.py` (new) | 14 multi-product tests (forex/crypto/index/metal/equity/SL-TP) | Tests |
 
 ---
 
-## 22. Tests réellement exécutés
+## 22. Tests actually executed
 
 ```
-Commande : .venv/bin/python -m pytest tests/unit/ --tb=short
-Résultat : 357 passed, 3 warnings in 8.58s
+Command: .venv/bin/python -m pytest tests/unit/ --tb=short
+Result: 357 passed, 3 warnings in 8.58s
 ```
 
-**Détail** : 331 tests originaux + 26 nouveaux tests ajoutés. Les 3 warnings sont des `DeprecationWarning` de `SwigPyPacked`/`SwigPyObject` dans la bibliothèque C du client Qdrant (hors périmètre projet).
+**Details**: 331 original tests + 26 new tests added. The 3 warnings are `DeprecationWarning` from `SwigPyPacked`/`SwigPyObject` in the Qdrant client C library (outside project scope).
 
 ---
 
-## 23. Verdict final
+## 23. Final Verdict
 
-### Forces architecturales
+### Architectural strengths
 
-1. **Frontière LLM/déterministe exemplaire** : Les 4 agents les plus critiques (Technical, Trader, Risk, Execution) sont LLM OFF par défaut. Le RiskEngine est une barrière infranchissable par le LLM. C'est l'un des meilleurs designs observés dans un système de trading AI.
+1. **Exemplary LLM/deterministic boundary**: The 4 most critical agents (Technical, Trader, Risk, Execution) are LLM OFF by default. The RiskEngine is an impenetrable barrier for the LLM. This is one of the best designs observed in an AI trading system.
 
-2. **Logique de décision trading sophistiquée** : 3 politiques décisionnelles, détection de contradictions multi-niveaux, memory risk blocks, source alignment scoring. Le système rejette correctement les setups faibles.
+2. **Sophisticated trading decision logic**: 3 decision policies, multi-level contradiction detection, memory risk blocks, source alignment scoring. The system correctly rejects weak setups.
 
-3. **Gouvernance outils robuste** : enabled_tools enforced au runtime, alias resolution, double-check canonical/alias. Aucun agent ne peut appeler un outil non autorisé.
+3. **Robust tool governance**: enabled_tools enforced at runtime, alias resolution, double-check canonical/alias. No agent can call an unauthorized tool.
 
-4. **Mémoire outcome-weighted** : L'idée de pondérer les mémoires par le résultat réel des trades (win/loss/RR) est architecturalement excellente, même si l'embedding limite le recall.
+4. **Outcome-weighted memory**: The idea of weighting memories by actual trade results (win/loss/RR) is architecturally excellent, even if the embedding limits recall.
 
-### Faiblesses à corriger
+### Weaknesses to address
 
-1. **Débat bull/bear sous-optimisé** : Coût élevé (2 appels LLM), impact faible (±0.12), prompts identiques. Ratio coût/valeur à valider empiriquement.
+1. **Underoptimized bull/bear debate**: High cost (2 LLM calls), low impact (±0.12), identical prompts. Cost/value ratio to be validated empirically.
 
-2. **Embedding mémoire non sémantique** : SHA256 hash ne capture pas la sémantique. Le score business (38%) compense partiellement mais le recall reste limité.
+2. **Non-semantic memory embedding**: SHA256 hash does not capture semantics. The business score (38%) partially compensates but recall remains limited.
 
-3. **Duplication position sizing** : Deux sources de vérité potentiellement divergentes.
+3. **Position sizing duplication**: Two potentially divergent sources of truth.
 
-4. **Pas de mutex concurrent** : Risque de double position en production.
+4. **No concurrent mutex**: Risk of double position in production.
 
-### Score final : 3.63/5
+### Final score: 3.63/5
 
-Architecture bien conçue avec une séparation LLM/déterministe parmi les meilleures du domaine. Les corrections prioritaires concernent la duplication de sizing, le mutex concurrent, et la validation du ratio coût/valeur du débat bull/bear. Le système est **production-ready pour simulation et paper trading**, et **conditionnellement ready pour live** une fois le mutex et le naming corrigés.
+Well-designed architecture with an LLM/deterministic separation among the best in the field. Priority corrections concern sizing duplication, concurrent mutex, and validation of the bull/bear debate cost/value ratio. The system is **production-ready for simulation and paper trading**, and **conditionally ready for live** once the mutex and naming are corrected.

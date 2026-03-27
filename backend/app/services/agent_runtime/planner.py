@@ -203,25 +203,25 @@ class AgenticRuntimePlanner:
         llm_model = self.model_selector.resolve(db, PLANNER_AGENT_NAME)
         runtime_skills = self.model_selector.resolve_skills(db, PLANNER_AGENT_NAME)
         fallback_system = (
-            'Tu es le planner de runtime agentique. '
-            'Tu dois choisir exactement un seul outil parmi les candidats autorisés. '
-            'Ne propose jamais un outil absent de la liste et ne produis jamais de texte libre. '
-            'Réponds uniquement avec un JSON valide.'
+            'You are the agentic runtime planner. '
+            'You must choose exactly one tool from the authorized candidates. '
+            'Never propose a tool absent from the list and never produce free text. '
+            'Respond only with valid JSON.'
         )
         fallback_user = (
-            'Choisis le prochain outil.\n'
-            'Réponds strictement avec ce JSON:\n'
+            'Choose the next tool.\n'
+            'Respond strictly with this JSON:\n'
             '{{'
             '"decision_type":"select_tool",'
             '"selected_tool":"<candidate_tool_name>",'
-            '"why_now":"<justification courte>",'
-            '"required_preconditions":["<précondition optionnelle>"],'
-            '"expected_output_contract":{{"summary":"<sortie attendue>"}},'
+            '"why_now":"<short justification>",'
+            '"required_preconditions":["<optional precondition>"],'
+            '"expected_output_contract":{{"summary":"<expected output>"}},'
             '"confidence":0.0,'
             '"needs_followup":false,'
             '"abort_reason":null'
             '}}\n\n'
-            'Contexte runtime:\n{context_json}'
+            'Runtime context:\n{context_json}'
         )
         context_payload = {
             'objective': state.objective,

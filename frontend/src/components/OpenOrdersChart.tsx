@@ -477,7 +477,7 @@ export function OpenOrdersChart({
           horzLine: { color: 'rgba(150, 160, 185, 0.4)', style: LineStyle.Dashed, labelBackgroundColor: '#2a2e39' },
         },
         localization: {
-          locale: 'fr-FR',
+          locale: 'en-US',
         },
       });
 
@@ -551,7 +551,7 @@ export function OpenOrdersChart({
       const pendingOpenSeries = chart.addSeries(LineSeries, {
         color: '#f59e0b',
         lineWidth: 2,
-        title: 'En attente - Open',
+        title: 'Pending - Open',
         lineVisible: false,
         pointMarkersVisible: true,
         pointMarkersRadius: 4,
@@ -566,7 +566,7 @@ export function OpenOrdersChart({
       const pendingCurrentSeries = chart.addSeries(LineSeries, {
         color: '#ef4444',
         lineWidth: 2,
-        title: 'En attente - Current',
+        title: 'Pending - Current',
         lineVisible: false,
         pointMarkersVisible: true,
         pointMarkersRadius: 4,
@@ -642,8 +642,8 @@ export function OpenOrdersChart({
       if (pendingCurrentData.length > 0) pendingCurrentSeries.setData(pendingCurrentData);
       addHorizontalLevels(positionStopLossLevels, 'Positions - S/L', '#ff5f7f', LineStyle.Dashed);
       addHorizontalLevels(positionTakeProfitLevels, 'Positions - T/P', '#67f0a5', LineStyle.Dashed);
-      addHorizontalLevels(pendingStopLossLevels, 'Ordres - S/L', '#ff8b5b', LineStyle.Dotted);
-      addHorizontalLevels(pendingTakeProfitLevels, 'Ordres - T/P', '#9dee71', LineStyle.Dotted);
+      addHorizontalLevels(pendingStopLossLevels, 'Orders - S/L', '#ff8b5b', LineStyle.Dotted);
+      addHorizontalLevels(pendingTakeProfitLevels, 'Orders - T/P', '#9dee71', LineStyle.Dotted);
 
       for (const link of positionLinks) {
         const linkSeries = chart.addSeries(LineSeries, {
@@ -691,7 +691,7 @@ export function OpenOrdersChart({
 
       chart.timeScale().fitContent();
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Erreur rendu graphique';
+      const message = err instanceof Error ? err.message : 'Chart rendering error';
       setChartRenderError(message);
       return;
     }
@@ -725,7 +725,7 @@ export function OpenOrdersChart({
   return (
     <div className="flex flex-col">
       {chartRenderError ? (
-        <p className="text-text-muted text-xs font-mono py-8 text-center">Erreur graphique: {chartRenderError}</p>
+        <p className="text-text-muted text-xs font-mono py-8 text-center">Chart error: {chartRenderError}</p>
       ) : hasRenderableData ? (
         <div className="relative w-full rounded-lg overflow-hidden" style={{ height: '520px' }}>
           {/* ── TradingView-style price overlay ── */}
@@ -758,16 +758,16 @@ export function OpenOrdersChart({
             </div>
           )}
           <div
-            aria-label="Graphique TradingView des ordres ouverts"
+            aria-label="TradingView chart for open orders"
             className="w-full h-full"
             ref={containerRef}
           />
         </div>
       ) : (
-        <p className="text-text-muted text-xs font-mono py-8 text-center">Aucune donnée de prix exploitable pour les ordres ouverts.</p>
+        <p className="text-text-muted text-xs font-mono py-8 text-center">No usable price data for open orders.</p>
       )}
       <p className="text-[8px] font-mono text-[#787b86] leading-relaxed px-1 mt-1">
-        Bleu: prix d&apos;entrée | Vert: prix courant | Orange: ordres pending | S/L: rouge pointillé | T/P: vert pointillé
+        Blue: entry price | Green: current price | Orange: pending orders | S/L: red dashed | T/P: green dashed
       </p>
     </div>
   );

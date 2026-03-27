@@ -395,7 +395,7 @@ def _summarize_research_evidence(output: dict[str, Any]) -> str:
     llm_summary = str(output.get('llm_summary') or '').strip()
     if llm_summary:
         return _compact_prompt_text(llm_summary, max_chars=180)
-    return 'Signal présent mais justification textuelle limitée.'
+    return 'Signal present but textual justification limited.'
 
 
 def _build_directional_research_view(
@@ -440,17 +440,17 @@ def _build_directional_research_view(
     if opposing_items:
         strongest_opp_name, strongest_opp_score, _ = opposing_items[0]
         invalidation_conditions.append(
-            f'Invalidation si {strongest_opp_name} maintient un biais {opposite_signal} dominant '
+            f'Invalidation if {strongest_opp_name} maintains a dominant {opposite_signal} bias '
             f'(score={round(strongest_opp_score, 3)}).'
         )
     if len(supporting_items) <= 1:
         invalidation_conditions.append(
-            "Invalidation si la confirmation inter-sources reste insuffisante."
+            "Invalidation if inter-source confirmation remains insufficient."
         )
     independent_sources = {'news-analyst', 'market-context-analyst'}
     if not any(name in independent_sources for name, _score, _evidence in supporting_items):
         invalidation_conditions.append(
-            "Invalidation si aucune source indépendante (news/contexte) ne confirme la thèse."
+            "Invalidation if no independent source (news/context) confirms the thesis."
         )
 
     return {
@@ -518,8 +518,8 @@ def _build_execution_note(
         return (
             f"**{pair} - {timeframe}**\n"
             f"**Decision : HOLD**\n"
-            f"**Confiance** : {round(confidence_value, 3)}\n"
-            "**Motif** : avantage directionnel insuffisant pour un trade executable."
+            f"**Confidence** : {round(confidence_value, 3)}\n"
+            "**Reason** : insufficient directional edge for an executable trade."
         )
 
     return (
@@ -528,7 +528,7 @@ def _build_execution_note(
         f"**Entry** : {_format_price(entry)}\n"
         f"**Stop-loss** : {_format_price(stop_loss)}\n"
         f"**Take-profit** : {_format_price(take_profit)}\n"
-        f"**Confiance** : {round(confidence_value, 3)}"
+        f"**Confidence** : {round(confidence_value, 3)}"
     )
 
 
@@ -656,17 +656,17 @@ def _append_tools_prompt_guidance(system_prompt: str, *, enabled_tools: list[str
 
     if not unique_tools:
         guidance = (
-            "Aucun tool actif pour cet agent dans cette exécution. "
-            "Travaille uniquement avec les données fournies et explicite toute limite d'observation."
+            "No active tool for this agent in this execution. "
+            "Work only with the provided data and state any observation limitation explicitly."
         )
         return f'{system_prompt}\n\n{guidance}'
 
     rendered_tools = ', '.join(unique_tools)
     guidance = (
-        "Tools activés pour cette exécution: "
+        "Tools activated for this execution: "
         f"{rendered_tools}. "
-        "Priorise les observations de ces tools. "
-        "N'invente jamais de résultat tool absent et n'utilise aucun tool non listé."
+        "Prioritize observations from these tools. "
+        "Never invent absent tool results and do not use any unlisted tool."
     )
     return f'{system_prompt}\n\n{guidance}'
 
@@ -1190,9 +1190,9 @@ class DecisionGatingPolicy:
 
 DECISION_POLICIES: dict[str, DecisionGatingPolicy] = {
     # ── Conservative ──────────────────────────────────────────────────
-    # Mode strict : convergence forte exigée, setups marginaux bloqués.
-    # Au moins 2 sources alignées, seuils élevés, aucun override technique,
-    # pénalités de contradiction sévères.
+    # Strict mode: strong convergence required, marginal setups blocked.
+    # At least 2 aligned sources, high thresholds, no technical override,
+    # severe contradiction penalties.
     'conservative': DecisionGatingPolicy(
         mode='conservative',
         min_combined_score=0.32,
@@ -1216,10 +1216,10 @@ DECISION_POLICIES: dict[str, DecisionGatingPolicy] = {
         block_major_contradiction=True,
     ),
     # ── Balanced ──────────────────────────────────────────────────────
-    # Mode intermédiaire : autorise davantage de setups techniques
-    # (single-source tech OK si score suffisant, low-edge override OK)
-    # sans relâcher les garde-fous majeurs (contradictions bloquées,
-    # pénalités modérées).
+    # Intermediate mode: allows more technical setups
+    # (single-source tech OK if score sufficient, low-edge override OK)
+    # without relaxing major guardrails (contradictions blocked,
+    # moderate penalties).
     'balanced': DecisionGatingPolicy(
         mode='balanced',
         min_combined_score=0.22,
@@ -1243,12 +1243,12 @@ DECISION_POLICIES: dict[str, DecisionGatingPolicy] = {
         block_major_contradiction=True,
     ),
     # ── Permissive ────────────────────────────────────────────────────
-    # Mode opportuniste encadré : seuils plus souples pour capter des
-    # setups que les autres modes rejettent, MAIS reste prudent :
-    # - neutral technique quasi toujours bloqué (3 sources, strength élevée)
-    # - contradictions majeures toujours bloquées
-    # - pénalités de contradiction significatives
-    # - confidence plancher maintenu à un niveau raisonnable
+    # Guarded opportunistic mode: softer thresholds to capture
+    # setups that other modes reject, BUT remains cautious:
+    # - technical neutral almost always blocked (3 sources, high strength)
+    # - major contradictions always blocked
+    # - significant contradiction penalties
+    # - confidence floor maintained at a reasonable level
     'permissive': DecisionGatingPolicy(
         mode='permissive',
         min_combined_score=0.13,
@@ -1532,11 +1532,11 @@ def _optimize_news_prompts_for_latency(system_prompt: str, user_prompt: str) -> 
     system = _compact_prompt_text(system_prompt, max_chars=1200)
     user = _compact_prompt_text(user_prompt, max_chars=1200)
     guidance = (
-        'Format de sortie strict: ligne 1 bullish/bearish/neutral; '
-        'ligne 2 case=no_signal|weak_signal|directional_signal; '
-        'ligne 3 horizon=intraday|swing|uncertain; '
-        'ligne 4 impact=high|medium|low; '
-        'ligne 5 justification très courte.'
+        'Strict output format: line 1 bullish/bearish/neutral; '
+        'line 2 case=no_signal|weak_signal|directional_signal; '
+        'line 3 horizon=intraday|swing|uncertain; '
+        'line 4 impact=high|medium|low; '
+        'line 5 very short justification.'
     )
     if guidance not in system:
         system = f'{system}\n\n{guidance}'
@@ -1546,36 +1546,36 @@ def _optimize_news_prompts_for_latency(system_prompt: str, user_prompt: str) -> 
 def _permissive_mode_prompt_guidance(agent_name: str) -> str:
     guidance_map = {
         'technical-analyst': (
-            'Mode permissive: n exige pas une convergence parfaite. '
-            'Si un biais technique faible mais exploitable existe, prefere bullish/bearish faible a neutral automatique.'
+            'Permissive mode: does not require perfect convergence. '
+            'If a weak but actionable technical bias exists, prefer weak bullish/bearish over automatic neutral.'
         ),
         'news-analyst': (
-            'Mode permissive: distingue clairement absence de signal vs signal faible exploitable. '
-            'N ecrase pas en neutral un biais plausible uniquement parce que les preuves sont imparfaites.'
+            'Permissive mode: clearly distinguish absence of signal from weak actionable signal. '
+            'Do not crush a plausible bias to neutral solely because evidence is imperfect.'
         ),
         'macro-analyst': (
-            'Mode permissive: accepte un biais contextuel leger si le contexte ne contredit pas la direction, '
-            'tout en gardant une confidence prudente et explicite.'
+            'Permissive mode: accept a light contextual bias if the context does not contradict the direction, '
+            'while maintaining cautious and explicit confidence.'
         ),
         'market-context-analyst': (
-            'Mode permissive: accepte un biais contextuel leger si le contexte ne contredit pas la direction, '
-            'tout en gardant une confidence prudente et explicite.'
+            'Permissive mode: accept a light contextual bias if the context does not contradict the direction, '
+            'while maintaining cautious and explicit confidence.'
         ),
         'debate-engine': (
-            'Mode permissive: explore des theses moderement actionnables quand les preuves sont plausibles, '
-            'sans transformer une ambiguite majeure en conviction forte.'
+            'Permissive mode: explore moderately actionable theses when evidence is plausible, '
+            'without transforming a major ambiguity into strong conviction.'
         ),
         'bullish-researcher': (
-            'Mode permissive: construis aussi des theses haussieres moderement actionnables, '
-            'pas seulement des cas de convergence parfaite.'
+            'Permissive mode: also build moderately actionable bullish theses, '
+            'not only perfect convergence cases.'
         ),
         'bearish-researcher': (
-            'Mode permissive: construis aussi des theses baissieres moderement actionnables, '
-            'pas seulement des cas de convergence parfaite.'
+            'Permissive mode: also build moderately actionable bearish theses, '
+            'not only perfect convergence cases.'
         ),
         'trader-agent': (
-            'Mode permissive: autorise BUY/SELL quand le setup est plausible et correctement borne, '
-            'meme si la convergence est partielle; preserve les blocages de contradiction majeure.'
+            'Permissive mode: allow BUY/SELL when the setup is plausible and properly bounded, '
+            'even if convergence is partial; preserve major contradiction blocks.'
         ),
     }
     return guidance_map.get(agent_name, '')
@@ -1631,6 +1631,7 @@ def _news_summary_implies_no_signal(text: str) -> bool:
         'too weak',
         'corrélations indirectes',
         'correlations indirectes',
+        'indirect correlations',
         'no directional bias',
         'no directional edge',
         'insufficient relevant evidence',
@@ -1738,14 +1739,14 @@ def _validate_news_output(
             output['information_state'] = 'insufficient_relevance'
         output['summary'] = _format_news_summary(
             'neutral',
-            "Aucune news pertinente exploitable n'a été retenue pour cet instrument."
+            "No relevant actionable news was retained for this instrument."
             if not selected_evidence or no_signal_summary
-            else "Les évidences retenues restent trop indirectes pour confirmer un biais directionnel fiable sur cet instrument.",
+            else "Retained evidence remains too indirect to confirm a reliable directional bias on this instrument.",
         )
         actions.append('directional_signal_blocked')
     elif output.get('decision_mode') == 'neutral_from_mixed_news' and abs(score) < signal_threshold:
         output['signal'] = 'neutral'
-        output['summary'] = _format_news_summary('neutral', "Les évidences news sont mixtes; aucun biais directionnel fiable n'est retenu pour cet instrument.")
+        output['summary'] = _format_news_summary('neutral', "News evidence is mixed; no reliable directional bias is retained for this instrument.")
         actions.append('mixed_news_neutralized')
     elif parsed_summary_signal == 'neutral' and output.get('signal') != 'neutral' and abs(score) < max(signal_threshold, 0.12):
         output['signal'] = 'neutral'
@@ -1812,12 +1813,12 @@ def _validate_news_output(
             if replacement_signal in {'bullish', 'bearish'}:
                 output['summary'] = _format_news_summary(
                     replacement_signal,
-                    'Les évidences news retenues produisent un biais directionnel exploitable sur cet instrument.',
+                    'Retained news evidence produces an actionable directional bias on this instrument.',
                 )
             else:
                 output['summary'] = _format_news_summary(
                     'neutral',
-                    "Les évidences news sont insuffisantes pour un signal directionnel exploitable sur cet instrument.",
+                    "News evidence is insufficient for an actionable directional signal on this instrument.",
                 )
             actions.append('macro_summary_sanitized_without_events')
 
@@ -1913,26 +1914,26 @@ class TechnicalAnalystAgent:
                     'neutral\n'
                     f'setup_quality={setup_quality}\n'
                     f'setup_state=conditional\n'
-                    f'Biais structurel {structural} mais timing local non confirmé (momentum {local}).'
+                    f'Structural bias {structural} but local timing not confirmed (momentum {local}).'
                 )
             if structural in {'bullish', 'bearish'}:
                 return (
                     'neutral\n'
                     f'setup_quality={setup_quality}\n'
                     f'setup_state={state or "non_actionable"}\n'
-                    f'Contexte non-actionnable malgré un biais structurel {structural}.'
+                    f'Non-actionable context despite structural bias {structural}.'
                 )
             return (
                 'neutral\n'
                 f'setup_quality={setup_quality}\n'
                 f'setup_state={state or "non_actionable"}\n'
-                'Pas de biais directionnel exploitable.'
+                'No actionable directional bias.'
             )
         return (
             f'{actionable}\n'
             f'setup_quality={setup_quality}\n'
             f'setup_state={state or "actionable"}\n'
-            f'Signal exploitable aligné avec structure {structural} et momentum {local}.'
+            f'Actionable signal aligned with structure {structural} and momentum {local}.'
         )
 
     @classmethod
@@ -2245,23 +2246,23 @@ class TechnicalAnalystAgent:
                     )
 
         if not raw_lines:
-            raw_lines.append('- Aucun fait brut exploitable.')
+            raw_lines.append('- No actionable raw fact.')
         if not tool_lines:
-            tool_lines.append('- Aucun résultat tool pré-exécuté exploitable.')
+            tool_lines.append('- No actionable pre-executed tool result.')
 
         interpretation_rules_block = '\n'.join(
             [
-                '- Prioriser d abord la structure / tendance, puis le momentum, puis les signaux contraires.',
-                '- Si RSI est entre 45 et 55, considérer le momentum comme neutre (non fortement directionnel).',
-                '- Si MACD diff est de signe opposé au trend dominant, traiter cela comme un conflit de momentum.',
-                '- Si des patterns récents portent des signaux opposés, les traiter comme mixed patterns, pas comme confirmation forte.',
-                '- En cas de conflit entre divergence et tendance dominante, réduire la conviction.',
-                '- Pondérer patterns et divergences par récence: un signal ancien pèse moins qu un signal récent.',
-                '- Une structure multi-timeframe dominante soutient un biais, mais ne suffit pas seule à qualifier un setup medium/high.',
-                '- En cas de conflit cumulé (trend vs MACD diff + RSI neutre + patterns mixtes), setup_quality ne peut pas dépasser low.',
-                '- En absence de convergence claire entre trend, RSI et MACD diff, privilégier neutral.',
-                '- N inventer aucun niveau, pattern, volume, orderflow, news, corrélation ou signal absent.',
-                '- Utiliser uniquement les faits et tools listés ci-dessus.',
+                '- Prioritize structure/trend first, then momentum, then contrary signals.',
+                '- If RSI is between 45 and 55, consider momentum as neutral (not strongly directional).',
+                '- If MACD diff has opposite sign to the dominant trend, treat this as a momentum conflict.',
+                '- If recent patterns carry opposing signals, treat them as mixed patterns, not as strong confirmation.',
+                '- In case of conflict between divergence and dominant trend, reduce conviction.',
+                '- Weight patterns and divergences by recency: an old signal weighs less than a recent signal.',
+                '- A dominant multi-timeframe structure supports a bias but alone is not sufficient to qualify a medium/high setup.',
+                '- In case of cumulative conflict (trend vs MACD diff + neutral RSI + mixed patterns), setup_quality cannot exceed low.',
+                '- In absence of clear convergence between trend, RSI and MACD diff, prefer neutral.',
+                '- Do not invent any level, pattern, volume, orderflow, news, correlation or absent signal.',
+                '- Use only the facts and tools listed above.',
             ]
         )
         return '\n'.join(raw_lines), '\n'.join(tool_lines), interpretation_rules_block
@@ -2328,15 +2329,15 @@ class TechnicalAnalystAgent:
                 'dominant_factors': [],
                 'contradictions': [],
                 'reason': 'Market data unavailable',
-                'summary': 'neutral\nsetup_quality=low\nsetup_state=non_actionable\nContexte technique indisponible: signal non-actionnable.',
-                'execution_comment': 'Pas de setup exploitable immédiat.',
+                'summary': 'neutral\nsetup_quality=low\nsetup_state=non_actionable\nTechnical context unavailable: non-actionable signal.',
+                'execution_comment': 'No immediately actionable setup.',
                 'facts_observed': {},
                 'interpretation': {
                     'structural_bias': 'neutral',
                     'local_momentum': 'neutral',
                     'setup_state': 'non_actionable',
                 },
-                'trading_implication': 'Pas de setup exploitable immédiat.',
+                'trading_implication': 'No immediately actionable setup.',
                 'asset_class': instrument_aware_asset_class(ctx.pair),
                 'degraded': True,
                 'llm_call_attempted': False,
@@ -2414,12 +2415,12 @@ class TechnicalAnalystAgent:
 
         _sr_fallback = {
             'validation': (
-                f"Conserver un biais {trend} tant que le prix reste dans la direction du trend ({trend})."
+                f"Maintain {trend} bias as long as price remains in the trend direction ({trend})."
                 if trend in {'bullish', 'bearish'}
                 else 'Validation conditionnelle: attendre une reprise de momentum.'
             ),
             'invalidation': (
-                f"Invalider si RSI passe en zone opposée (rsi={round(rsi, 2)}) "
+                f"Invalidate if RSI moves to opposite zone (rsi={round(rsi, 2)}) "
                 f"et MACD diff inverse durablement ({round(macd_diff, 6)})."
             ),
         }
@@ -2616,14 +2617,14 @@ class TechnicalAnalystAgent:
                     contradictions,
                     contradiction_type='trend_vs_momentum',
                     severity='moderate',
-                    details='Le momentum local est mixte et ne confirme pas le biais structurel.',
+                    details='Local momentum is mixed and does not confirm the structural bias.',
                 )
             elif local_momentum in {'bullish', 'bearish'} and local_momentum != structural_bias:
                 self._append_contradiction(
                     contradictions,
                     contradiction_type='trend_vs_momentum',
                     severity='major' if abs(momentum_score) >= 0.14 else 'moderate',
-                    details='Le momentum local directionnel est opposé au biais structurel.',
+                    details='Local directional momentum opposes the structural bias.',
                 )
 
         divergence_bias = self._score_to_bias(divergence_score, threshold=0.04)
@@ -2636,7 +2637,7 @@ class TechnicalAnalystAgent:
                 contradictions,
                 contradiction_type='trend_vs_divergence',
                 severity='major' if abs(divergence_score) >= 0.10 else 'moderate',
-                details='La divergence dominante s oppose à la structure.',
+                details='The dominant divergence opposes the structure.',
             )
 
         if _patterns_contradictory:
@@ -2644,7 +2645,7 @@ class TechnicalAnalystAgent:
                 contradictions,
                 contradiction_type='pattern_conflict',
                 severity='moderate' if abs(pattern_score) >= 0.08 else 'minor',
-                details='Patterns récents contradictoires (mixed patterns).',
+                details='Contradictory recent patterns (mixed patterns).',
             )
 
         if (
@@ -2657,7 +2658,7 @@ class TechnicalAnalystAgent:
                 contradictions,
                 contradiction_type='mtf_conflict',
                 severity='major' if _mtf_alignment >= 0.80 else 'moderate',
-                details='Contexte multi-timeframe contraire au biais structurel.',
+                details='Multi-timeframe context contrary to the structural bias.',
             )
 
         if structural_bias in {'bullish', 'bearish'} and level_score != 0.0:
@@ -2666,7 +2667,7 @@ class TechnicalAnalystAgent:
                     contradictions,
                     contradiction_type='other',
                     severity='minor',
-                    details='Le niveau technique proche limite la tradabilité immédiate.',
+                    details='Nearby technical level limits immediate tradability.',
                 )
 
         contradiction_penalty = self._contradiction_penalty(contradictions)
@@ -2783,17 +2784,17 @@ class TechnicalAnalystAgent:
         dominant_factors = dominant_factors[:5]
 
         if setup_state == 'high_conviction':
-            execution_comment = 'Convergence élevée: setup exécutable avec discipline de risque standard.'
+            execution_comment = 'High convergence: executable setup with standard risk discipline.'
         elif setup_state == 'actionable':
-            execution_comment = 'Setup exploitable mais surveiller les contradictions mineures avant exécution.'
+            execution_comment = 'Actionable setup but monitor minor contradictions before execution.'
         elif setup_state == 'weak_actionable':
-            execution_comment = 'Edge directionnel faible: privilégier taille réduite et validation stricte.'
+            execution_comment = 'Weak directional edge: prefer reduced size and strict validation.'
         elif setup_state == 'conditional':
             execution_comment = (
-                f'Biais structurel {structural_bias} présent, attendre confirmation momentum locale avant exécution.'
+                f'Structural bias {structural_bias} present, await local momentum confirmation before execution.'
             )
         else:
-            execution_comment = 'Pas de setup exploitable immédiat.'
+            execution_comment = 'No immediately actionable setup.'
 
         m_effective = {
             **m,
@@ -2823,31 +2824,31 @@ class TechnicalAnalystAgent:
         _level_label = str((_primary_level or {}).get('type') or 'niveau').strip().lower() if isinstance(_primary_level, dict) else 'niveau'
 
         if structural_bias == 'bullish':
-            validation_condition = 'Maintenir bullish si MACD diff reste >= 0 et RSI reste >= 45.'
+            validation_condition = 'Maintain bullish if MACD diff remains >= 0 and RSI remains >= 45.'
             invalidation_condition = (
-                f'Invalider si clôture repasse sous {_level_label} {self._format_prompt_value(_primary_level_price, decimals=6)} '
+                f'Invalidate if close falls back below {_level_label} {self._format_prompt_value(_primary_level_price, decimals=6)} '
                 'ou si MACD diff passe durablement sous 0.'
                 if _has_primary_level
                 else 'Invalider si MACD diff passe durablement sous 0 et RSI rechute sous 45.'
             )
         elif structural_bias == 'bearish':
-            validation_condition = 'Maintenir bearish si MACD diff reste <= 0 et RSI reste <= 55.'
+            validation_condition = 'Maintain bearish if MACD diff remains <= 0 and RSI remains <= 55.'
             invalidation_condition = (
-                f'Invalider si clôture repasse au-dessus de {_level_label} {self._format_prompt_value(_primary_level_price, decimals=6)} '
+                f'Invalidate if close rises back above {_level_label} {self._format_prompt_value(_primary_level_price, decimals=6)} '
                 'ou si MACD diff passe durablement au-dessus de 0.'
                 if _has_primary_level
                 else 'Invalider si MACD diff passe durablement au-dessus de 0 et RSI repasse au-dessus de 55.'
             )
         else:
             validation_condition = (
-                'Valider un biais seulement si structure et momentum convergent clairement.'
+                'Validate a bias only if structure and momentum clearly converge.'
                 if setup_state == 'conditional'
-                else 'Valider un biais seulement si trend et MACD diff convergent avec RSI hors zone 45-55.'
+                else 'Validate a bias only if trend and MACD diff converge with RSI outside the 45-55 zone.'
             )
             invalidation_condition = (
-                f'Invalider toute thèse directionnelle tant que le prix reste autour de {_level_label} {self._format_prompt_value(_primary_level_price, decimals=6)}.'
+                f'Invalidate any directional thesis while price remains around {_level_label} {self._format_prompt_value(_primary_level_price, decimals=6)}.'
                 if _has_primary_level
-                else 'Invalider toute thèse directionnelle en absence de convergence trend/RSI/MACD.'
+                else 'Invalidate any directional thesis in the absence of trend/RSI/MACD convergence.'
             )
 
         deterministic_evidence_set: set[str] = set()
@@ -3064,9 +3065,9 @@ class TechnicalAnalystAgent:
                 execution_comment
                 if adjusted_setup_state == setup_state
                 else (
-                    f'Biais structurel {structural_bias} présent, attendre confirmation momentum locale avant exécution.'
+                    f'Structural bias {structural_bias} present, await local momentum confirmation before execution.'
                     if adjusted_setup_state == 'conditional'
-                    else 'Pas de setup exploitable immédiat.'
+                    else 'No immediately actionable setup.'
                 )
             )
             output['trading_implication'] = output['execution_comment']
@@ -3077,36 +3078,36 @@ class TechnicalAnalystAgent:
             return output
 
         fallback_system = (
-            'Tu es un analyste technique multi-actifs discipliné. '
-            'Tu sépares faits, inférences et incertitudes. '
-            'Tu imposes la hiérarchie: structure de fond, momentum local, niveaux, patterns/divergences, puis tradabilité. '
-            'N invente jamais niveaux, patterns, volume, corrélations ou news absents. '
-            'Si 45 <= RSI <= 55 et que MACD diff contredit le trend, setup_quality ne peut pas dépasser low. '
-            'Si les patterns récents sont contradictoires, traite-les comme mixed patterns et réduis fortement la conviction. '
-            'Pondère patterns/divergences par récence et explicite toute contradiction avec type + gravité. '
-            'Une dominance multi-timeframe seule ne suffit pas à produire medium/high sans confirmation momentum locale. '
-            'Si biais structurel sans timing confirmé, retourne setup_state=conditional et actionable_signal=neutral.'
+            'You are a disciplined multi-asset technical analyst. '
+            'You separate facts, inferences and uncertainties. '
+            'You impose the hierarchy: background structure, local momentum, levels, patterns/divergences, then tradability. '
+            'Never invent levels, patterns, volume, correlations or absent news. '
+            'If 45 <= RSI <= 55 and MACD diff contradicts the trend, setup_quality cannot exceed low. '
+            'If recent patterns are contradictory, treat them as mixed patterns and strongly reduce conviction. '
+            'Weight patterns/divergences by recency and state any contradiction with type + severity. '
+            'A multi-timeframe dominance alone is not sufficient to produce medium/high without local momentum confirmation. '
+            'If structural bias without confirmed timing, return setup_state=conditional and actionable_signal=neutral.'
         )
         fallback_user = (
             'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\n\n'
-            'Faits bruts:\n{raw_facts_block}\n\n'
-            'Résultats tools pré-exécutés:\n{tool_results_block}\n\n'
-            'Règles d interprétation:\n{interpretation_rules_block}\n\n'
-            'Contrat de sortie strict:\n'
-            '- Ligne 1: structural_bias=bearish|bullish|neutral\n'
-            '- Ligne 2: local_momentum=bearish|bullish|neutral|mixed\n'
-            '- Ligne 3: setup_state=non_actionable|conditional|weak_actionable|actionable|high_conviction\n'
-            '- Ligne 4: actionable_signal=bearish|bullish|neutral\n'
-            '- Ligne 5: setup_quality=high|medium|low\n'
-            '- Ligne 6: tradability=<0.00-1.00>\n'
-            '- Ligne 7: confidence=<0.00-1.00>\n'
-            '- Ligne 8: score_breakdown={{...}}\n'
-            '- Ligne 9: contradictions=[...] ou []\n'
-            '- Ligne 10: validation=<condition principale basée uniquement sur les faits fournis>\n'
-            '- Ligne 11: invalidation=<condition principale basée uniquement sur les faits fournis>\n'
-            '- Ligne 12: evidence_used=<liste courte des tools/champs réellement utilisés>\n'
-            '- Ligne 13: execution_comment=<implication trading disciplinée>\n'
-            '- Ligne 14: summary=<résumé factuel court>\n'
+            'Raw facts:\n{raw_facts_block}\n\n'
+            'Pre-executed tool results:\n{tool_results_block}\n\n'
+            'Interpretation rules:\n{interpretation_rules_block}\n\n'
+            'Strict output contract:\n'
+            '- Line 1: structural_bias=bearish|bullish|neutral\n'
+            '- Line 2: local_momentum=bearish|bullish|neutral|mixed\n'
+            '- Line 3: setup_state=non_actionable|conditional|weak_actionable|actionable|high_conviction\n'
+            '- Line 4: actionable_signal=bearish|bullish|neutral\n'
+            '- Line 5: setup_quality=high|medium|low\n'
+            '- Line 6: tradability=<0.00-1.00>\n'
+            '- Line 7: confidence=<0.00-1.00>\n'
+            '- Line 8: score_breakdown=... (strict runtime copy or UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN)\n'
+            '- Line 9: contradictions=[...] or []\n'
+            '- Line 10: validation=<main condition based only on provided facts>\n'
+            '- Line 11: invalidation=<main condition based only on provided facts>\n'
+            '- Line 12: evidence_used=<short list of tools/fields actually used>\n'
+            '- Line 13: execution_comment=<disciplined trading implication>\n'
+            '- Line 14: summary=<short factual summary>\n'
             '- Utilise uniquement [tool:...] comme source.'
         )
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
@@ -3867,13 +3868,13 @@ class NewsAnalystAgent:
             information_state = 'provider_failure'
             decision_mode = 'source_degraded'
             reason = 'All enabled news providers failed to return usable evidence'
-            summary = _format_news_summary('neutral', "Les providers news ont échoué; aucun signal directionnel exploitable n'est retenu pour cet instrument.")
+            summary = _format_news_summary('neutral', "News providers failed; no actionable directional signal is retained for this instrument.")
         elif relevant_total == 0:
             degraded = False
             information_state = 'no_recent_news'
             decision_mode = 'no_evidence'
             reason = 'No recent relevant news or macro events were available from enabled providers'
-            summary = _format_news_summary('neutral', "Aucune news pertinente exploitable n'a été retenue pour cet instrument.")
+            summary = _format_news_summary('neutral', "No relevant actionable news was retained for this instrument.")
             score = 0.0
             signal = 'neutral'
         elif mixed_signals:
@@ -3881,7 +3882,7 @@ class NewsAnalystAgent:
             information_state = 'mixed_signals'
             decision_mode = 'neutral_from_mixed_news'
             reason = 'Enabled providers returned mixed directional catalysts with no dominant instrument effect'
-            summary = _format_news_summary('neutral', "Les évidences news sont mixtes; aucun biais directionnel fiable n'est retenu pour cet instrument.")
+            summary = _format_news_summary('neutral', "News evidence is mixed; no reliable directional bias is retained for this instrument.")
             signal = 'neutral'
             score = round(score * 0.35, 3)
         elif (
@@ -3893,7 +3894,7 @@ class NewsAnalystAgent:
             information_state = 'insufficient_relevance'
             decision_mode = 'neutral_from_low_relevance'
             reason = 'Evidence relevance remained low after filtering by instrument proximity and freshness'
-            summary = _format_news_summary('neutral', 'Les évidences retenues restent trop indirectes pour confirmer un biais directionnel fiable sur cet instrument.')
+            summary = _format_news_summary('neutral', 'Retained evidence remains too indirect to confirm a reliable directional bias on this instrument.')
             signal = 'neutral'
             score = round(score * 0.20, 3)
         else:
@@ -3918,7 +3919,7 @@ class NewsAnalystAgent:
                 reason = 'Evidence shows directional bias but credibility or freshness is insufficient for a confident signal'
                 summary = _format_news_summary(
                     signal,
-                    'Les évidences retenues montrent un biais mais la qualité narrative ou la fraîcheur est insuffisante.',
+                    'Retained evidence shows a bias but narrative quality or freshness is insufficient.',
                 )
                 if abs(score) < 0.10:
                     signal = 'neutral'
@@ -3926,7 +3927,7 @@ class NewsAnalystAgent:
             else:
                 decision_mode = 'directional'
                 reason = 'Relevant news and macro evidence produced a directional effect on the instrument'
-                summary = _format_news_summary(signal, 'Les évidences news retenues produisent un biais directionnel exploitable sur cet instrument.')
+                summary = _format_news_summary(signal, 'Retained news evidence produces an actionable directional bias on this instrument.')
             if coverage == 'low':
                 confidence = min(confidence, 0.55)
 
@@ -4036,30 +4037,28 @@ class NewsAnalystAgent:
             evidence_text = '\n'.join(evidence_lines) or '- none'
 
             fallback_system = (
-                'Tu es un analyste news multi-actifs. '
-                'Objectif: isoler uniquement les catalyseurs actionnables pour l instrument analysé. '
-                'N invente jamais de causalité. '
-                'Tu dois garder cohérents le résumé, le signal et la force du signal. '
-                'Distingue faits, inférences et incertitudes. '
-                'Raisonne d abord sur l instrument analysé; pour le FX seulement, sépare impact sur actif principal et actif de référence avant de conclure sur la paire. '
-                'Distingue strictement no_signal, weak_signal et directional_signal.'
+                'You are a multi-asset news analyst. '
+                'Objective: isolate only actionable catalysts for the analyzed instrument. '
+                'Never invent causality. '
+                'You must keep the summary, signal and signal strength coherent. '
+                'Distinguish facts, inferences and uncertainties. '
+                'Reason first about the analyzed instrument; for FX only, separate impact on primary asset and reference asset before concluding on the pair. '
             )
             fallback_user = (
                 'Instrument: {pair}\nDisplay symbol: {display_symbol}\nAsset class: {asset_class}\nInstrument type: {instrument_type}\n'
-                'Primary asset: {primary_asset}\nSecondary asset: {secondary_asset}\nTimeframe: {timeframe}\nCoverage: {coverage}\n'
-                'Signal déterministe initial: {signal}\nScore initial: {score}\n'
-                'Evidences retenues:\n{headlines}\n'
-                'Règles du contrat:\n'
-                '- Pour le FX, interprète d abord l effet probable sur l actif principal et sur l actif de référence, puis convertis ensuite en biais sur la paire.\n'
-                '- Pour les autres classes d actifs, raisonne sur l instrument lui-même, son sous-jacent ou son secteur si ces éléments sont réellement présents.\n'
-                '- Si aucune évidence n est directement exploitable pour l instrument, retourne neutral.\n'
-                '- Si les évidences sont seulement faibles ou indirectes, retourne neutral.\n'
-                '- Première ligne obligatoire: bullish, bearish ou neutral.\n'
-                '- Deuxième ligne: case=no_signal|weak_signal|directional_signal.\n'
-                '- Troisième ligne: horizon=intraday|swing|uncertain.\n'
-                '- Quatrième ligne: impact=high|medium|low.\n'
-                '- Cinquième ligne max: justification courte reliant les évidences à l instrument.\n'
-                '- Ne déclare jamais bullish/bearish si le texte conclut à aucune news pertinente.'
+                'Primary asset: {primary_asset}\nSecondary asset: {secondary_asset}\nFX base: {base_asset}\nFX quote: {quote_asset}\n'
+                'Initial deterministic signal: {signal}\nInitial score: {score}\n'
+                'Contract rules:\n'
+                '- For FX, first interpret the probable effect on the primary asset and the reference asset, then convert into a bias on the pair.\n'
+                '- For other asset classes, reason about the instrument itself, its underlying or its sector if these elements are actually present.\n'
+                '- If no evidence is directly actionable for the instrument, return neutral.\n'
+                '- If evidence is only weak or indirect, return neutral.\n'
+                '- First mandatory line: bullish, bearish or neutral.\n'
+                '- Second line: case=no_signal|weak_signal|directional_signal.\n'
+                '- Third line: horizon=intraday|swing|uncertain.\n'
+                '- Fourth line: impact=high|medium|low.\n'
+                '- Fifth line max: short justification linking evidence to the instrument.\n'
+                '- Never declare bullish/bearish if the text concludes no relevant news.'
             )
             if db is not None:
                 prompt_info = self.prompt_service.render(
@@ -4556,7 +4555,7 @@ class MarketContextAnalystAgent:
             if trend_is_directional and momentum_bias == 'neutral' and volatility_context == 'neutral':
                 return (
                     f'Trend {trend_bias} mais contexte {regime} trop peu confirmant '
-                    'pour soutenir un biais directionnel exploitable.'
+                    'to support an actionable directional bias.'
                 )
             return (
                 f'Regime {regime} avec momentum {momentum_bias} et volatilite {volatility_context}: '
@@ -4567,18 +4566,18 @@ class MarketContextAnalystAgent:
             if trend_aligned:
                 return (
                     f'Trend {trend_bias} maintenu, sans confirmation forte du momentum ni de la volatilite ; '
-                    f'biais {signal} faible.'
+                    f'weak {signal} bias.'
                 )
-            return f'Contexte {regime} peu confirmant ; biais {signal} faible sans renfort net.'
+            return f'{regime} context weakly confirming; weak {signal} bias without clear reinforcement.'
 
         support_count = int(trend_aligned) + int(momentum_aligned) + int(volatility_supportive)
         if support_count >= 2:
-            return f'Regime {regime} avec confirmations contextuelles partielles ; biais {signal} prudent.'
+            return f'{regime} regime with partial contextual confirmations; cautious {signal} bias.'
         if trend_aligned:
             return f'Biais {signal} principalement herite du trend, avec soutien contextuel limite.'
         if support_count == 1:
-            return f'Contexte {regime} compatible avec un biais {signal} leger, conviction limitee.'
-        return f'Le contexte ne contredit pas un biais {signal} faible, sans le renforcer nettement.'
+            return f'{regime} context compatible with a light {signal} bias, limited conviction.'
+        return f'Context does not contradict a weak {signal} bias, without clearly reinforcing it.'
 
     @staticmethod
     def _signal_threshold_reason(*, score: float, signal: str, mixed_context: bool) -> str:
@@ -4948,21 +4947,21 @@ class MarketContextAnalystAgent:
         user_prompt = ''
         if llm_enabled:
             fallback_system = (
-                'Tu es market-context-analyst. '
-                'Evalue uniquement le regime de marche, le momentum contextuel court terme, la lisibilite du mouvement et la volatilite. '
-                'Distingue faits, inférences et incertitudes. '
-                'N invente pas de causalite macro-fondamentale ni de correlations externes.'
+                'You are market-context-analyst. '
+                'Evaluate only the market regime, short-term contextual momentum, movement readability and volatility. '
+                'Distinguish facts, inferences and uncertainties. '
+                'Do not invent macro-fundamental causality or external correlations.'
             )
             fallback_user = (
                 'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nTrend: {trend}\nLast price: {last_price}\n'
                 'Change pct: {change_pct}\nATR: {atr}\nATR ratio: {atr_ratio}\nRSI: {rsi}\n'
                 'EMA fast: {ema_fast}\nEMA slow: {ema_slow}\nMACD diff: {macd_diff}\n'
-                'Contrat de sortie:\n'
-                '- Ligne 1: bullish|bearish|neutral.\n'
-                '- Ligne 2: regime=trending|ranging|calm|unstable|volatile.\n'
-                '- Ligne 3: context_support=supportive|neutral|unsupportive.\n'
-                '- Ligne 4: confidence=low|medium|high.\n'
-                '- Ligne 5 max: note contextuelle prudente sans instruction de trade.'
+                'Output contract:\n'
+                '- Line 1: bullish|bearish|neutral.\n'
+                '- Line 2: regime=trending|ranging|calm|unstable|volatile.\n'
+                '- Line 3: context_support=supportive|neutral|unsupportive.\n'
+                '- Line 4: confidence=low|medium|high.\n'
+                '- Line 5 max: cautious contextual note without trade instruction.'
             )
             variables = {
                 **instrument_vars,
@@ -5019,7 +5018,7 @@ class MarketContextAnalystAgent:
             if _vol_data:
                 _ctx_parts.append(f"Volatility: atr_ratio={_vol_data.get('atr_ratio', '?')}, context={_vol_data.get('volatility_context', '?')}")
             if _ctx_parts:
-                user_prompt += '\n\nDonnées contextuelles pré-calculées:\n' + '\n'.join(f'- {p}' for p in _ctx_parts)
+                user_prompt += '\n\nPre-computed contextual data:\n' + '\n'.join(f'- {p}' for p in _ctx_parts)
 
             output['llm_call_attempted'] = True
             market_context_tool_dispatchers: dict[str, Any] = {
@@ -5147,17 +5146,16 @@ class BullishResearcherAgent:
         arguments = list(research_view.get('supporting_arguments', []))
         confidence = round(min(sum(max(v.get('score', 0), 0) for v in debate_inputs.values()), 1.0), 3)
         fallback_system = (
-            'Tu es un chercheur de marché haussier multi-actifs. '
-            'Construis la meilleure thèse haussière à partir des preuves sans inventer de données externes absentes du payload. '
-            'Structure ta réponse: thèse, preuves prioritaires, limites et invalidations. '
-            'Evite la répétition brute de l analyse technique.'
+            'You are a multi-asset bullish market researcher. '
+            'Build the best bullish thesis from evidence without inventing external data absent from the payload. '
+            'Structure your response: thesis, priority evidence, limitations and invalidations. '
+            'Avoid raw repetition of the technical analysis.'
         )
         fallback_user = (
             'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nSignals: {signals_json}\n'
-            "Mémoire long-terme:\n{memory_context}\n"
-            "Contrat de sortie:\n"
-            "- Thèse haussière (1 phrase).\n"
-            "- Preuves haussières prioritaires (max 3, format source -> fait -> implication).\n"
+            "Long-term memory:\n{memory_context}\n"
+            "- Bullish thesis (1 sentence).\n"
+            "- Priority bullish evidence (max 3, format source -> fact -> implication).\n"
             "- Limites/contre-arguments (max 2).\n"
             "- Conditions d'invalidation (max 2)."
         )
@@ -5235,7 +5233,7 @@ class BullishResearcherAgent:
 
         resolved_skills = list(prompt_info.get('skills', runtime_skills)) if isinstance(prompt_info, dict) else list(runtime_skills)
         output = {
-            'arguments': arguments or ['Aucun argument haussier fort.'],
+            'arguments': arguments or ['No strong bullish argument.'],
             'confidence': confidence,
             'llm_debate': llm_text,
             'degraded': llm_degraded,
@@ -5314,17 +5312,16 @@ class BearishResearcherAgent:
         arguments = list(research_view.get('supporting_arguments', []))
         confidence = round(min(abs(sum(min(v.get('score', 0), 0) for v in debate_inputs.values())), 1.0), 3)
         fallback_system = (
-            'Tu es un chercheur de marché baissier multi-actifs. '
-            'Construis la meilleure thèse baissière à partir des preuves sans inventer de données externes absentes du payload. '
-            'Structure ta réponse: thèse, preuves prioritaires, limites et invalidations. '
-            'Evite la répétition brute de l analyse technique.'
+            'You are a multi-asset bearish market researcher. '
+            'Build the best bearish thesis from evidence without inventing external data absent from the payload. '
+            'Structure your response: thesis, priority evidence, limitations and invalidations. '
+            'Avoid raw repetition of the technical analysis.'
         )
         fallback_user = (
             'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nSignals: {signals_json}\n'
-            "Mémoire long-terme:\n{memory_context}\n"
-            "Contrat de sortie:\n"
-            "- Thèse baissière (1 phrase).\n"
-            "- Preuves baissières prioritaires (max 3, format source -> fait -> implication).\n"
+            "Long-term memory:\n{memory_context}\n"
+            "- Bearish thesis (1 sentence).\n"
+            "- Priority bearish evidence (max 3, format source -> fact -> implication).\n"
             "- Limites/contre-arguments (max 2).\n"
             "- Conditions d'invalidation (max 2)."
         )
@@ -5402,7 +5399,7 @@ class BearishResearcherAgent:
 
         resolved_skills = list(prompt_info.get('skills', runtime_skills)) if isinstance(prompt_info, dict) else list(runtime_skills)
         output = {
-            'arguments': arguments or ['Aucun argument baissier fort.'],
+            'arguments': arguments or ['No strong bearish argument.'],
             'confidence': confidence,
             'llm_debate': llm_text,
             'degraded': llm_degraded,
@@ -5534,7 +5531,7 @@ class TraderAgent:
                     'hold',
                     'convergence',
                     'signal isol',
-                    'qualité du setup',
+                    'setup quality',
                     'qualite du setup',
                 ),
             ):
@@ -6300,15 +6297,15 @@ class TraderAgent:
             return output
 
         fallback_system = (
-            "Tu es un assistant trader multi-actifs. "
-            "Tu résumes la justification finale en note d'exécution compacte, sans inventer d'information."
+            "You are a multi-asset trader assistant. "
+            "You summarize the final justification into a compact execution note, without inventing information."
         )
         fallback_user = (
             "Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nDecision: {decision}\nEntry: {entry}\nStop loss: {stop_loss}\n"
             "Take profit: {take_profit}\nConfidence: {confidence}\nBullish: {bullish_args}\n"
-            "Bearish: {bearish_args}\nNotes de risque: {risk_notes}\nNet score: {net_score}\nCombined score: {combined_score}\n"
-            "Rédige uniquement une note compacte fidèle aux paramètres fournis. "
-            "N'invente ni nouveaux niveaux, ni nouvelle décision, ni nouveaux signaux."
+            "Bearish: {bearish_args}\nRisk notes: {risk_notes}\nNet score: {net_score}\nCombined score: {combined_score}\n"
+            "Write only a compact note faithful to the provided parameters. "
+            "Do not invent new levels, new decisions, or new signals."
         )
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
         if db is not None:
@@ -6516,17 +6513,17 @@ class RiskManagerAgent:
             return output
 
         fallback_system = (
-            'Tu es un risk manager multi-actifs. '
-            'Tu valides ou rejettes la proposition de risque avec discipline. '
-            'Tu restes strictement cohérent avec les garde-fous fournis.'
+            'You are a multi-asset risk manager. '
+            'You validate or reject the risk proposal with discipline. '
+            'You remain strictly coherent with the provided guardrails.'
         )
         fallback_user = (
             'Pair: {pair}\nTimeframe: {timeframe}\nMode: {mode}\nDecision: {decision}\n'
             'Entry: {entry}\nStop loss: {stop_loss}\nTake profit: {take_profit}\n'
             'Risk %: {risk_percent}\n'
-            'Sortie déterministe: accepted={accepted}, suggested_volume={suggested_volume}, reasons={reasons}\n'
-            'Retour attendu: JSON strict {{"decision":"APPROVE|REJECT","justification":"..."}} sans texte additionnel. '
-            "N'invente aucune métrique absente."
+            'Deterministic output: accepted={accepted}, suggested_volume={suggested_volume}, reasons={reasons}\n'
+            'Expected return: strict JSON {{"decision":"APPROVE|REJECT","justification":"..."}} without additional text. '
+            "Do not invent any absent metric."
         )
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
         if db is not None:
@@ -6660,16 +6657,16 @@ class ExecutionManagerAgent:
             return output
 
         fallback_system = (
-            'Tu es un execution manager multi-actifs. '
-            "Tu confirmes BUY/SELL ou imposes HOLD si la prudence l'exige. "
-            'Tu ne peux jamais inverser la direction sans justification stricte.'
+            'You are a multi-asset execution manager. '
+            "You confirm BUY/SELL or impose HOLD if caution requires it. "
+            'You can never reverse the direction without strict justification.'
         )
         fallback_user = (
-            'Pair: {pair}\nTimeframe: {timeframe}\nMode: {mode}\nDecision trader: {decision}\n'
+            'Pair: {pair}\nTimeframe: {timeframe}\nMode: {mode}\nTrader decision: {decision}\n'
             'Risk accepted: {risk_accepted}\nSuggested volume: {suggested_volume}\n'
             'Stop loss: {stop_loss}\nTake profit: {take_profit}\n'
-            'Retour attendu: JSON strict {{"decision":"BUY|SELL|HOLD","justification":"..."}} sans texte additionnel. '
-            "Si les signaux de sécurité sont insuffisants, retourne HOLD."
+            'Expected return: strict JSON {{"decision":"BUY|SELL|HOLD","justification":"..."}} without additional text. '
+            "If safety signals are insufficient, return HOLD."
         )
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
         if db is not None:

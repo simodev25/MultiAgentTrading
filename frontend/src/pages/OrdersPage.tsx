@@ -30,24 +30,24 @@ const RealTradesCharts = lazy(() =>
 
 const DEALS_PER_PAGE = 10;
 const PLATFORM_ORDERS_PER_PAGE = 10;
-const FR_DECIMAL_2 = new Intl.NumberFormat('fr-FR', {
+const EN_DECIMAL_2 = new Intl.NumberFormat('en-US', {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
 });
-const FR_DECIMAL_1 = new Intl.NumberFormat('fr-FR', {
+const EN_DECIMAL_1 = new Intl.NumberFormat('en-US', {
   minimumFractionDigits: 1,
   maximumFractionDigits: 1,
 });
-const FR_DATETIME = new Intl.DateTimeFormat('fr-FR', {
+const EN_DATETIME = new Intl.DateTimeFormat('en-US', {
   dateStyle: 'short',
   timeStyle: 'medium',
 });
 const ORDER_GUARDIAN_AUTO_SCAN_MS = 45000;
 
 function formatDaysWindowLabel(days: number): string {
-  if (days === 0) return "Aujourd'hui";
-  if (days === 1) return '1 jour';
-  return `${days} jours`;
+  if (days === 0) return 'Today';
+  if (days === 1) return '1 day';
+  return `${days} days`;
 }
 
 function toNumber(value: unknown): number {
@@ -87,8 +87,8 @@ function formatSigned(value: number, digits = 2): string {
 
 function formatFrDecimal(value: number, digits = 2): string {
   if (!Number.isFinite(value)) return '-';
-  if (digits === 1) return FR_DECIMAL_1.format(value);
-  return FR_DECIMAL_2.format(value);
+  if (digits === 1) return EN_DECIMAL_1.format(value);
+  return EN_DECIMAL_2.format(value);
 }
 
 function normalizeUpper(value: unknown): string {
@@ -99,7 +99,7 @@ function formatNullableDateTime(value: string | null | undefined): string {
   if (!value) return '-';
   const parsed = Date.parse(value);
   if (!Number.isFinite(parsed)) return '-';
-  return FR_DATETIME.format(new Date(parsed));
+  return EN_DATETIME.format(new Date(parsed));
 }
 
 function isFinancialOperationType(type: string): boolean {
@@ -362,7 +362,7 @@ export function OrdersPage() {
         tone: 'neutral',
       },
       {
-        label: 'Trades fermés',
+        label: 'Closed trades',
         value: String(tradeAnalytics.tradesClosed),
         suffix: '',
         tone: 'neutral',
@@ -392,7 +392,7 @@ export function OrdersPage() {
         tone: tradeAnalytics.maxDrawdown > 0 ? 'down' : 'neutral',
       },
       {
-        label: 'Trades / semaine',
+        label: 'Trades / week',
         value: formatFrDecimal(tradeAnalytics.tradesPerWeek, 1),
         suffix: '',
         tone: 'neutral',
@@ -493,7 +493,7 @@ export function OrdersPage() {
       setGuardianStatus(payload as OrderGuardianStatus);
       setGuardianError(null);
     } catch (err) {
-      setGuardianError(err instanceof Error ? err.message : 'Impossible de charger le mode guardian');
+      setGuardianError(err instanceof Error ? err.message : 'Unable to load guardian mode');
     } finally {
       setGuardianLoading(false);
     }
@@ -507,7 +507,7 @@ export function OrdersPage() {
       setGuardianStatus(payload as OrderGuardianStatus);
       setGuardianError(null);
     } catch (err) {
-      setGuardianError(err instanceof Error ? err.message : 'Impossible de mettre à jour le mode guardian');
+      setGuardianError(err instanceof Error ? err.message : 'Unable to update guardian mode');
     } finally {
       setGuardianActioning(false);
     }
@@ -535,7 +535,7 @@ export function OrdersPage() {
       await loadGuardianStatus();
     } catch (err) {
       if (source === 'manual') {
-        setGuardianError(err instanceof Error ? err.message : 'Exécution guardian impossible');
+        setGuardianError(err instanceof Error ? err.message : 'Guardian execution failed');
       }
     } finally {
       if (source === 'manual') setGuardianActioning(false);
@@ -601,7 +601,7 @@ export function OrdersPage() {
           }}
         >
           <div>
-            <label className="micro-label block mb-1.5">Compte</label>
+            <label className="micro-label block mb-1.5">Account</label>
             <select value={accountRef ?? ''} onChange={(e) => setAccountRef(e.target.value ? Number(e.target.value) : null)}>
               {accounts.length === 0 && <option value="">Default</option>}
               {accounts.map((account) => (
@@ -612,7 +612,7 @@ export function OrdersPage() {
             </select>
           </div>
           <div>
-            <label className="micro-label block mb-1.5">Fenêtre</label>
+            <label className="micro-label block mb-1.5">Window</label>
             <select value={days} onChange={(e) => setDays(Number(e.target.value))}>
               {runtimeConfig.metaApiRealTradesDaysOptions.map((daysOption) => (
                 <option key={daysOption} value={daysOption}>
@@ -622,7 +622,7 @@ export function OrdersPage() {
             </select>
           </div>
           <div>
-            <button className="btn-primary w-full" disabled={metaLoading}>{metaLoading ? 'Rafraîchir...' : 'Rafraîchir'}</button>
+            <button className="btn-primary w-full" disabled={metaLoading}>{metaLoading ? 'Refreshing...' : 'Refresh'}</button>
           </div>
           <div className="flex items-center gap-3">
             <label className="micro-label">Guardian MT5</label>
@@ -642,7 +642,7 @@ export function OrdersPage() {
               onClick={() => void runGuardianNow('manual')}
             >
               {guardianActioning && <ButtonSpinner />}
-              {guardianActioning ? 'Analyse en cours' : 'Analyser positions'}
+              {guardianActioning ? 'Analysis running' : 'Analyze positions'}
             </button>
           </div>
           <div>
@@ -652,49 +652,49 @@ export function OrdersPage() {
               disabled={!hasGuardianReport}
               onClick={() => setGuardianReportVisible((previous) => !previous)}
             >
-              {guardianReportVisible ? 'Masquer rapport' : 'Voir rapport'}
+              {guardianReportVisible ? 'Hide report' : 'View report'}
             </button>
           </div>
           <p className="model-source col-span-2">
             Provider: <code>{provider || 'unknown'}</code> | Sync: <code>{syncing ? 'yes' : 'no'}</code>
           </p>
           <p className="model-source col-span-2">
-            Guardian: <code>{guardianStatus?.enabled ? 'on' : 'off'}</code> | Dernier scan:{' '}
+            Guardian: <code>{guardianStatus?.enabled ? 'on' : 'off'}</code> | Last scan:{' '}
             <code>{formatNullableDateTime(guardianStatus?.last_run_at ?? guardianLastRun?.generated_at)}</code>
           </p>
           {!canOperateGuardian && (
             <p className="model-source col-span-2">
-              Droits requis pour agir: <code>trader-operator/admin</code>
+              Required permissions: <code>trader-operator/admin</code>
             </p>
           )}
         </form>
         {guardianError && <p className="alert">{guardianError}</p>}
         {guardianLastRun && (
           <p className="model-source">
-            Dernière exécution guardian: <code>{guardianLastRun.analyzed_positions}</code> position(s) analysée(s),{' '}
-            <code>{guardianLastRun.actions_executed}</code> action(s) exécutée(s).
+            Last guardian execution: <code>{guardianLastRun.analyzed_positions}</code> position(s) analyzed,{' '}
+            <code>{guardianLastRun.actions_executed}</code> action(s) executed.
           </p>
         )}
         {guardianReportVisible && guardianReportStats && (
           <section className="hw-surface-alt p-4 mt-3">
             <p className="model-source">
-              Rapport guardian du <code>{formatNullableDateTime(guardianReportDate)}</code>
+              Guardian report from <code>{formatNullableDateTime(guardianReportDate)}</code>
             </p>
             <div className="grid grid-cols-5 gap-3 mt-2">
               <article className="hw-surface-alt p-3 text-center">
-                <span className="micro-label">Positions vues</span>
+                <span className="micro-label">Positions seen</span>
                 <strong className="block text-lg font-bold font-mono text-text mt-1">{guardianReportStats.positionsSeen}</strong>
               </article>
               <article className="hw-surface-alt p-3 text-center">
-                <span className="micro-label">Positions analysées</span>
+                <span className="micro-label">Positions analyzed</span>
                 <strong className="block text-lg font-bold font-mono text-text mt-1">{guardianReportStats.positionsAnalyzed}</strong>
               </article>
               <article className="hw-surface-alt p-3 text-center">
-                <span className="micro-label">Actions proposées</span>
+                <span className="micro-label">Actions proposed</span>
                 <strong className="block text-lg font-bold font-mono text-text mt-1">{guardianReportStats.actionsTotal}</strong>
               </article>
               <article className="hw-surface-alt p-3 text-center">
-                <span className="micro-label">Actions exécutées</span>
+                <span className="micro-label">Actions executed</span>
                 <strong className="block text-lg font-bold font-mono text-text mt-1">{guardianReportStats.actionsExecuted}</strong>
               </article>
               <article className="hw-surface-alt p-3 text-center">
@@ -704,7 +704,7 @@ export function OrdersPage() {
             </div>
             {guardianReportText && (
               <p className="model-source">
-                Rapport LLM{guardianReportDegraded ? ' (dégradé)' : ''}: {guardianReportText}
+                LLM Report{guardianReportDegraded ? ' (degraded)' : ''}: {guardianReportText}
               </p>
             )}
             {guardianLastRun?.actions?.length ? (
@@ -712,11 +712,11 @@ export function OrdersPage() {
                 <thead>
                   <tr>
                     <th>Position</th>
-                    <th>Symbole</th>
+                    <th>Symbol</th>
                     <th>Action</th>
-                    <th>Décision</th>
-                    <th>Exécutée</th>
-                    <th>Raison</th>
+                    <th>Decision</th>
+                    <th>Executed</th>
+                    <th>Reason</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -726,7 +726,7 @@ export function OrdersPage() {
                       <td>{item.symbol}</td>
                       <td><code>{item.action}</code></td>
                       <td><code>{item.decision}</code></td>
-                      <td>{item.executed ? 'oui' : 'non'}</td>
+                      <td>{item.executed ? 'yes' : 'no'}</td>
                       <td>{item.reason}</td>
                     </tr>
                   ))}
@@ -734,7 +734,7 @@ export function OrdersPage() {
               </table>
             ) : (
               <p className="model-source">
-                Le détail action par action est disponible après une exécution dans la session en cours.
+                Action-by-action details are available after an execution in the current session.
               </p>
             )}
           </section>
@@ -759,14 +759,14 @@ export function OrdersPage() {
       <section className="grid grid-cols-[200px_1fr] gap-5">
         <aside className="hw-surface p-4">
           <div className="section-header"><span className="section-title">NAV_PANEL</span></div>
-          <nav className="flex flex-col gap-1" aria-label="Navigation ordres">
+          <nav className="flex flex-col gap-1" aria-label="Orders navigation">
             <button
               className={`flex items-center gap-2 px-3 py-2 rounded-lg text-[11px] font-medium transition-all ${activePanel === 'analysis' ? 'bg-accent/10 text-accent border border-accent/20' : 'text-text-muted hover:text-text border border-transparent'}`}
               type="button"
               onClick={() => quickNavigate('orders-summary', 'analysis')}
             >
               <span className="w-5 h-5 rounded bg-surface-alt border border-border flex items-center justify-center text-[9px] font-bold">A</span>
-              <span>Analyses Trading</span>
+              <span>Trading Analysis</span>
             </button>
             <button
               className={`flex items-center gap-2 px-3 py-2 rounded-lg text-[11px] font-medium transition-all ${activePanel === 'metaapi' ? 'bg-accent/10 text-accent border border-accent/20' : 'text-text-muted hover:text-text border border-transparent'}`}
@@ -785,11 +785,11 @@ export function OrdersPage() {
           <div className="mt-4 pt-3 border-t border-border">
             <div className="section-header"><span className="section-title">ORDER_QUEUE</span></div>
             <p className="model-source">
-              MAJ live: {Math.max(1, Math.round(liveExposurePollMs / 1000))}s (onglet visible)
+              Live update: {Math.max(1, Math.round(liveExposurePollMs / 1000))}s (visible tab)
             </p>
             <div className="space-y-2">
               {watchlist.rows.length === 0 ? (
-                <p className="model-source">Aucun symbole actif.</p>
+                <p className="model-source">No active symbol.</p>
               ) : (
                 <>
                   {watchlist.rows.map((row) => (
@@ -801,7 +801,7 @@ export function OrdersPage() {
                   ))}
                   <div className="flex items-center justify-between text-[10px] font-mono pt-2 border-t border-border">
                     <span className="text-text font-semibold">Total</span>
-                    <span className="text-text-muted">{watchlist.totalOrders} ordres</span>
+                    <span className="text-text-muted">{watchlist.totalOrders} orders</span>
                     <strong className={watchlist.totalPnl >= 0 ? 'text-success' : 'text-danger'}>
                       {formatSigned(watchlist.totalPnl)}
                     </strong>
@@ -838,7 +838,7 @@ export function OrdersPage() {
             {metaFeatureDisabled ? (
               <div className="p-5">
                 <p className="model-source">
-                  Vue désactivée côté UI. Activer <code>VITE_ENABLE_METAAPI_REAL_TRADES_DASHBOARD=true</code>.
+                  View disabled on UI side. Enable <code>VITE_ENABLE_METAAPI_REAL_TRADES_DASHBOARD=true</code>.
                 </p>
                 {metaError && <p className="alert">{metaError}</p>}
               </div>
@@ -848,7 +848,7 @@ export function OrdersPage() {
                 <div className="flex items-center justify-between px-5 py-2 border-b border-border bg-surface-alt/30">
                   <div className="flex items-center gap-3">
                     <span className="micro-label">FILTER</span>
-                    <code className="text-[10px] text-text" data-testid="open-orders-chart-filter">{selectedChartTicket ?? 'Tous les ordres'}</code>
+                    <code className="text-[10px] text-text" data-testid="open-orders-chart-filter">{selectedChartTicket ?? 'All orders'}</code>
                     <span className="text-border">|</span>
                     <span className="micro-label">TF</span>
                     <code className="text-[10px] text-text">{chartSelection.timeframe ?? '-'}</code>
@@ -856,7 +856,7 @@ export function OrdersPage() {
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="micro-label">TIME_SCALE</span>
-                    <div className="flex items-center gap-1" role="group" aria-label="Timeframe graphique">
+                    <div className="flex items-center gap-1" role="group" aria-label="Chart timeframe">
                       {DEFAULT_TIMEFRAMES.map((item) => (
                         <button
                           key={item}
@@ -881,7 +881,7 @@ export function OrdersPage() {
                   {marketLoading && marketCandles.length > 0 && (
                     <p className="text-[10px] font-mono text-accent mb-2 px-2 flex items-center gap-1.5">
                       <span className="loading-spinner loading-spinner-sm" style={{ borderTopColor: 'var(--color-accent)' }} />
-                      <span className="loading-dots">Mise à jour de la courbe</span>
+                      <span className="loading-dots">Updating chart</span>
                     </p>
                   )}
                   {marketError && <p className="alert mb-2">{marketError}</p>}
@@ -909,7 +909,7 @@ export function OrdersPage() {
             {metaFeatureDisabled ? (
               <>
                 <p className="model-source">
-                  Vue désactivée côté UI. Activer <code>VITE_ENABLE_METAAPI_REAL_TRADES_DASHBOARD=true</code>.
+                  View disabled on UI side. Enable <code>VITE_ENABLE_METAAPI_REAL_TRADES_DASHBOARD=true</code>.
                 </p>
                 {metaError && <p className="alert">{metaError}</p>}
               </>
@@ -939,7 +939,7 @@ export function OrdersPage() {
 
                 <span className="text-[10px] font-semibold tracking-[0.12em] text-text-muted uppercase block mt-4 mb-2">PENDING_ORDERS_MT5</span>
                 <p className="model-source">
-                  Provider ordres: <code>{openOrdersProvider || 'unknown'}</code>
+                  Provider orders: <code>{openOrdersProvider || 'unknown'}</code>
                 </p>
                 {openOrdersError && <p className="alert">{openOrdersError}</p>}
                 <Suspense fallback={<TableSkeleton columns={9} rows={3} />}>

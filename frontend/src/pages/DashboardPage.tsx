@@ -38,11 +38,11 @@ const CRON_PRESET_BY_TIMEFRAME: Record<string, string> = {
   D1: '0 0 * * *',
 };
 const TIMEFRAME_HINT_BY_CODE: Record<string, string> = {
-  M5: 'Scalp rapide',
+  M5: 'Fast scalp',
   M15: 'Intraday',
   H1: 'Session',
   H4: 'Swing',
-  D1: 'Tendance',
+  D1: 'Trend',
 };
 const RUNS_PAGE_SIZE = 10;
 const SCHEDULES_POLL_EVERY_N_TICKS = 3;
@@ -373,7 +373,7 @@ export function DashboardPage() {
       })) as RegenerateSchedulesResult;
       setSchedules(payload.active_schedules);
       setAutoGenerationSummary(
-        `Source=${payload.source} | Remplacés=${payload.replaced_count} | Créés=${payload.created_count}` +
+        `Source=${payload.source} | Replaced=${payload.replaced_count} | Created=${payload.created_count}` +
         `${payload.llm_note ? ` | Note=${payload.llm_note}` : ''}`,
       );
       const llmUsed = Boolean(payload.llm_report && (payload.llm_report as Record<string, unknown>).used === true);
@@ -438,7 +438,7 @@ export function DashboardPage() {
             <input type="number" min={0.1} max={5} step={0.1} value={riskPercent} onChange={(e) => setRiskPercent(Number(e.target.value))} />
           </div>
           <div>
-            <label className="micro-label block mb-1.5">MetaApi compte</label>
+            <label className="micro-label block mb-1.5">MetaApi account</label>
             <select value={metaapiAccountRef ?? ''} onChange={(e) => setMetaapiAccountRef(e.target.value ? Number(e.target.value) : null)}>
               <option value="">Default</option>
               {accounts.map((account) => (
@@ -451,7 +451,7 @@ export function DashboardPage() {
           <div>
             <button className="btn-primary w-full" disabled={loading}>
               {loading ? <ButtonSpinner /> : <Zap className="w-3.5 h-3.5" />}
-              {loading ? 'Analyse en cours' : 'Démarrer'}
+              {loading ? 'Analysis running' : 'Start'}
             </button>
           </div>
         </form>
@@ -487,7 +487,7 @@ export function DashboardPage() {
         </div>
         <form onSubmit={onSubmitSchedule} className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 items-end">
           <div>
-            <label className="micro-label block mb-1.5">Nom</label>
+            <label className="micro-label block mb-1.5">Name</label>
             <input
               value={scheduleName}
               onChange={(e) => { setScheduleNameTouched(true); setScheduleName(e.target.value); }}
@@ -531,7 +531,7 @@ export function DashboardPage() {
             />
           </div>
           <div>
-            <label className="micro-label block mb-1.5">MetaApi compte</label>
+            <label className="micro-label block mb-1.5">MetaApi account</label>
             <select
               value={scheduleMetaapiAccountRef ?? ''}
               onChange={(e) => setScheduleMetaapiAccountRef(e.target.value ? Number(e.target.value) : null)}
@@ -560,12 +560,12 @@ export function DashboardPage() {
           <div>
             <button className="btn-primary w-full" disabled={scheduleLoading}>
               {scheduleLoading ? <ButtonSpinner /> : <CalendarClock className="w-3.5 h-3.5" />}
-              {scheduleLoading ? 'Création du plan' : 'Créer plan'}
+              {scheduleLoading ? 'Creating plan' : 'Create plan'}
             </button>
           </div>
         </form>
         <p className="model-source mt-2">
-          Exemple cron: <code>*/5 * * * *</code>, <code>0 * * * *</code>, <code>0 8-20 * * 1-5</code>.
+          Cron example: <code>*/5 * * * *</code>, <code>0 * * * *</code>, <code>0 8-20 * * 1-5</code>.
         </p>
 
         {/* Auto generation */}
@@ -583,15 +583,15 @@ export function DashboardPage() {
               <input type="number" min={1} max={20} value={autoTargetCount} onChange={(e) => setAutoTargetCount(Number(e.target.value))} />
             </div>
             <div>
-              <label className="micro-label block mb-1.5">Profil risque</label>
+              <label className="micro-label block mb-1.5">Risk profile</label>
               <select value={autoRiskProfile} onChange={(e) => setAutoRiskProfile(e.target.value as RiskProfile)}>
-                <option value="conservative">Conservateur</option>
-                <option value="balanced">Équilibré</option>
-                <option value="aggressive">Agressif</option>
+                <option value="conservative">Conservative</option>
+                <option value="balanced">Balanced</option>
+                <option value="aggressive">Aggressive</option>
               </select>
             </div>
             <div className="col-span-2">
-              <label className="micro-label block mb-1.5">TF autorisés <span className="text-text-dim">({autoTimeframes.length} actifs)</span></label>
+              <label className="micro-label block mb-1.5">Allowed TFs <span className="text-text-dim">({autoTimeframes.length} active)</span></label>
               <div className="flex flex-wrap gap-1.5">
                 {DEFAULT_TIMEFRAMES.map((item) => {
                   const isActive = autoTimeframes.includes(item);
@@ -618,16 +618,16 @@ export function DashboardPage() {
               </div>
             </div>
             <div>
-              <label className="micro-label block mb-1.5">Utiliser LLM</label>
+              <label className="micro-label block mb-1.5">Use LLM</label>
               <select value={autoUseLlm ? 'yes' : 'no'} onChange={(e) => setAutoUseLlm(e.target.value === 'yes')}>
-                <option value="yes">Oui</option>
-                <option value="no">Non (fallback)</option>
+                <option value="yes">Yes</option>
+                <option value="no">No (fallback)</option>
               </select>
             </div>
             <div>
               <button className="btn-primary w-full" disabled={autoGenerating}>
                 {autoGenerating ? <ButtonSpinner /> : <Bot className="w-3.5 h-3.5" />}
-                {autoGenerating ? 'Génération en cours' : 'Auto-générer'}
+                {autoGenerating ? 'Generating' : 'Auto-generate'}
               </button>
             </div>
           </form>
@@ -635,13 +635,13 @@ export function DashboardPage() {
           {autoLlmReport && (
             <div className="mt-2">
               <button type="button" className="btn-ghost" onClick={() => setShowLlmReport((prev) => !prev)}>
-                {showLlmReport ? 'Masquer rapport LLM' : 'Afficher rapport LLM'}
+                {showLlmReport ? 'Hide LLM report' : 'Show LLM report'}
               </button>
             </div>
           )}
           {showLlmReport && autoLlmReport && (
             <div className="mt-3 hw-surface-alt p-4">
-              <h5 className="micro-label mb-2">Rapport LLM - Génération du plan</h5>
+              <h5 className="micro-label mb-2">LLM Report - Plan Generation</h5>
               <pre className="json-view">{JSON.stringify(autoLlmReport, null, 2)}</pre>
             </div>
           )}
@@ -659,16 +659,16 @@ export function DashboardPage() {
             <thead>
               <tr>
                 <th>ID</th>
-                <th>Nom</th>
+                <th>Name</th>
                 <th>Instrument</th>
                 <th>TF</th>
                 <th>Mode</th>
-                <th>Risque</th>
+                <th>Risk</th>
                 <th>Cron</th>
-                <th>Prochain run</th>
-                <th>Dernier run</th>
+                <th>Next run</th>
+                <th>Last run</th>
                 <th>Status</th>
-                <th>Erreur</th>
+                <th>Error</th>
                 <th>Actions</th>
               </tr>
             </thead>
@@ -728,9 +728,9 @@ export function DashboardPage() {
                 <th>TF</th>
                 <th>Mode</th>
                 <th>Status</th>
-                <th>Date d&apos;exécution</th>
-                <th>Temps running</th>
-                <th>Décision / exécution</th>
+                <th>Execution date</th>
+                <th>Running time</th>
+                <th>Decision / execution</th>
                 <th>Action</th>
               </tr>
             </thead>
@@ -752,7 +752,7 @@ export function DashboardPage() {
                   <td>{formatRunDecisionSummary(run)}</td>
                   <td>
                     <Link to={`/runs/${run.id}`} className="btn-ghost btn-small inline-flex items-center gap-1">
-                      Détail
+                      Detail
                     </Link>
                   </td>
                 </tr>
@@ -763,7 +763,7 @@ export function DashboardPage() {
         {runs.length > 0 && (
           <div className="flex items-center justify-between mt-4 pt-3 border-t border-border">
             <span className="text-[10px] font-mono text-text-muted">
-              {runsPageStart}-{runsPageEnd} sur {runs.length}
+              {runsPageStart}-{runsPageEnd} of {runs.length}
             </span>
             <div className="flex items-center gap-2">
               <button
@@ -772,7 +772,7 @@ export function DashboardPage() {
                 disabled={runsPage <= 1}
                 onClick={() => setRunsPage((c) => Math.max(1, c - 1))}
               >
-                <ChevronLeft className="w-3 h-3" /> Précédent
+                <ChevronLeft className="w-3 h-3" /> Previous
               </button>
               <span className="text-[10px] font-mono text-text-muted">
                 Page {runsPage} / {runsTotalPages}
@@ -783,7 +783,7 @@ export function DashboardPage() {
                 disabled={runsPage >= runsTotalPages}
                 onClick={() => setRunsPage((c) => Math.min(runsTotalPages, c + 1))}
               >
-                Suivant <ChevronRight className="w-3 h-3" />
+                Next <ChevronRight className="w-3 h-3" />
               </button>
             </div>
           </div>

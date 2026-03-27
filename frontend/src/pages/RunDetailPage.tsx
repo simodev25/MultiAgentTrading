@@ -331,7 +331,7 @@ function CopyButton({ text }: { text: string }) {
       type="button"
       onClick={handleCopy}
       className="w-7 h-7 rounded-md flex items-center justify-center border border-[#2A2B2F] bg-[#0D0D0F] hover:border-[#3A3B40] transition-colors shrink-0"
-      title="Copier JSON"
+      title="Copy JSON"
     >
       {copied ? <Check className="w-3 h-3 text-green-500" /> : <Copy className="w-3 h-3 text-[#4A4B50]" />}
     </button>
@@ -696,7 +696,7 @@ export function RunDetailPage() {
       <section className="hw-surface p-5">
         <div className="flex items-center gap-3 mb-4">
           <LoadingSpinner size="md" />
-          <span className="text-[10px] font-mono text-text-muted tracking-[0.1em] uppercase loading-dots">Chargement du run</span>
+          <span className="text-[10px] font-mono text-text-muted tracking-[0.1em] uppercase loading-dots">Loading run</span>
         </div>
         <SectionSkeleton rows={6} />
       </section>
@@ -760,7 +760,7 @@ export function RunDetailPage() {
               RUN_#{run.id} // {instrumentTitle} // {run.timeframe}
             </span>
             <div className="flex flex-wrap gap-3 mt-1">
-              <span className="text-[10px] font-mono text-text-muted">Symbole brut: <code>{run.pair}</code></span>
+              <span className="text-[10px] font-mono text-text-muted">Raw symbol: <code>{run.pair}</code></span>
               {instrument?.asset_class ? <span className="text-[10px] font-mono text-text-muted">Asset class: <code>{humanizeValue(instrument.asset_class)}</code></span> : null}
               {instrument?.instrument_type ? <span className="text-[10px] font-mono text-text-muted">Instrument type: <code>{humanizeValue(instrument.instrument_type)}</code></span> : null}
             </div>
@@ -770,7 +770,7 @@ export function RunDetailPage() {
             className="btn-ghost"
             onClick={downloadLlmAnalyses}
             disabled={llmStepExports.length === 0}
-            title={llmStepExports.length === 0 ? 'Aucune analyse LLM detectee sur ce run' : 'Telecharger toutes les analyses LLM'}
+            title={llmStepExports.length === 0 ? 'No LLM analysis detected for this run' : 'Download all LLM analyses'}
           >
             <Download className="w-3.5 h-3.5" />
             LLM ({llmStepExports.length})
@@ -791,15 +791,15 @@ export function RunDetailPage() {
       <ExpansionPanel title="INSTRUMENT_RESOLUTION" icon={Info} copyText={asPrettyJson({ instrument, providerResolution })}>
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
           {[
-            ['Symbole brut', run.pair],
-            ['Symbole canonique', instrument?.canonical_symbol ?? '-'],
+            ['Raw symbol', run.pair],
+            ['Canonical symbol', instrument?.canonical_symbol ?? '-'],
             ['Display symbol', instrument?.display_symbol ?? '-'],
             ['Asset class', humanizeValue(instrument?.asset_class)],
             ['Instrument type', humanizeValue(instrument?.instrument_type)],
             ['Primary asset', instrument?.primary_asset ?? instrument?.base_asset ?? '-'],
             ['Secondary asset', instrument?.secondary_asset ?? instrument?.quote_asset ?? '-'],
             ['Reference asset', instrument?.reference_asset ?? '-'],
-            ['Marché / venue', instrument?.market ?? instrument?.venue ?? instrument?.exchange ?? '-'],
+            ['Market / venue', instrument?.market ?? instrument?.venue ?? instrument?.exchange ?? '-'],
             ['Provider', providerResolution?.provider ?? instrument?.provider ?? '-'],
             ['Provider symbol', resolvedProviderSymbol],
             ['Timeframe', run.timeframe],
@@ -811,23 +811,23 @@ export function RunDetailPage() {
           ))}
         </div>
         {resolutionPath ? (
-          <p className="model-source mt-3">Résolution provider: <code>{resolutionPath}</code></p>
+          <p className="model-source mt-3">Provider resolution: <code>{resolutionPath}</code></p>
         ) : null}
         {instrumentPanel?.instrumentSources.length ? (
-          <p className="model-source">Sources instrument: <code>{instrumentPanel.instrumentSources.join(' | ')}</code></p>
+          <p className="model-source">Instrument sources: <code>{instrumentPanel.instrumentSources.join(' | ')}</code></p>
         ) : null}
         {instrumentPanel?.providerSources.length ? (
-          <p className="model-source">Sources résolution: <code>{instrumentPanel.providerSources.join(' | ')}</code></p>
+          <p className="model-source">Resolution sources: <code>{instrumentPanel.providerSources.join(' | ')}</code></p>
         ) : null}
         {instrument?.classification_trace ? (
           <details className="trace-details">
-            <summary>Trace de classification</summary>
+            <summary>Classification trace</summary>
             <pre className="json-view">{asPrettyJson(instrument.classification_trace)}</pre>
           </details>
         ) : null}
         {providerResolution ? (
           <details className="trace-details">
-            <summary>Payload de résolution provider</summary>
+            <summary>Provider resolution payload</summary>
             <pre className="json-view">{asPrettyJson(providerResolution)}</pre>
           </details>
         ) : null}
@@ -856,7 +856,7 @@ export function RunDetailPage() {
         headerRight={<span className="text-[9px] font-bold text-[#4A4B50] tabular-nums">{runtimeSessions.length} sessions</span>}
       >
         <div className="flex flex-col gap-2">
-          {runtimeSessions.length === 0 ? <p className="text-xs text-text-muted">Aucune session runtime.</p> : null}
+          {runtimeSessions.length === 0 ? <p className="text-xs text-text-muted">No runtime session.</p> : null}
           {runtimeSessions.map((session) => (
             <SessionPanel key={session.session_key} session={session} history={runtimeSessionHistory[session.session_key] ?? []} />
           ))}
@@ -870,7 +870,7 @@ export function RunDetailPage() {
         headerRight={<span className="text-[9px] font-bold text-[#4A4B50] tabular-nums">{runtimeEvents.length} events</span>}
       >
         <div className="flex flex-col gap-2">
-          {runtimeEvents.length === 0 ? <p className="text-xs text-text-muted">Aucun événement runtime.</p> : null}
+          {runtimeEvents.length === 0 ? <p className="text-xs text-text-muted">No runtime event.</p> : null}
           {runtimeEvents.map((event) => (
             <EventPanel key={event.id} event={event} />
           ))}

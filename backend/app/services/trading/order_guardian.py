@@ -328,13 +328,13 @@ class OrderGuardianService:
             return {'text': '', 'degraded': False, 'prompt_meta': prompt_meta}
 
         fallback_system = (
-            "Tu es Order Guardian MT5. "
-            "Produis un rapport de supervision des positions clair, bref et actionnable."
+            "You are Order Guardian MT5. "
+            "Produce a clear, concise and actionable position supervision report."
         )
         fallback_user = (
-            "Compte: {account_label}\nTimeframe guardian: {timeframe}\nMode: {mode}\n"
-            "Résumé cycle: {summary_json}\nActions: {actions_json}\n"
-            "Donne une synthèse en français: points critiques, exécutions faites, et priorités au prochain scan."
+            "Account: {account_label}\nTimeframe guardian: {timeframe}\nMode: {mode}\n"
+            "Cycle summary: {summary_json}\nActions: {actions_json}\n"
+            "Provide a synthesis: critical points, executions performed, and priorities for the next scan."
         )
         compact_actions = [
             {

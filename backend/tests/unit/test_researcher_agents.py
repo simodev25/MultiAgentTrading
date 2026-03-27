@@ -17,9 +17,9 @@ def _context() -> AgentContext:
 def test_bullish_researcher_exposes_structured_support_and_invalidation() -> None:
     agent = BullishResearcherAgent(PromptTemplateService())
     outputs = {
-        'technical-analyst': {'signal': 'bullish', 'score': 0.32, 'reason': 'Trend + momentum alignés'},
+        'technical-analyst': {'signal': 'bullish', 'score': 0.32, 'reason': 'Trend + momentum aligned'},
         'news-analyst': {'signal': 'bullish', 'score': 0.14, 'reason': 'Catalyseurs macro favorables'},
-        'market-context-analyst': {'signal': 'bearish', 'score': -0.11, 'reason': 'Volatilité défavorable'},
+        'market-context-analyst': {'signal': 'bearish', 'score': -0.11, 'reason': 'Unfavorable volatility'},
     }
 
     result = agent.run(_context(), outputs, db=None)
@@ -36,8 +36,8 @@ def test_bearish_researcher_exposes_structured_support_and_invalidation() -> Non
     agent = BearishResearcherAgent(PromptTemplateService())
     outputs = {
         'technical-analyst': {'signal': 'bearish', 'score': -0.35, 'reason': 'Breakdown sous support'},
-        'news-analyst': {'signal': 'bearish', 'score': -0.12, 'reason': 'Catalyseurs macro défavorables'},
-        'market-context-analyst': {'signal': 'bullish', 'score': 0.09, 'reason': 'Regime encore lisible haussier'},
+        'news-analyst': {'signal': 'bearish', 'score': -0.12, 'reason': 'Unfavorable macro catalysts'},
+        'market-context-analyst': {'signal': 'bullish', 'score': 0.09, 'reason': 'Regime still readable bullish'},
     }
 
     result = agent.run(_context(), outputs, db=None)

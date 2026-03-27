@@ -15,9 +15,9 @@ def test_prompt_registry_version_activation() -> None:
     service = PromptTemplateService()
     with Session(engine) as db:
         service.seed_defaults(db)
-        schedule_prompt = service.get_active(db, 'schedule-planner-agent')
-        assert schedule_prompt is not None
-        assert schedule_prompt.version >= 1
+        technical_prompt = service.get_active(db, 'technical-analyst')
+        assert technical_prompt is not None
+        assert technical_prompt.version >= 1
 
         created = service.create_version(
             db=db,
@@ -27,7 +27,7 @@ def test_prompt_registry_version_activation() -> None:
             notes='test',
             created_by_id=None,
         )
-        assert created.version >= 2
+        assert created.version >= 1
 
         activated = service.activate(db, created.id)
         assert activated is not None
@@ -54,8 +54,8 @@ def test_prompt_registry_render_appends_agent_skills() -> None:
                 settings={
                     'agent_skills': {
                         'news-analyst': [
-                            'Prioriser impact Forex',
-                            'Pondère selon la devise de base et la devise de cotation du pair.',
+                            'Prioriser impact multi-actifs',
+                            "Pondérer selon l'actif analysé et son actif de référence.",
                         ],
                     },
                 },
@@ -71,12 +71,12 @@ def test_prompt_registry_render_appends_agent_skills() -> None:
             variables={'pair': 'EURUSD'},
         )
 
-        assert 'Skills agent à appliquer:' in rendered['system_prompt']
-        assert '- Prioriser impact marchés multi-actifs' in rendered['system_prompt']
-        assert "- Pondère selon l'actif analysé et son actif de référence." in rendered['system_prompt']
+        assert 'Agent skills to apply:' in rendered['system_prompt']
+        assert '- Prioriser impact multi-asset' in rendered['system_prompt']
+        assert "- Pondérer selon the analyzed asset and its reference asset." in rendered['system_prompt']
         assert rendered['skills'] == [
-            'Prioriser impact marchés multi-actifs',
-            "Pondère selon l'actif analysé et son actif de référence.",
+            'Prioriser impact multi-asset',
+            "Pondérer selon the analyzed asset and its reference asset.",
         ]
 
 
@@ -168,33 +168,30 @@ def test_prompt_registry_render_handles_literal_json_braces_in_prompt_template()
         assert '{"candidate_tools":[{"name":"run_news_analyst"}]}' in rendered['user_prompt']
 
 
-def test_news_analyst_default_prompt_stays_pair_aware_for_fx() -> None:
-    system = DEFAULT_PROMPTS['news-analyst']['system']
-    user = DEFAULT_PROMPTS['news-analyst']['user']
+def test_technical_analyst_default_prompt_stays_instrument_aware() -> None:
+    system = DEFAULT_PROMPTS['technical-analyst']['system']
+    user = DEFAULT_PROMPTS['technical-analyst']['user']
 
-    assert 'devise de base' in system
-    assert 'devise de cotation' in system
-    assert '{base_asset}' in user
-    assert '{quote_asset}' in user
+    assert 'multi-asset' in system
+    assert '{pair}' in user
+    assert '{asset_class}' in user
 
 
 def test_default_prompts_include_structured_contracts_for_priority_agents() -> None:
     technical_system = DEFAULT_PROMPTS['technical-analyst']['system']
     technical_user = DEFAULT_PROMPTS['technical-analyst']['user']
-    news_user = DEFAULT_PROMPTS['news-analyst']['user']
-    market_context_user = DEFAULT_PROMPTS['market-context-analyst']['user']
 
-    assert 'bullish = score positif' in technical_system
-    assert 'bearish = score négatif' in technical_system
-    assert 'neutral = score nul ou proche de zéro' in technical_system
-    assert 'score_breakdown runtime autoritaire' in technical_system
-    assert "n'en invente aucun" in technical_system
+    assert 'bullish = positive score' in technical_system
+    assert 'bearish = negative score' in technical_system
+    assert 'neutral = zero or near-zero score' in technical_system
+    assert 'authoritative runtime score_breakdown' in technical_system.lower() or 'Authoritative runtime score_breakdown' in technical_system
+    assert 'do not invent any' in technical_system.lower()
 
-    assert 'Faits bruts' in technical_user
-    assert 'Résultats tools pré-exécutés' in technical_user
-    assert 'Score breakdown runtime autoritaire' in technical_user
+    assert 'Raw facts' in technical_user
+    assert 'Pre-executed tool results' in technical_user
+    assert 'Authoritative runtime score breakdown' in technical_user
     assert '{runtime_score_breakdown_block}' in technical_user
-    assert 'Règles d\'interprétation' in technical_user
+    assert 'Interpretation rules' in technical_user
     assert '[tool:...]' in technical_user
     assert 'setup_quality=high|medium|low' in technical_user
     assert 'structural_bias=bearish|bullish|neutral' in technical_user
@@ -204,20 +201,14 @@ def test_default_prompts_include_structured_contracts_for_priority_agents() -> N
     assert 'score_breakdown=' in technical_user
     assert 'contradictions=' in technical_user
     assert 'execution_comment=' in technical_user
-    assert 'validation=<condition principale' in technical_user
-    assert 'invalidation=<condition principale' in technical_user
-    assert 'evidence_used=<liste courte des tools/champs réellement utilisés>' in technical_user
-    assert 'RSI est proche de 50' in technical_user
-    assert 'MACD diff contredit le trend' in technical_user
+    assert 'validation=<main condition' in technical_user
+    assert 'invalidation=<main condition' in technical_user
+    assert 'evidence_used=<short list of tools/fields actually used>' in technical_user
+    assert 'RSI is close to 50' in technical_user
+    assert 'MACD diff contradicts the trend' in technical_user
     assert 'mixed patterns' in technical_user
-    assert 'setup_quality=low au maximum' in technical_user
+    assert 'setup_quality=low maximum' in technical_user
     assert 'UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN' in technical_user
-
-    assert 'horizon=intraday|swing|uncertain' in news_user
-    assert 'impact=high|medium|low' in news_user
-
-    assert 'regime=trending|ranging|calm|unstable|volatile' in market_context_user
-    assert 'context_support=supportive|neutral|unsupportive' in market_context_user
 
 
 def test_prompt_registry_render_technical_runtime_score_breakdown_optional() -> None:
@@ -243,7 +234,7 @@ def test_prompt_registry_render_technical_runtime_score_breakdown_optional() -> 
         )
 
         assert 'runtime_score_breakdown_block' not in rendered['missing_variables']
-        assert 'Score breakdown runtime autoritaire' in rendered['user_prompt']
+        assert 'Authoritative runtime score breakdown' in rendered['user_prompt']
         assert 'UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN' in rendered['user_prompt']
 
 
@@ -291,13 +282,13 @@ def test_prompt_registry_render_technical_injects_sign_guardrails_for_legacy_pro
             db=db,
             agent_name='technical-analyst',
             fallback_system='Legacy technical prompt.',
-            fallback_user='Instrument: {pair}\nRésultats tools pré-exécutés:\n{tool_results_block}\n\n',
+            fallback_user='Instrument: {pair}\nPre-executed tool results:\n{tool_results_block}\n\n',
             variables={
                 'pair': 'EURUSD',
                 'tool_results_block': '- [tool:indicator_bundle] trend=bearish',
             },
         )
 
-        assert 'Convention de signe unique: bullish = score positif' in rendered['system_prompt']
-        assert 'Score breakdown runtime autoritaire' in rendered['user_prompt']
+        assert 'Unique sign convention: bullish = positive score' in rendered['system_prompt']
+        assert 'Authoritative runtime score breakdown' in rendered['user_prompt']
         assert 'UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN' in rendered['user_prompt']

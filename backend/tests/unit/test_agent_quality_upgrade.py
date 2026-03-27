@@ -947,7 +947,7 @@ def test_technical_recency_weighting_amplifies_recent_patterns(monkeypatch) -> N
         )
     )
 
-    # Sans pondération par récence, deux patterns bullish de force 1.0 vaudraient 0.12.
+    # Without recency weighting, two bullish patterns of strength 1.0 would be 0.12.
     assert out['score_breakdown']['pattern_score'] < 0.12
     assert out['score_breakdown']['recency_adjustment'] < 0.0
 
@@ -1001,7 +1001,7 @@ def test_technical_prompt_handles_partial_tools_without_hallucination(monkeypatc
     )
 
     assert out['degraded'] is False
-    assert captured_user_prompts, 'prompt utilisateur attendu'
+    assert captured_user_prompts, 'expected user prompt'
     prompt = captured_user_prompts[0]
     assert '[source:' not in prompt.lower()
     assert '[tool:' in prompt
@@ -1055,17 +1055,17 @@ def test_technical_prompt_sections_order_and_contract_format(monkeypatch) -> Non
         )
     )
 
-    assert captured_user_prompts, 'prompt utilisateur attendu'
+    assert captured_user_prompts, 'expected user prompt'
     prompt = captured_user_prompts[0]
-    facts_idx = prompt.find('Faits bruts:')
-    tools_idx = prompt.find('Résultats tools pré-exécutés:')
-    rules_idx = max(prompt.find("Règles d'interprétation:"), prompt.find('Règles d interprétation:'))
-    contract_idx = prompt.find('Contrat de sortie strict:')
+    facts_idx = prompt.find('Raw facts:')
+    tools_idx = prompt.find('Pre-executed tool results:')
+    rules_idx = max(prompt.find("Interpretation rules:"), prompt.find('Interpretation rules:'))
+    contract_idx = prompt.find('Strict output contract:')
     assert -1 not in {facts_idx, tools_idx, rules_idx, contract_idx}
     assert facts_idx < tools_idx < rules_idx < contract_idx
     assert '[source:' not in prompt.lower()
     assert '[tool:' in prompt
-    assert 'evidence_used=<liste courte des tools/champs réellement utilisés>' in prompt
+    assert 'evidence_used=<short list of tools/fields actually used>' in prompt
 
 
 # ---------------------------------------------------------------------------

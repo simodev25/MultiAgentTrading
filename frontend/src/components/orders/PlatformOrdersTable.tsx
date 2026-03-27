@@ -39,8 +39,8 @@ export function PlatformOrdersTable({
             <th>Symbol</th>
             <th>Side</th>
             <th>Mode</th>
-            <th>TF ouverture</th>
-            <th>Date d&apos;exécution</th>
+            <th>Opening TF</th>
+            <th>Execution date</th>
             <th>Volume</th>
             <th>Status</th>
             <th>Action</th>
@@ -51,7 +51,7 @@ export function PlatformOrdersTable({
             <TableSkeletonRows prefix="platform-orders" columns={11} rows={5} />
           ) : orders.length === 0 ? (
             <tr>
-              <td colSpan={11}>Aucun ordre plateforme pour le moment.</td>
+              <td colSpan={11}>No platform orders at the moment.</td>
             </tr>
           ) : pagedOrders.map((order) => {
             const failed = String(order.status).toLowerCase() === 'failed';
@@ -75,7 +75,7 @@ export function PlatformOrdersTable({
                         type="button"
                         onClick={() => setExpandedFailedOrderId((prev) => (prev === order.id ? null : order.id))}
                       >
-                        {expanded ? 'Masquer erreur' : 'Voir erreur'}
+                        {expanded ? 'Hide error' : 'View error'}
                       </button>
                     ) : (
                       '-'
@@ -86,7 +86,7 @@ export function PlatformOrdersTable({
                   <tr>
                     <td colSpan={11}>
                       <p className="model-source">
-                        Raison: <code>{failureReason(order)}</code> | Code: <code>{failureCode(order)}</code>
+                        Reason: <code>{failureReason(order)}</code> | Code: <code>{failureCode(order)}</code>
                       </p>
                       <pre>{JSON.stringify(order.response_payload ?? {}, null, 2)}</pre>
                     </td>
@@ -100,17 +100,17 @@ export function PlatformOrdersTable({
       {orders.length > 0 && !bootstrapLoading && (
         <div className="flex items-center justify-between mt-4 pt-3 border-t border-border">
           <span className="text-[10px] font-mono text-text-muted">
-            {pageStart}-{pageEnd} sur {orders.length}
+            {pageStart}-{pageEnd} of {orders.length}
           </span>
           <div className="flex items-center gap-2">
             <button className="btn-ghost btn-small" type="button" disabled={ordersPage <= 1} onClick={onPreviousPage}>
-              Précédent
+              Previous
             </button>
             <span className="text-[10px] font-mono text-text-muted">
-              Page {ordersPage} / {ordersTotalPages} ({ordersPerPage} par page)
+              Page {ordersPage} / {ordersTotalPages} ({ordersPerPage} per page)
             </span>
             <button className="btn-ghost btn-small" type="button" disabled={ordersPage >= ordersTotalPages} onClick={onNextPage}>
-              Suivant
+              Next
             </button>
           </div>
         </div>

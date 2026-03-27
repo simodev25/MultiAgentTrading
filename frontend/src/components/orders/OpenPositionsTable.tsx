@@ -90,7 +90,7 @@ export function OpenPositionsTable({
             <th>S/L</th>
             <th>T/P</th>
             <th>PnL</th>
-            <th>Graphique</th>
+            <th>Chart</th>
           </tr>
         </thead>
         <tbody>
@@ -98,7 +98,7 @@ export function OpenPositionsTable({
             <TableSkeletonRows prefix="positions" columns={11} rows={4} />
           ) : openPositions.length === 0 ? (
             <tr>
-              <td colSpan={11}>Aucun ordre ouvert sur le compte sélectionné.</td>
+              <td colSpan={11}>No open orders on the selected account.</td>
             </tr>
           ) : (
             openPositions.map((position, idx) => {
@@ -124,13 +124,13 @@ export function OpenPositionsTable({
                     <button
                       type="button"
                       disabled={!selectable}
-                      aria-label={`Afficher ticket ${ticket} sur le graphique`}
+                      aria-label={`Show ticket ${ticket} on chart`}
                       onClick={() => {
                         if (!selectable) return;
                         onToggleTicket(ticket);
                       }}
                     >
-                      {selected ? 'Masquer' : 'Afficher'}
+                      {selected ? 'Hide' : 'Show'}
                     </button>
                   </td>
                 </tr>

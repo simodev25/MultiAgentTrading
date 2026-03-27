@@ -12,22 +12,22 @@ from app.services.prompts.registry import PromptTemplateService
 SCHEDULE_PLANNER_AGENT_NAME = 'schedule-planner-agent'
 
 FALLBACK_SYSTEM_PROMPT = (
-    'Tu es un agent dédié à l’automatisation intelligente des plans cron de trading multi-actifs. '
-    'Tu dois produire un résultat strictement structuré et exploitable par une API.'
+    'You are an agent dedicated to intelligent automation of multi-asset trading cron plans. '
+    'You must produce a strictly structured and API-consumable result.'
 )
 FALLBACK_USER_PROMPT = (
-    'Construit un plan de scheduling.\n'
-    'Objectif: proposer des planifications actives robustes selon historique + risque.\n'
-    'Contraintes:\n'
-    '- exactement target_count plans\n'
-    '- pair doit être dans allowed_pairs\n'
-    '- timeframe doit être dans allowed_timeframes\n'
-    '- mode = mode demandé\n'
-    '- risk_percent entre 0.1 et limite mode (simulation=5, paper=3, live=2)\n'
-    '- cron_expression cohérent avec timeframe si possible\n'
-    '- name court et lisible\n'
-    'Réponse: JSON strict avec les clés plans (liste) et note (texte).\n'
-    'Contexte JSON:\n{context_json}'
+    'Build a scheduling plan.\n'
+    'Objective: propose robust active schedules based on history + risk.\n'
+    'Constraints:\n'
+    '- exactly target_count plans\n'
+    '- pair must be in allowed_pairs\n'
+    '- timeframe must be in allowed_timeframes\n'
+    '- mode = requested mode\n'
+    '- risk_percent between 0.1 and mode limit (simulation=5, paper=3, live=2)\n'
+    '- cron_expression coherent with timeframe if possible\n'
+    '- name short and readable\n'
+    'Response: strict JSON with keys plans (list) and note (text).\n'
+    'Context JSON:\n{context_json}'
 )
 
 

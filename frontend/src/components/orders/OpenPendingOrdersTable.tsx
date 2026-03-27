@@ -54,7 +54,7 @@ export function OpenPendingOrdersTable({
           <th>Volume</th>
           <th>Open Price</th>
           <th>Current Price</th>
-          <th>Graphique</th>
+          <th>Chart</th>
         </tr>
       </thead>
       <tbody>
@@ -62,7 +62,7 @@ export function OpenPendingOrdersTable({
           <TableSkeletonRows prefix="open-orders" columns={9} rows={4} />
         ) : openOrders.length === 0 ? (
           <tr>
-            <td colSpan={9}>Aucun ordre en attente sur le compte sélectionné.</td>
+            <td colSpan={9}>No pending orders on the selected account.</td>
           </tr>
         ) : (
           openOrders.map((order, idx) => {
@@ -84,13 +84,13 @@ export function OpenPendingOrdersTable({
                   <button
                     type="button"
                     disabled={!selectable}
-                    aria-label={`Afficher ticket ${ticket} sur le graphique depuis ordres en attente`}
+                    aria-label={`Show ticket ${ticket} on chart from pending orders`}
                     onClick={() => {
                       if (!selectable) return;
                       onToggleTicket(ticket);
                     }}
                   >
-                    {selected ? 'Masquer' : 'Afficher'}
+                    {selected ? 'Hide' : 'Show'}
                   </button>
                 </td>
               </tr>

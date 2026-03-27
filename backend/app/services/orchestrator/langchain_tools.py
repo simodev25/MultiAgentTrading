@@ -31,7 +31,7 @@ def _as_dict(payload: Any) -> dict[str, Any]:
 
 @tool('news_search')
 def news_search_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    """Normalise, déduplique et score un lot de news par pertinence symbole via MCP."""
+    """Normalize, deduplicate and score news batch by symbol relevance via MCP."""
     adapter = _get_mcp_client()
     result = adapter.call_tool('news_search', _as_dict(payload))
     return result.data if result.status == 'ok' else {'items': [], 'count': 0, 'error': result.error}
@@ -39,7 +39,7 @@ def news_search_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 @tool('macro_calendar_or_event_feed')
 def macro_calendar_or_event_feed_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    """Filtre et score les événements macro‑économiques par impact via MCP."""
+    """Filter and score macro-economic events by impact via MCP."""
     adapter = _get_mcp_client()
     result = adapter.call_tool('macro_event_feed', _as_dict(payload))
     return result.data if result.status == 'ok' else {'items': [], 'count': 0, 'error': result.error}
@@ -47,7 +47,7 @@ def macro_calendar_or_event_feed_tool(payload: dict[str, Any]) -> dict[str, Any]
 
 @tool('symbol_relevance_filter')
 def symbol_relevance_filter_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    """Filtre news et macro par seuil de pertinence pour un symbole via MCP."""
+    """Filter news and macro by relevance threshold for a symbol via MCP."""
     adapter = _get_mcp_client()
     result = adapter.call_tool('symbol_relevance_filter', _as_dict(payload))
     return result.data if result.status == 'ok' else {
@@ -58,7 +58,7 @@ def symbol_relevance_filter_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 @tool('sentiment_or_event_impact_parser')
 def sentiment_or_event_impact_parser_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    """Parse le sentiment directionnel depuis les headlines via MCP."""
+    """Parse directional sentiment from headlines via MCP."""
     adapter = _get_mcp_client()
     result = adapter.call_tool('sentiment_parser', _as_dict(payload))
     return result.data if result.status == 'ok' else {
@@ -68,7 +68,7 @@ def sentiment_or_event_impact_parser_tool(payload: dict[str, Any]) -> dict[str, 
 
 @tool('market_snapshot')
 def market_snapshot_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    """Snapshot marché normalisé avec métriques dérivées (spread ratio, candle ratios) via MCP."""
+    """Normalized market snapshot with derived metrics (spread ratio, candle ratios) via MCP."""
     adapter = _get_mcp_client()
     result = adapter.call_tool('market_snapshot', _as_dict(payload))
     return result.data if result.status == 'ok' else {'error': result.error or 'market_snapshot_failed'}
@@ -76,7 +76,7 @@ def market_snapshot_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 @tool('indicator_bundle')
 def indicator_bundle_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    """Calcul réel RSI, EMA, MACD, ATR depuis données OHLC via MCP — pas de passthrough."""
+    """Real RSI, EMA, MACD, ATR calculation from OHLC data via MCP — no passthrough."""
     adapter = _get_mcp_client()
     result = adapter.call_tool('indicator_bundle', _as_dict(payload))
     return result.data if result.status == 'ok' else {'error': result.error or 'indicator_bundle_failed'}
@@ -84,7 +84,7 @@ def indicator_bundle_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 @tool('divergence_detector')
 def divergence_detector_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    """Détection divergences RSI‑prix haussières/baissières via MCP."""
+    """RSI-price bullish/bearish divergence detection via MCP."""
     adapter = _get_mcp_client()
     result = adapter.call_tool('divergence_detector', _as_dict(payload))
     return result.data if result.status == 'ok' else {'divergences': [], 'count': 0}
@@ -92,7 +92,7 @@ def divergence_detector_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 @tool('support_resistance_or_structure_detector')
 def support_resistance_or_structure_detector_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    """Identification niveaux S/R par clustering de pivots via MCP."""
+    """S/R level identification by pivot clustering via MCP."""
     adapter = _get_mcp_client()
     result = adapter.call_tool('support_resistance_detector', _as_dict(payload))
     return result.data if result.status == 'ok' else {'levels': [], 'count': 0}
@@ -100,7 +100,7 @@ def support_resistance_or_structure_detector_tool(payload: dict[str, Any]) -> di
 
 @tool('pattern_detector')
 def pattern_detector_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    """Détection patterns chandeliers (doji, hammer, engulfing, pin bar) via MCP."""
+    """Candlestick pattern detection (doji, hammer, engulfing, pin bar) via MCP."""
     adapter = _get_mcp_client()
     result = adapter.call_tool('pattern_detector', _as_dict(payload))
     return result.data if result.status == 'ok' else {'patterns': [], 'count': 0}
@@ -108,7 +108,7 @@ def pattern_detector_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 @tool('multi_timeframe_context')
 def multi_timeframe_context_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    """Synthèse alignement multi‑TF avec confluence et direction dominante via MCP."""
+    """Multi-TF alignment synthesis with confluence and dominant direction via MCP."""
     adapter = _get_mcp_client()
     result = adapter.call_tool('multi_timeframe_context', _as_dict(payload))
     return result.data if result.status == 'ok' else {'error': result.error or 'multi_timeframe_context_failed'}
@@ -116,7 +116,7 @@ def multi_timeframe_context_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 @tool('market_regime_context')
 def market_regime_context_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    """Classification régime marché (trending/ranging/volatile/calm) via MCP."""
+    """Market regime classification (trending/ranging/volatile/calm) via MCP."""
     adapter = _get_mcp_client()
     result = adapter.call_tool('market_regime_detector', _as_dict(payload))
     return result.data if result.status == 'ok' else {'regime': 'unknown'}
@@ -124,7 +124,7 @@ def market_regime_context_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 @tool('session_context')
 def session_context_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    """Sessions marché actives, overlaps et liquidité en temps réel via MCP."""
+    """Active market sessions, overlaps and real-time liquidity via MCP."""
     adapter = _get_mcp_client()
     result = adapter.call_tool('session_context', _as_dict(payload))
     return result.data if result.status == 'ok' else {'active_sessions': [], 'liquidity': 'unknown'}
@@ -132,7 +132,7 @@ def session_context_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 @tool('correlation_context')
 def correlation_context_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    """Corrélation Pearson rolling entre séries de prix via MCP."""
+    """Rolling Pearson correlation between price series via MCP."""
     adapter = _get_mcp_client()
     result = adapter.call_tool('correlation_analyzer', _as_dict(payload))
     return result.data if result.status == 'ok' else {'correlation': 0.0, 'strength': 'unknown'}
@@ -140,7 +140,7 @@ def correlation_context_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 @tool('volatility_context')
 def volatility_context_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    """ATR, volatilité historique, Bollinger bandwidth et percentile via MCP."""
+    """ATR, historical volatility, Bollinger bandwidth and percentile via MCP."""
     adapter = _get_mcp_client()
     result = adapter.call_tool('volatility_analyzer', _as_dict(payload))
     return result.data if result.status == 'ok' else {'volatility_regime': 'unknown'}
@@ -148,7 +148,7 @@ def volatility_context_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 @tool('evidence_query')
 def evidence_query_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    """Agrégation et scoring évidences agents avec consensus directionnel via MCP."""
+    """Agent evidence aggregation and scoring with directional consensus via MCP."""
     adapter = _get_mcp_client()
     result = adapter.call_tool('evidence_query', _as_dict(payload))
     return result.data if result.status == 'ok' else {'analysis_outputs': {}, 'analysis_count': 0}
@@ -156,7 +156,7 @@ def evidence_query_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 @tool('thesis_support_extractor')
 def thesis_support_extractor_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    """Normalisation et pondération arguments de thèse via MCP."""
+    """Thesis argument normalization and weighting via MCP."""
     adapter = _get_mcp_client()
     result = adapter.call_tool('thesis_support_extractor', _as_dict(payload))
     return result.data if result.status == 'ok' else {
@@ -166,7 +166,7 @@ def thesis_support_extractor_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 @tool('scenario_validation')
 def scenario_validation_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    """Validation scénario trading avec géométrie SL/TP et ratio R:R via MCP."""
+    """Trading scenario validation with SL/TP geometry and R:R ratio via MCP."""
     adapter = _get_mcp_client()
     result = adapter.call_tool('scenario_validation', _as_dict(payload))
     return result.data if result.status == 'ok' else {'invalidation_conditions': []}
@@ -174,7 +174,7 @@ def scenario_validation_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 @tool('position_size_calculator')
 def position_size_calculator_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    """Calcul taille position adapté par classe d'actif avec vérification marge via MCP."""
+    """Asset-class-adapted position size calculation with margin verification via MCP."""
     adapter = _get_mcp_client()
     result = adapter.call_tool('position_size_calculator', _as_dict(payload))
     return result.data if result.status == 'ok' else {'suggested_volume': 0.01, 'error': result.error}
@@ -182,7 +182,7 @@ def position_size_calculator_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 @tool('memory_query')
 def memory_query_tool(payload: dict[str, Any]) -> dict[str, Any]:
-    """Accès mémoire agentique : recherche, feedback, statistiques via MCP."""
+    """Agentic memory access: search, feedback, statistics via MCP."""
     adapter = _get_mcp_client()
     result = adapter.call_tool('memory_query', _as_dict(payload))
     return result.data if result.status == 'ok' else {'status': 'error', 'error': result.error}

@@ -89,7 +89,7 @@ def _crypto_noise_context(pair: str) -> AgentContext:
                     'source_symbol': 'DX-Y.NYB',
                 },
                 {
-                    'title': 'Coinbase CEO offers bold fix after billionaire Ray Dalio’s dollar warning',
+                    'title': "Coinbase CEO offers bold fix after billionaire Ray Dalio's dollar warning",
                     'summary': 'Macro investors warn about the dollar while crypto executives discuss the broader market.',
                     'provider': 'yahoo_finance',
                     'pair_relevance': 0.44,

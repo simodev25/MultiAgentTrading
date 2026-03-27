@@ -484,7 +484,7 @@ def test_apply_mode_prompt_guidance_is_permissive_only_and_deduplicated() -> Non
         agent_name='trader-agent',
     )
 
-    assert 'mode permissive' in permissive_system.lower()
+    assert 'permissive mode' in permissive_system.lower()
     assert repeated_system == permissive_system
     assert repeated_user == permissive_user
     assert balanced_system == system_prompt

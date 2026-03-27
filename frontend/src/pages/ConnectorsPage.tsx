@@ -42,20 +42,20 @@ const DEFAULT_AGENT_LLM_ENABLED: Record<string, boolean> = {
 };
 const AGENT_PROMPT_FALLBACKS: Record<string, { system: string; user: string }> = {
   'technical-analyst': {
-    system: "Tu es un analyste technique multi-actifs. Tu analyses tout type d'instrument avec uniquement les indicateurs fournis.",
-    user: 'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nTrend: {trend}\nRSI: {rsi}\nMACD diff: {macd_diff}\nPrix: {last_price}',
+    system: "You are a multi-asset technical analyst. You analyze all instrument types using only the provided indicators.",
+    user: 'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nTrend: {trend}\nRSI: {rsi}\nMACD diff: {macd_diff}\nPrice: {last_price}',
   },
   'news-analyst': {
-    system: "Tu es un analyste news multi-actifs. Adapte ton raisonnement à la classe d'actif et n'invente jamais de causalité.",
+    system: "You are a multi-asset news analyst. Adapt your reasoning to the asset class and never invent causality.",
     user: (
       'Instrument: {pair}\nAsset class: {asset_class}\nDisplay symbol: {display_symbol}\nTimeframe: {timeframe}\n'
       + 'Instrument type: {instrument_type}\nPrimary asset: {primary_asset}\nSecondary asset: {secondary_asset}\n'
-      + 'FX base asset: {base_asset}\nFX quote asset: {quote_asset}\nMémoires pertinentes:\n{memory_context}\n'
-      + 'Evidences retenues:\n{headlines}'
+      + 'FX base asset: {base_asset}\nFX quote asset: {quote_asset}\nRelevant memories:\n{memory_context}\n'
+      + 'Retained evidence:\n{headlines}'
     ),
   },
   'market-context-analyst': {
-    system: "Tu es un analyste de contexte de marché multi-actifs. Tu évalues le régime, la lisibilité et la volatilité sans hypothèses externes.",
+    system: "You are a multi-asset market context analyst. You evaluate regime, readability and volatility without external assumptions.",
     user: (
       'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nTrend: {trend}\nLast price: {last_price}\n'
       + 'Change pct: {change_pct}\nATR: {atr}\nATR ratio: {atr_ratio}\nRSI: {rsi}\n'
@@ -63,50 +63,50 @@ const AGENT_PROMPT_FALLBACKS: Record<string, { system: string; user: string }> =
     ),
   },
   'bullish-researcher': {
-    system: "Tu es un chercheur de marché haussier multi-actifs. N'utilise que les signaux fournis et n'invente aucune donnée externe.",
-    user: 'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nSignals: {signals_json}\nMémoire:\n{memory_context}',
+    system: "You are a multi-asset bullish market researcher. Use only the provided signals and never invent external data.",
+    user: 'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nSignals: {signals_json}\nMemory:\n{memory_context}',
   },
   'bearish-researcher': {
-    system: "Tu es un chercheur de marché baissier multi-actifs. N'utilise que les signaux fournis et n'invente aucune donnée externe.",
-    user: 'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nSignals: {signals_json}\nMémoire:\n{memory_context}',
+    system: "You are a multi-asset bearish market researcher. Use only the provided signals and never invent external data.",
+    user: 'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nSignals: {signals_json}\nMemory:\n{memory_context}',
   },
   'trader-agent': {
-    system: "Tu es un assistant trader multi-actifs. Résume la note d'exécution finale sans inventer de signaux.",
+    system: "You are a multi-asset trading assistant. Summarize the final execution note without inventing signals.",
     user: 'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nDecision: {decision}\nBullish: {bullish_args}\nBearish: {bearish_args}\nNotes: {risk_notes}',
   },
   'risk-manager': {
-    system: 'Tu es un risk manager multi-actifs.',
+    system: 'You are a multi-asset risk manager.',
     user: (
       'Instrument: {pair}\nTimeframe: {timeframe}\nMode: {mode}\nDecision: {decision}\n'
       + 'Entry: {entry}\nStop loss: {stop_loss}\nTake profit: {take_profit}\nRisk %: {risk_percent}\n'
-      + 'Sortie déterministe: accepted={accepted}, suggested_volume={suggested_volume}, reasons={reasons}\n'
-      + 'Retour attendu: APPROVE ou REJECT puis justification concise.'
+      + 'Deterministic output: accepted={accepted}, suggested_volume={suggested_volume}, reasons={reasons}\n'
+      + 'Expected return: APPROVE or REJECT followed by concise justification.'
     ),
   },
   'execution-manager': {
-    system: 'Tu es un execution manager multi-actifs.',
+    system: 'You are a multi-asset execution manager.',
     user: (
-      'Instrument: {pair}\nTimeframe: {timeframe}\nMode: {mode}\nDecision trader: {decision}\n'
+      'Instrument: {pair}\nTimeframe: {timeframe}\nMode: {mode}\nTrader decision: {decision}\n'
       + 'Risk accepted: {risk_accepted}\nSuggested volume: {suggested_volume}\n'
       + 'Stop loss: {stop_loss}\nTake profit: {take_profit}\n'
-      + 'Retour attendu: BUY, SELL ou HOLD puis justification concise.'
+      + 'Expected return: BUY, SELL or HOLD followed by concise justification.'
     ),
   },
   'order-guardian': {
-    system: 'Tu es Order Guardian MT5.',
+    system: 'You are Order Guardian MT5.',
     user: (
-      'Compte: {account_label}\nTimeframe guardian: {timeframe}\nMode: {mode}\n'
-      + 'Résumé cycle: {summary_json}\nActions: {actions_json}\n'
-      + 'Produis un rapport court en français: risques, actions majeures, points de suivi.'
+      'Account: {account_label}\nGuardian timeframe: {timeframe}\nMode: {mode}\n'
+      + 'Cycle summary: {summary_json}\nActions: {actions_json}\n'
+      + 'Produce a short report: critical points, major executions, and follow-up priorities.'
     ),
   },
   'schedule-planner-agent': {
-    system: 'Tu es un agent dédié à l’automatisation intelligente des plans cron multi-actifs.',
+    system: 'You are an agent dedicated to intelligent automation of multi-asset cron plans.',
     user: (
-      'Construit un plan de scheduling.\n'
-      + 'Contraintes: target_count plans, instruments/timeframes autorisés, mode demandé, risk_percent borné, cron cohérent.\n'
-      + 'Retour: JSON strict avec keys plans et note.\n'
-      + 'Contexte JSON:\n{context_json}'
+      'Build a scheduling plan.\n'
+      + 'Constraints: target_count plans, allowed instruments/timeframes, requested mode, bounded risk_percent, coherent cron.\n'
+      + 'Return: strict JSON with keys plans and note.\n'
+      + 'Context JSON:\n{context_json}'
     ),
   },
 };
@@ -119,17 +119,17 @@ const DECISION_MODE_OPTIONS: Array<{ value: DecisionMode; label: string; descrip
   {
     value: 'conservative',
     label: 'Conservative',
-    description: 'Mode strict: exige une convergence forte et bloque les setups marginaux.',
+    description: 'Strict mode: requires strong convergence and blocks marginal setups.',
   },
   {
     value: 'balanced',
     label: 'Balanced',
-    description: 'Mode intermédiaire: autorise plus de setups techniques sans relâcher les garde-fous majeurs.',
+    description: 'Intermediate mode: allows more technical setups without relaxing major guardrails.',
   },
   {
     value: 'permissive',
     label: 'Permissive',
-    description: 'Mode opportuniste encadré: seuils plus souples, neutral technique quasi toujours bloqué.',
+    description: 'Guarded opportunistic mode: softer thresholds, technical neutral almost always blocked.',
   },
 ];
 
@@ -260,10 +260,10 @@ const FALLBACK_SYMBOL_GROUPS: MarketSymbolGroup[] = [
 type ConfigTabId = 'connectors' | 'models' | 'trading' | 'security';
 
 const CONFIG_TABS: Array<{ id: ConfigTabId; label: string }> = [
-  { id: 'connectors', label: 'Connecteurs' },
-  { id: 'models', label: 'Modèles IA' },
+  { id: 'connectors', label: 'Connectors' },
+  { id: 'models', label: 'AI Models' },
   { id: 'trading', label: 'Trading' },
-  { id: 'security', label: 'Sécurité' },
+  { id: 'security', label: 'Security' },
 ];
 
 type SecretFieldKey =
@@ -347,7 +347,7 @@ function readConnectorSecret(settings: Record<string, unknown>, key: SecretField
 
 function maskSecretPreview(value: string): string {
   const text = String(value || '').trim();
-  if (!text) return 'non défini';
+  if (!text) return 'not set';
   if (text.length <= 3) return '*'.repeat(text.length);
   const startLen = Math.min(3, Math.max(Math.floor(text.length / 4), 1));
   const endLen = Math.min(2, Math.max(Math.floor(text.length / 6), 1));
@@ -697,7 +697,7 @@ export function ConnectorsPage() {
   useEffect(() => {
     const active = activePromptByAgent.get(promptAgent);
     const fallback = AGENT_PROMPT_FALLBACKS[promptAgent] ?? {
-      system: `Tu es l'agent ${promptAgent}.`,
+      system: `You are the ${promptAgent} agent.`,
       user: 'Instrument: {pair}\nTimeframe: {timeframe}\nContexte: {context}',
     };
     setPromptSystem(active?.system_prompt ?? fallback.system);
@@ -958,7 +958,7 @@ export function ConnectorsPage() {
       .filter((group) => group.name.length > 0 && group.symbols.length > 0);
 
     if (symbolGroups.length === 0) {
-      setError('Ajouter au moins un groupe avec des symboles');
+      setError('Add at least one group with symbols');
       return;
     }
 
@@ -1140,7 +1140,7 @@ export function ConnectorsPage() {
         <div className="flex items-center justify-between">
           <div>
             <span className="section-title">SYSTEM_CONFIG</span>
-            <p className="text-xs text-text-muted mt-1">Gérer les connecteurs, modèles IA et paramètres de trading.</p>
+            <p className="text-xs text-text-muted mt-1">Manage connectors, AI models and trading parameters.</p>
           </div>
           <div className="flex items-center gap-6">
             <div className="flex items-center gap-2">
@@ -1149,7 +1149,7 @@ export function ConnectorsPage() {
             </div>
             <div className="grid grid-cols-4 gap-4">
               <div className="text-center">
-                <span className="micro-label block">État</span>
+                <span className="micro-label block">Status</span>
                 <strong className={`text-xs font-mono ${ollamaConnector?.enabled ? 'text-success' : 'text-danger'}`}>{ollamaConnector?.enabled ? 'Online' : 'Offline'}</strong>
               </div>
               <div className="text-center">
@@ -1157,7 +1157,7 @@ export function ConnectorsPage() {
                 <strong className="text-xs font-mono text-text">{llmProvider}</strong>
               </div>
               <div className="text-center">
-                <span className="micro-label block">Coût moyen</span>
+                <span className="micro-label block">Avg Cost</span>
                 <strong className="text-xs font-mono text-text">${averageCostPerRun.toFixed(3)} / run</strong>
               </div>
               <div className="text-center">
@@ -1193,8 +1193,8 @@ export function ConnectorsPage() {
               <table>
                 <thead>
                   <tr>
-                    <th>Nom</th>
-                    <th>Actif</th>
+                    <th>Name</th>
+                    <th>Active</th>
                     <th>Actions</th>
                   </tr>
                 </thead>
@@ -1227,7 +1227,7 @@ export function ConnectorsPage() {
             <section className="hw-surface-alt p-4">
               <div className="section-header"><span className="section-title">NEWS_PROVIDERS</span></div>
               <p className="model-source">
-                Active ou désactive chaque provider news depuis l’onglet Connecteurs.
+                Enable or disable each news provider from the Connectors tab.
               </p>
               <form className="flex flex-col gap-3" onSubmit={saveNewsProviders}>
                 {NEWS_PROVIDER_ORDER.map((providerName) => (
@@ -1236,7 +1236,7 @@ export function ConnectorsPage() {
                       {NEWS_PROVIDER_LABELS[providerName]}
                       {providerName === 'llm_search' && (
                         <span className="model-source" style={{ fontSize: '0.75rem', marginLeft: 4 }}>
-                          (utilise le provider LLM configur&eacute;)
+                          (uses the configured LLM provider)
                         </span>
                       )}
                       <input
@@ -1254,12 +1254,12 @@ export function ConnectorsPage() {
                       type="button"
                       onClick={() => void testNewsProvider(providerName)}
                     >
-                      Tester
+                      Test
                     </button>
                   </div>
                 ))}
                 <button className="btn-primary" disabled={savingNewsProviders}>
-                  {savingNewsProviders ? 'Enregistrement...' : 'Enregistrer providers'}
+                  {savingNewsProviders ? 'Saving...' : 'Save providers'}
                 </button>
               </form>
             </section>
@@ -1311,7 +1311,7 @@ export function ConnectorsPage() {
                   </select>
                 </label>
                 <label>
-                  Modèle principal
+                  Main model
                   <input
                     list="llm-model-choices"
                     value={defaultLlmModel}
@@ -1325,14 +1325,14 @@ export function ConnectorsPage() {
                     <option key={modelName} value={modelName} />
                   ))}
                 </datalist>
-                {modelSource && <p className="model-source">Catalogue modèles: <code>{modelSource}</code></p>}
+                {modelSource && <p className="model-source">Model catalog:<code>{modelSource}</code></p>}
                 {modelsUsage.length > 0 && (
                   <table>
                     <thead>
                       <tr>
-                        <th>LLM réellement utilisé</th>
+                        <th>Actual LLM used</th>
                         <th>Calls</th>
-                        <th>Succès</th>
+                        <th>Success</th>
                         <th>Last seen</th>
                       </tr>
                     </thead>
@@ -1353,11 +1353,11 @@ export function ConnectorsPage() {
                   <thead>
                     <tr>
                       <th>Agent</th>
-                      <th>LLM actif</th>
-                      <th>Modèle</th>
+                      <th>LLM active</th>
+                      <th>Model</th>
                       <th>Skills</th>
                       <th>Tools runtime</th>
-                      <th>LLM effectif</th>
+                      <th>Effective LLM</th>
                       <th>Prompt</th>
                     </tr>
                   </thead>
@@ -1376,7 +1376,7 @@ export function ConnectorsPage() {
                               }}
                             />
                           ) : (
-                            <code>déterministe</code>
+                            <code>deterministic</code>
                           )}
                         </td>
                         <td>
@@ -1385,22 +1385,22 @@ export function ConnectorsPage() {
                               list="llm-model-choices"
                               value={agentModels[agentName] ?? ''}
                               onChange={(e) => setAgentModels((prev) => ({ ...prev, [agentName]: e.target.value }))}
-                              placeholder={`hérite: ${defaultLlmModel || defaultModelForProvider(llmProvider)}`}
+                              placeholder={`inherits: ${defaultLlmModel || defaultModelForProvider(llmProvider)}`}
                               disabled={!MODEL_OVERRIDE_EDITABLE_AGENTS.has(agentName)}
                             />
                           ) : (
-                            <code>non applicable</code>
+                            <code>not applicable</code>
                           )}
                         </td>
                         <td>
                           {NON_SWITCHABLE_LLM_AGENTS.has(agentName)
-                            ? <code>verrouillé</code>
-                            : <code>{(agentSkills[agentName] ?? []).length} règle(s)</code>}
+                            ? <code>locked</code>
+                            : <code>{(agentSkills[agentName] ?? []).length} rule(s)</code>}
                         </td>
                         <td>
                           {(() => {
                             const rows = Array.isArray(agentToolCatalog[agentName]) ? agentToolCatalog[agentName] : [];
-                            if (rows.length === 0) return <code>aucun</code>;
+                            if (rows.length === 0) return <code>none</code>;
                             return (
                               <div style={{ display: 'grid', gap: '6px' }}>
                                 {rows.map((row) => (
@@ -1448,7 +1448,7 @@ export function ConnectorsPage() {
                                 });
                               }}
                             >
-                              Éditer prompt + skills
+                              Edit prompt + skills
                             </button>
                           )}
                         </td>
@@ -1457,13 +1457,13 @@ export function ConnectorsPage() {
                   </tbody>
                 </table>
                 <p className="model-source">
-                  Les skills se modifient dans l’éditeur prompt ci-dessous, puis s’enregistrent via “Enregistrer skills de l’agent”.
+                  Skills are modified in the prompt editor below, then saved via "Save agent skills".
                 </p>
                 <p className="model-source">
-                  Les tools runtime par agent sont sauvegardés avec “Enregistrer les modèles”. Tous les tools autorisés sont activés par défaut.
+                  Runtime tools per agent are saved with "Save models". All authorized tools are enabled by default.
                 </p>
 
-                <button className="btn-primary" disabled={savingModels}>{savingModels ? 'Enregistrement...' : 'Enregistrer les modèles'}</button>
+                <button className="btn-primary" disabled={savingModels}>{savingModels ? 'Saving...' : 'Save models'}</button>
               </form>
             </section>
 
@@ -1489,7 +1489,7 @@ export function ConnectorsPage() {
                   <textarea value={promptUser} onChange={(e) => setPromptUser(e.target.value)} rows={4} />
                 </label>
                 <label>
-                  Skills (une règle par ligne)
+                  Skills (one rule per line)
                   <textarea
                     value={(agentSkills[promptAgent] ?? []).join('\n')}
                     onChange={(e) => {
@@ -1497,23 +1497,23 @@ export function ConnectorsPage() {
                       setAgentSkills((prev) => ({ ...prev, [promptAgent]: parsedSkills }));
                     }}
                     rows={10}
-                    placeholder={'ex:\nPrioriser les événements à fort impact pour l’instrument analysé\nSignaler explicitement les incertitudes'}
+                    placeholder={'e.g.:\nPrioritize high-impact events for the analyzed instrument\nExplicitly flag uncertainties'}
                   />
                 </label>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3 items-end">
-                  <button className="btn-primary" disabled={promptSaving}>{promptSaving ? 'Enregistrement...' : 'Créer + activer version prompt'}</button>
+                  <button className="btn-primary" disabled={promptSaving}>{promptSaving ? 'Saving...' : 'Create + activate prompt version'}</button>
                   <button
                     className="btn-ghost"
                     type="button"
                     onClick={() => void savePromptAgentSkills()}
                     disabled={skillsSaving}
                   >
-                    {skillsSaving ? 'Enregistrement...' : 'Enregistrer skills de l’agent'}
+                    {skillsSaving ? 'Saving...' : 'Save agent skills'}
                   </button>
                 </div>
               </form>
               <p className="model-source">
-                Agent sélectionné: <code>{promptAgent}</code> | version active: <code>v{activePromptByAgent.get(promptAgent)?.version ?? 0}</code>
+                Selected agent: <code>{promptAgent}</code> | active version: <code>v{activePromptByAgent.get(promptAgent)?.version ?? 0}</code>
               </p>
               <table>
                 <thead>
@@ -1533,7 +1533,7 @@ export function ConnectorsPage() {
                       <td>
                         {!prompt.is_active && (
                           <button className="btn-ghost btn-small" type="button" onClick={() => void activatePrompt(prompt)}>
-                            Activer
+                            Activate
                           </button>
                         )}
                       </td>
@@ -1561,7 +1561,7 @@ export function ConnectorsPage() {
                   </select>
                 </label>
                 <label>
-                  Utiliser `memory_context` dans les prompts
+                  Use `memory_context` in prompts
                   <input
                     className="ui-switch"
                     type="checkbox"
@@ -1576,11 +1576,11 @@ export function ConnectorsPage() {
                     </p>
                   ))}
                   <p className="model-source">
-                    Quand désactivé, les agents ne reçoivent plus le `memory_context` (par défaut: désactivé).
+                    When disabled, agents no longer receive the `memory_context` (default: disabled).
                   </p>
                 </div>
                 <button className="btn-primary" disabled={decisionModeSaving}>
-                  {decisionModeSaving ? 'Enregistrement...' : 'Enregistrer le mode de décision'}
+                  {decisionModeSaving ? 'Saving...' : 'Save decision mode'}
                 </button>
               </form>
             </section>
@@ -1600,7 +1600,7 @@ export function ConnectorsPage() {
                   Region
                   <input value={accountRegion} onChange={(e) => setAccountRegion(e.target.value)} required />
                 </label>
-                <button className="btn-primary">Ajouter compte</button>
+                <button className="btn-primary">Add account</button>
               </form>
               <table>
                 <thead>
@@ -1637,11 +1637,11 @@ export function ConnectorsPage() {
             <section className="hw-surface-alt p-4">
               <div className="section-header"><span className="section-title">CACHE_REDIS_METAAPI</span></div>
               <p className="model-source">
-                Cache Redis pour réduire les appels MetaAPI. TTL en secondes (0 = désactivé pour la ressource).
+                Redis cache to reduce MetaAPI calls. TTL in seconds (0 = disabled for the resource).
               </p>
               <form className="flex flex-col gap-3" onSubmit={saveCacheSettings}>
                 <label>
-                  Cache activé
+                  Cache enabled
                   <input
                     className="ui-switch"
                     type="checkbox"
@@ -1672,7 +1672,7 @@ export function ConnectorsPage() {
                   </label>
                 </div>
                 <button className="btn-primary" disabled={savingCache}>
-                  {savingCache ? 'Enregistrement...' : 'Enregistrer cache'}
+                  {savingCache ? 'Saving...' : 'Save cache'}
                 </button>
               </form>
             </section>
@@ -1686,7 +1686,7 @@ export function ConnectorsPage() {
                 {symbolGroupsInput.map((group) => (
                   <div key={group.id} className="form-grid inline symbol-group-row">
                     <label>
-                      Groupe
+                      Group
                       <input
                         value={group.name}
                         onChange={(e) => updateSymbolGroupRow(group.id, { name: e.target.value })}
@@ -1694,7 +1694,7 @@ export function ConnectorsPage() {
                       />
                     </label>
                     <label>
-                      Symboles (CSV)
+                      Symbols (CSV)
                       <textarea
                         value={group.symbolsInput}
                         onChange={(e) => updateSymbolGroupRow(group.id, { symbolsInput: e.target.value })}
@@ -1703,16 +1703,16 @@ export function ConnectorsPage() {
                       />
                     </label>
                     <button className="btn-danger" type="button" onClick={() => removeSymbolGroupRow(group.id)}>
-                      Supprimer groupe
+                      Remove group
                     </button>
                   </div>
                 ))}
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3 items-end">
                   <button className="btn-ghost" type="button" onClick={addSymbolGroupRow}>
-                    Ajouter groupe
+                    Add group
                   </button>
                 </div>
-                <button className="btn-primary" disabled={symbolsSaving}>{symbolsSaving ? 'Enregistrement...' : 'Enregistrer symboles'}</button>
+                <button className="btn-primary" disabled={symbolsSaving}>{symbolsSaving ? 'Saving...' : 'Save symbols'}</button>
               </form>
             </section>
           </div>
@@ -1723,7 +1723,7 @@ export function ConnectorsPage() {
             <section className="hw-surface-alt p-4">
               <div className="section-header"><span className="section-title">API_RUNTIME_KEYS</span></div>
               <p className="model-source">
-                Ces valeurs sont stockées dans les settings connecteurs et utilisées au runtime (LLM, news providers, MetaApi).
+                These values are stored in connector settings and used at runtime (LLM, news providers, MetaApi).
               </p>
               <form className="flex flex-col gap-3" onSubmit={saveSecrets}>
                 <span className="text-[10px] font-semibold tracking-[0.12em] text-text-muted uppercase block mt-2 mb-1">LLM_KEYS</span>
@@ -1735,7 +1735,7 @@ export function ConnectorsPage() {
                     onChange={(e) => setSecretFields((prev) => ({ ...prev, OLLAMA_API_KEY: e.target.value }))}
                     autoComplete="off"
                   />
-                  <p className="model-source">Actuel: <code>{maskSecretPreview(secretFields.OLLAMA_API_KEY)}</code></p>
+                  <p className="model-source">Current:<code>{maskSecretPreview(secretFields.OLLAMA_API_KEY)}</code></p>
                 </label>
                 <label>
                   OPENAI_API_KEY
@@ -1745,7 +1745,7 @@ export function ConnectorsPage() {
                     onChange={(e) => setSecretFields((prev) => ({ ...prev, OPENAI_API_KEY: e.target.value }))}
                     autoComplete="off"
                   />
-                  <p className="model-source">Actuel: <code>{maskSecretPreview(secretFields.OPENAI_API_KEY)}</code></p>
+                  <p className="model-source">Current:<code>{maskSecretPreview(secretFields.OPENAI_API_KEY)}</code></p>
                 </label>
                 <label>
                   MISTRAL_API_KEY
@@ -1755,7 +1755,7 @@ export function ConnectorsPage() {
                     onChange={(e) => setSecretFields((prev) => ({ ...prev, MISTRAL_API_KEY: e.target.value }))}
                     autoComplete="off"
                   />
-                  <p className="model-source">Actuel: <code>{maskSecretPreview(secretFields.MISTRAL_API_KEY)}</code></p>
+                  <p className="model-source">Current:<code>{maskSecretPreview(secretFields.MISTRAL_API_KEY)}</code></p>
                 </label>
                 <span className="text-[10px] font-semibold tracking-[0.12em] text-text-muted uppercase block mt-2 mb-1">NEWS_PROVIDER_KEYS</span>
                 <label>
@@ -1766,7 +1766,7 @@ export function ConnectorsPage() {
                     onChange={(e) => setSecretFields((prev) => ({ ...prev, NEWSAPI_API_KEY: e.target.value }))}
                     autoComplete="off"
                   />
-                  <p className="model-source">Actuel: <code>{maskSecretPreview(secretFields.NEWSAPI_API_KEY)}</code></p>
+                  <p className="model-source">Current:<code>{maskSecretPreview(secretFields.NEWSAPI_API_KEY)}</code></p>
                 </label>
                 <label>
                   TRADINGECONOMICS_API_KEY
@@ -1776,7 +1776,7 @@ export function ConnectorsPage() {
                     onChange={(e) => setSecretFields((prev) => ({ ...prev, TRADINGECONOMICS_API_KEY: e.target.value }))}
                     autoComplete="off"
                   />
-                  <p className="model-source">Actuel: <code>{maskSecretPreview(secretFields.TRADINGECONOMICS_API_KEY)}</code></p>
+                  <p className="model-source">Current:<code>{maskSecretPreview(secretFields.TRADINGECONOMICS_API_KEY)}</code></p>
                 </label>
                 <label>
                   FINNHUB_API_KEY
@@ -1786,7 +1786,7 @@ export function ConnectorsPage() {
                     onChange={(e) => setSecretFields((prev) => ({ ...prev, FINNHUB_API_KEY: e.target.value }))}
                     autoComplete="off"
                   />
-                  <p className="model-source">Actuel: <code>{maskSecretPreview(secretFields.FINNHUB_API_KEY)}</code></p>
+                  <p className="model-source">Current:<code>{maskSecretPreview(secretFields.FINNHUB_API_KEY)}</code></p>
                 </label>
                 <label>
                   ALPHAVANTAGE_API_KEY
@@ -1796,7 +1796,7 @@ export function ConnectorsPage() {
                     onChange={(e) => setSecretFields((prev) => ({ ...prev, ALPHAVANTAGE_API_KEY: e.target.value }))}
                     autoComplete="off"
                   />
-                  <p className="model-source">Actuel: <code>{maskSecretPreview(secretFields.ALPHAVANTAGE_API_KEY)}</code></p>
+                  <p className="model-source">Current:<code>{maskSecretPreview(secretFields.ALPHAVANTAGE_API_KEY)}</code></p>
                 </label>
                 <span className="text-[10px] font-semibold tracking-[0.12em] text-text-muted uppercase block mt-2 mb-1">METAAPI_KEYS</span>
                 <label>
@@ -1807,7 +1807,7 @@ export function ConnectorsPage() {
                     onChange={(e) => setSecretFields((prev) => ({ ...prev, METAAPI_TOKEN: e.target.value }))}
                     autoComplete="off"
                   />
-                  <p className="model-source">Actuel: <code>{maskSecretPreview(secretFields.METAAPI_TOKEN)}</code></p>
+                  <p className="model-source">Current:<code>{maskSecretPreview(secretFields.METAAPI_TOKEN)}</code></p>
                 </label>
                 <label>
                   METAAPI_ACCOUNT_ID
@@ -1817,10 +1817,10 @@ export function ConnectorsPage() {
                     onChange={(e) => setSecretFields((prev) => ({ ...prev, METAAPI_ACCOUNT_ID: e.target.value }))}
                     autoComplete="off"
                   />
-                  <p className="model-source">Actuel: <code>{maskSecretPreview(secretFields.METAAPI_ACCOUNT_ID)}</code></p>
+                  <p className="model-source">Current:<code>{maskSecretPreview(secretFields.METAAPI_ACCOUNT_ID)}</code></p>
                 </label>
                 <button className="btn-primary" disabled={savingSecrets}>
-                  {savingSecrets ? 'Enregistrement...' : 'Enregistrer les clés API'}
+                  {savingSecrets ? 'Saving...' : 'Save API keys'}
                 </button>
               </form>
             </section>
