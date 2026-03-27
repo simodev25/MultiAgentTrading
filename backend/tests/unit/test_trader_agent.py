@@ -242,6 +242,33 @@ def test_trader_agent_permissive_holds_on_technical_neutral_without_independent_
     assert 'technical_neutral_gate' in result['rationale']['decision_gates']
 
 
+def test_trader_agent_does_not_treat_market_context_as_independent_directional_source() -> None:
+    agent = TraderAgent()
+    agent.model_selector.settings.decision_mode = 'permissive'
+    ctx = _context()
+    outputs = {
+        'technical-analyst': {'signal': 'neutral', 'score': 0.02},
+        'market-context-analyst': {
+            'signal': 'bullish',
+            'score': 0.2,
+            'regime': 'trending',
+            'volatility_context': 'supportive',
+            'tradability_score': 0.8,
+            'execution_penalty': 0.2,
+            'hard_block': False,
+        },
+        'news-analyst': {'signal': 'neutral', 'score': 0.0},
+    }
+    bullish = {'arguments': ['x'], 'confidence': 0.8}
+    bearish = {'arguments': ['y'], 'confidence': 0.0}
+
+    result = agent.run(ctx, outputs, bullish, bearish)
+
+    assert result['decision'] == 'HOLD'
+    assert result['rationale']['independent_directional_source_count'] == 0
+    assert result['rationale']['independent_directional_sources'] == []
+
+
 def test_trader_agent_outputs_sell_when_bearish_alignment_is_strong() -> None:
     agent = TraderAgent()
     ctx = _context(trend='bearish', macd_diff=-0.03)

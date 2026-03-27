@@ -4567,6 +4567,52 @@ class MarketContextAnalystAgent:
         return 'neutral'
 
     @staticmethod
+    def _resolve_session_context(utc_hour: int) -> dict[str, Any]:
+        sessions = {
+            'sydney': 21 <= utc_hour or utc_hour < 6,
+            'tokyo': 0 <= utc_hour < 9,
+            'london': 7 <= utc_hour < 16,
+            'new_york': 12 <= utc_hour < 21,
+        }
+        active_sessions = [name for name, is_open in sessions.items() if is_open]
+        overlaps: list[str] = []
+        if sessions['tokyo'] and sessions['london']:
+            overlaps.append('tokyo_london')
+        if sessions['london'] and sessions['new_york']:
+            overlaps.append('london_newyork')
+
+        if overlaps:
+            liquidity = 'high'
+        elif len(active_sessions) >= 2:
+            liquidity = 'medium'
+        elif active_sessions:
+            liquidity = 'low'
+        else:
+            liquidity = 'very_low'
+
+        if 'london_newyork' in overlaps:
+            session = 'london_newyork_overlap'
+        elif 'tokyo_london' in overlaps:
+            session = 'tokyo_london_overlap'
+        elif sessions['new_york']:
+            session = 'us'
+        elif sessions['london']:
+            session = 'europe'
+        elif sessions['tokyo'] or sessions['sydney']:
+            session = 'asia'
+        else:
+            session = 'off_hours'
+
+        return {
+            'session': session,
+            'utc_hour': utc_hour,
+            'active_sessions': active_sessions,
+            'overlaps': overlaps,
+            'liquidity': liquidity,
+            'session_count': len(active_sessions),
+        }
+
+    @staticmethod
     def _confidence_from_output(
         *,
         score: float,
@@ -4591,15 +4637,15 @@ class MarketContextAnalystAgent:
         if mixed_context or regime in {'volatile', 'unstable'}:
             confidence = min(confidence, 0.40)
 
-        return round(confidence, 3)
-
         # If momentum and volatility are neutral, directional conviction is capped
-        # unless we explicitly have a strong trending inheritance from trend.
+        # unless we explicitly have strong trend inheritance in a trending regime.
         if momentum_bias == 'neutral' and volatility_context == 'neutral':
             if trend_bias == signal and regime == 'trending' and magnitude >= 0.22:
-                return 'medium'
-            return 'low'
-        return confidence
+                confidence = min(confidence, 0.50)
+            else:
+                confidence = min(confidence, 0.30)
+
+        return round(confidence, 3)
 
     @staticmethod
     def _reason_from_output(
@@ -4895,17 +4941,13 @@ class MarketContextAnalystAgent:
         tool_invocations['market_regime_context'] = regime_tool
 
         utc_hour = int(time.gmtime().tm_hour)
-        session_label = 'asia'
-        if 7 <= utc_hour < 15:
-            session_label = 'europe'
-        elif 13 <= utc_hour < 22:
-            session_label = 'us'
+        session_context = self._resolve_session_context(utc_hour)
+        session_label = str(session_context.get('session') or 'off_hours')
         session_tool = _run_agent_tool(
             tool_id='session_context',
             enabled_tools=enabled_tools,
             executor=lambda: {
-                'session': session_label,
-                'utc_hour': utc_hour,
+                **session_context,
                 'timeframe': ctx.timeframe,
             },
         )
@@ -4917,7 +4959,9 @@ class MarketContextAnalystAgent:
             executor=lambda: {
                 'pair': ctx.pair,
                 'asset_class': instrument_aware_asset_class(ctx.pair),
-                'note': 'Context correlation is heuristic and instrument-aware.',
+                'available': False,
+                'reason': 'secondary_price_series_unavailable',
+                'note': 'Correlation context skipped because no secondary price series was provided.',
             },
         )
         tool_invocations['correlation_context'] = correlation_tool
@@ -5076,10 +5120,15 @@ class MarketContextAnalystAgent:
             _regime_data = regime_tool.get('data') or {}
             if _regime_data:
                 _ctx_parts.append(f"Regime: {_regime_data.get('regime', '?')} (signal={_regime_data.get('signal', '?')})")
-            _ctx_parts.append(f"Session: {session_label} (UTC {utc_hour}h), timeframe={ctx.timeframe}")
+            _session_data = session_tool.get('data') or {}
+            _session_overlaps = ', '.join(_session_data.get('overlaps', [])) if isinstance(_session_data.get('overlaps'), list) else ''
+            _ctx_parts.append(
+                f"Session: {session_label} (UTC {utc_hour}h, liquidity={_session_data.get('liquidity', '?')}, "
+                f"overlaps={_session_overlaps or 'none'}), timeframe={ctx.timeframe}"
+            )
             _corr_data = correlation_tool.get('data') or {}
-            if _corr_data.get('asset_class'):
-                _ctx_parts.append(f"Asset class: {_corr_data['asset_class']}")
+            if _corr_data.get('available') is False:
+                _ctx_parts.append(f"Correlation context unavailable: {_corr_data.get('reason', 'unknown_reason')}")
             _vol_data = volatility_tool.get('data') or {}
             if _vol_data:
                 _ctx_parts.append(f"Volatility: atr_ratio={_vol_data.get('atr_ratio', '?')}, context={_vol_data.get('volatility_context', '?')}")
@@ -5094,14 +5143,15 @@ class MarketContextAnalystAgent:
                     'reason': output.get('reason'),
                 },
                 'session_context': lambda _args: {
-                    'session': session_label,
-                    'utc_hour': utc_hour,
+                    **session_context,
                     'timeframe': ctx.timeframe,
                 },
                 'correlation_context': lambda _args: {
                     'pair': ctx.pair,
                     'asset_class': instrument_aware_asset_class(ctx.pair),
-                    'note': 'Context correlation is heuristic and instrument-aware.',
+                    'available': False,
+                    'reason': 'secondary_price_series_unavailable',
+                    'note': 'Correlation context skipped because no secondary price series was provided.',
                 },
                 'volatility_context': lambda _args: {
                     'atr_ratio': atr_ratio,
@@ -5659,7 +5709,9 @@ class TraderAgent:
         directional_sources: dict[str, list[str]] = {'bullish': [], 'bearish': []}
         independent_sources: dict[str, list[str]] = {'bullish': [], 'bearish': []}
         independent_strength: dict[str, float] = {'bullish': 0.0, 'bearish': 0.0}
-        independent_agent_names = {'news-analyst', 'market-context-analyst'}
+        # Market context is derived from the same market snapshot as technical analysis.
+        # It remains a governance input, but should not count as an independent directional source.
+        independent_agent_names = {'news-analyst'}
 
         for name, output in agent_outputs.items():
             if not isinstance(output, dict):

@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -254,6 +256,70 @@ def test_market_context_live_mode_keeps_soft_llm_fallback_non_degraded(monkeypat
     assert out['llm_fallback_used'] is True
     assert out['degraded'] is False
     assert out['confidence_method'] == 'magnitude_regime_weighted'
+
+
+def test_confidence_helper_caps_directional_bias_without_active_context_support() -> None:
+    confidence = MarketContextAnalystAgent._confidence_from_output(
+        score=0.24,
+        signal='bullish',
+        regime='trending',
+        mixed_context=False,
+        trend_bias='bullish',
+        momentum_bias='neutral',
+        volatility_context='neutral',
+    )
+
+    assert confidence == 0.5
+
+
+def test_market_context_session_tool_reports_london_new_york_overlap(monkeypatch) -> None:
+    monkeypatch.setattr(
+        'app.services.orchestrator.agents.time.gmtime',
+        lambda: SimpleNamespace(tm_hour=13),
+    )
+
+    agent = MarketContextAnalystAgent()
+    out = agent.run(
+        _ctx(
+            {
+                'last_price': 1.1,
+                'atr': 0.001,
+                'trend': 'bullish',
+                'change_pct': 0.12,
+                'rsi': 55,
+                'macd_diff': 0.05,
+                'ema_fast': 1.101,
+                'ema_slow': 1.099,
+            }
+        )
+    )
+
+    session_data = out['tooling']['invocations']['session_context']['data']
+    assert session_data['session'] == 'london_newyork_overlap'
+    assert session_data['liquidity'] == 'high'
+    assert 'london_newyork' in session_data['overlaps']
+
+
+def test_market_context_correlation_tool_is_explicitly_limited_without_secondary_series() -> None:
+    agent = MarketContextAnalystAgent()
+    out = agent.run(
+        _ctx(
+            {
+                'last_price': 1.1,
+                'atr': 0.001,
+                'trend': 'bullish',
+                'change_pct': 0.12,
+                'rsi': 55,
+                'macd_diff': 0.05,
+                'ema_fast': 1.101,
+                'ema_slow': 1.099,
+            }
+        )
+    )
+
+    correlation_data = out['tooling']['invocations']['correlation_context']['data']
+    assert correlation_data['available'] is False
+    assert correlation_data['reason'] == 'secondary_price_series_unavailable'
 
 
 def test_permissive_mode_can_still_trade_after_context_patch() -> None:
