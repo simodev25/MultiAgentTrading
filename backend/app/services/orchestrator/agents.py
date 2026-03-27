@@ -344,9 +344,14 @@ def _compact_outputs_for_debate(agent_outputs: dict[str, dict[str, Any]]) -> dic
         item: dict[str, Any] = {}
         for key in (
             'signal',
+            'actionable_signal',
             'score',
             'reason',
             'summary',
+            'setup_state',
+            'structural_bias',
+            'local_momentum',
+            'tradability',
             'llm_summary',
             'llm_fallback_used',
             'llm_retry_used',
@@ -1869,10 +1874,19 @@ class TechnicalAnalystAgent:
         return round(_clamp(0.05 + curved * 0.78, 0.0, 0.90), 3)
 
     @staticmethod
-    def _signal_threshold_reason(*, score: float, signal: str, market_bias: str, setup_quality: str) -> str:
+    def _signal_threshold_reason(
+        *,
+        score: float,
+        signal: str,
+        market_bias: str,
+        setup_quality: str,
+        setup_state: str | None = None,
+    ) -> str:
         magnitude = abs(float(score))
         if signal in {'bullish', 'bearish'}:
             return 'directional_score_above_threshold'
+        if str(setup_state or '').strip().lower() == 'conditional':
+            return 'directional_bias_waiting_timing_confirmation'
         if market_bias in {'bullish', 'bearish'} and setup_quality == 'low' and magnitude < 0.30:
             return 'low_quality_bias_below_activation_threshold'
         if magnitude < 0.15:
@@ -1880,20 +1894,45 @@ class TechnicalAnalystAgent:
         return 'insufficient_directional_confirmation'
 
     @staticmethod
-    def _business_summary(*, signal: str, setup_quality: str, market_bias: str) -> str:
-        if signal == 'neutral':
-            if market_bias in {'bullish', 'bearish'}:
+    def _business_summary(
+        *,
+        signal: str,
+        setup_quality: str,
+        market_bias: str,
+        structural_bias: str | None = None,
+        local_momentum: str | None = None,
+        setup_state: str | None = None,
+    ) -> str:
+        structural = str(structural_bias or market_bias or 'neutral').strip().lower()
+        local = str(local_momentum or 'neutral').strip().lower()
+        state = str(setup_state or '').strip().lower()
+        actionable = str(signal or 'neutral').strip().lower()
+        if actionable == 'neutral':
+            if state == 'conditional' and structural in {'bullish', 'bearish'}:
                 return (
-                    f'neutral\nsetup_quality={setup_quality}\n'
-                    f'Contexte technique non-actionnable (biais brut {market_bias}).'
+                    'neutral\n'
+                    f'setup_quality={setup_quality}\n'
+                    f'setup_state=conditional\n'
+                    f'Biais structurel {structural} mais timing local non confirmé (momentum {local}).'
+                )
+            if structural in {'bullish', 'bearish'}:
+                return (
+                    'neutral\n'
+                    f'setup_quality={setup_quality}\n'
+                    f'setup_state={state or "non_actionable"}\n'
+                    f'Contexte non-actionnable malgré un biais structurel {structural}.'
                 )
             return (
-                f'neutral\nsetup_quality={setup_quality}\n'
-                'Contexte technique non-actionnable (pas de biais directionnel exploitable).'
+                'neutral\n'
+                f'setup_quality={setup_quality}\n'
+                f'setup_state={state or "non_actionable"}\n'
+                'Pas de biais directionnel exploitable.'
             )
         return (
-            f'{signal}\nsetup_quality={setup_quality}\n'
-            f'Biais technique {signal} confirmé par les indicateurs principaux.'
+            f'{actionable}\n'
+            f'setup_quality={setup_quality}\n'
+            f'setup_state={state or "actionable"}\n'
+            f'Signal exploitable aligné avec structure {structural} et momentum {local}.'
         )
 
     @classmethod
@@ -1911,6 +1950,118 @@ class TechnicalAnalystAgent:
         if normalized == 'medium':
             return 'low'
         return 'low'
+
+    @staticmethod
+    def _score_to_bias(score: float, *, threshold: float = 0.06) -> str:
+        value = float(score)
+        if value > threshold:
+            return 'bullish'
+        if value < -threshold:
+            return 'bearish'
+        return 'neutral'
+
+    @staticmethod
+    def _pattern_recency_weight(pattern: dict[str, Any], *, latest_bar_index: int) -> float:
+        bar_index = pattern.get('bar_index')
+        if not isinstance(bar_index, (int, float)):
+            return 0.65
+        age = max(int(latest_bar_index) - int(bar_index), 0)
+        if age <= 2:
+            return 1.0
+        if age <= 6:
+            return 0.82
+        if age <= 15:
+            return 0.58
+        return 0.34
+
+    @staticmethod
+    def _divergence_recency_weight(divergence: dict[str, Any]) -> float:
+        bars_apart = divergence.get('bars_apart')
+        if not isinstance(bars_apart, (int, float)):
+            return 0.70
+        gap = max(int(bars_apart), 0)
+        if gap <= 3:
+            return 1.0
+        if gap <= 7:
+            return 0.82
+        if gap <= 14:
+            return 0.62
+        return 0.42
+
+    @staticmethod
+    def _append_contradiction(
+        contradictions: list[dict[str, str]],
+        *,
+        contradiction_type: str,
+        severity: str,
+        details: str,
+    ) -> None:
+        normalized_type = str(contradiction_type or '').strip().lower()
+        normalized_severity = str(severity or '').strip().lower()
+        if normalized_type not in {
+            'trend_vs_momentum',
+            'trend_vs_divergence',
+            'pattern_conflict',
+            'mtf_conflict',
+            'other',
+        }:
+            normalized_type = 'other'
+        if normalized_severity not in {'minor', 'moderate', 'major'}:
+            normalized_severity = 'minor'
+        item = {
+            'type': normalized_type,
+            'severity': normalized_severity,
+            'details': _compact_prompt_text(details, max_chars=220),
+        }
+        # Keep one record per contradiction type and preserve the strongest severity.
+        severity_rank = {'minor': 1, 'moderate': 2, 'major': 3}
+        for existing in contradictions:
+            if str(existing.get('type') or '').strip().lower() == normalized_type:
+                if severity_rank.get(normalized_severity, 1) > severity_rank.get(str(existing.get('severity') or 'minor'), 1):
+                    existing['severity'] = normalized_severity
+                    existing['details'] = item['details']
+                return
+        contradictions.append(item)
+
+    @staticmethod
+    def _contradiction_penalty(contradictions: list[dict[str, str]]) -> float:
+        severity_penalty = {'minor': 0.03, 'moderate': 0.08, 'major': 0.14}
+        penalty = 0.0
+        for item in contradictions:
+            level = str(item.get('severity') or '').strip().lower()
+            penalty += severity_penalty.get(level, 0.0)
+        return round(_clamp(penalty, 0.0, 0.30), 3)
+
+    @classmethod
+    def _derive_setup_state(
+        cls,
+        *,
+        actionable_signal: str,
+        structural_bias: str,
+        local_momentum: str,
+        setup_quality: str,
+        tradability: float,
+        contradictions: list[dict[str, str]],
+        final_score: float,
+    ) -> str:
+        has_major_contradiction = any(
+            str(item.get('severity') or '').strip().lower() == 'major'
+            for item in contradictions
+        )
+        if actionable_signal == 'neutral':
+            if structural_bias in {'bullish', 'bearish'} and (
+                local_momentum in {'neutral', 'mixed'}
+                or has_major_contradiction
+                or abs(float(final_score)) >= 0.10
+            ):
+                return 'conditional'
+            return 'non_actionable'
+
+        if tradability >= 0.80 and setup_quality == 'high' and not has_major_contradiction:
+            return 'high_conviction'
+        if tradability >= 0.58 and setup_quality in {'medium', 'high'}:
+            return 'actionable'
+        return 'weak_actionable'
 
     @staticmethod
     def _format_prompt_value(value: Any, *, decimals: int = 6) -> str:
@@ -2105,6 +2256,7 @@ class TechnicalAnalystAgent:
                 '- Si MACD diff est de signe opposé au trend dominant, traiter cela comme un conflit de momentum.',
                 '- Si des patterns récents portent des signaux opposés, les traiter comme mixed patterns, pas comme confirmation forte.',
                 '- En cas de conflit entre divergence et tendance dominante, réduire la conviction.',
+                '- Pondérer patterns et divergences par récence: un signal ancien pèse moins qu un signal récent.',
                 '- Une structure multi-timeframe dominante soutient un biais, mais ne suffit pas seule à qualifier un setup medium/high.',
                 '- En cas de conflit cumulé (trend vs MACD diff + RSI neutre + patterns mixtes), setup_quality ne peut pas dépasser low.',
                 '- En absence de convergence claire entre trend, RSI et MACD diff, privilégier neutral.',
@@ -2147,6 +2299,10 @@ class TechnicalAnalystAgent:
 
         if m.get('degraded'):
             return {
+                'structural_bias': 'neutral',
+                'local_momentum': 'neutral',
+                'setup_state': 'non_actionable',
+                'actionable_signal': 'neutral',
                 'signal': 'neutral',
                 'score': 0.0,
                 'raw_score': 0.0,
@@ -2157,8 +2313,30 @@ class TechnicalAnalystAgent:
                 'signal_threshold_reason': 'market_data_unavailable',
                 'market_bias': 'neutral',
                 'setup_quality': 'low',
+                'tradability': 0.0,
+                'score_breakdown': {
+                    'structure_score': 0.0,
+                    'momentum_score': 0.0,
+                    'pattern_score': 0.0,
+                    'divergence_score': 0.0,
+                    'multi_timeframe_score': 0.0,
+                    'level_score': 0.0,
+                    'contradiction_penalty': 0.0,
+                    'recency_adjustment': 0.0,
+                    'final_score': 0.0,
+                },
+                'dominant_factors': [],
+                'contradictions': [],
                 'reason': 'Market data unavailable',
-                'summary': 'neutral\nsetup_quality=low\nContexte technique indisponible: signal non-actionnable.',
+                'summary': 'neutral\nsetup_quality=low\nsetup_state=non_actionable\nContexte technique indisponible: signal non-actionnable.',
+                'execution_comment': 'Pas de setup exploitable immédiat.',
+                'facts_observed': {},
+                'interpretation': {
+                    'structural_bias': 'neutral',
+                    'local_momentum': 'neutral',
+                    'setup_state': 'non_actionable',
+                },
+                'trading_implication': 'Pas de setup exploitable immédiat.',
                 'asset_class': instrument_aware_asset_class(ctx.pair),
                 'degraded': True,
                 'llm_call_attempted': False,
@@ -2209,34 +2387,34 @@ class TechnicalAnalystAgent:
         rsi = _safe_float(indicator_payload.get('rsi', m.get('rsi')), 50.0)
         macd_diff = _safe_float(indicator_payload.get('macd_diff', m.get('macd_diff')), 0.0)
 
-        score = 0.0
-        if trend == 'bullish':
-            score += 0.35
-        elif trend == 'bearish':
-            score -= 0.35
-
-        # Continuous RSI contribution: scaled between -0.25 (overbought) and +0.25 (oversold)
-        # Neutral zone 45-55 contributes near zero
-        rsi_clamped = max(0.0, min(100.0, rsi))
-        rsi_contribution = (50.0 - rsi_clamped) / 50.0 * 0.25
-        score += rsi_contribution
-
-        # Continuous MACD contribution: stronger MACD diff = stronger contribution
         atr = max(_safe_float(m.get('atr'), 0.001), 1e-8)
-        macd_ratio = macd_diff / atr  # normalize by ATR for cross-pair comparability
-        macd_contribution = max(-0.20, min(0.20, macd_ratio * 0.10))
-        score += macd_contribution
-
-        # Change pct contribution (small but differentiating)
         change_pct = _safe_float(m.get('change_pct'), 0.0)
-        change_contribution = max(-0.10, min(0.10, change_pct / 100.0 * 0.5))
-        score += change_contribution
+        ema_fast = _safe_float(indicator_payload.get('ema_fast', m.get('ema_fast')), 0.0)
+        ema_slow = _safe_float(indicator_payload.get('ema_slow', m.get('ema_slow')), 0.0)
 
-        score = round(score, 4)
-        signal = 'bullish' if score > 0.15 else 'bearish' if score < -0.15 else 'neutral'
+        trend_component = 0.0
+        if trend == 'bullish':
+            trend_component = 0.24
+        elif trend == 'bearish':
+            trend_component = -0.24
+
+        ema_component = 0.0
+        if ema_fast > 0.0 and ema_slow > 0.0:
+            if ema_fast > ema_slow:
+                ema_component = 0.11
+            elif ema_fast < ema_slow:
+                ema_component = -0.11
+        structure_score = trend_component + ema_component
+
+        rsi_component = _clamp((rsi - 50.0) / 20.0, -1.0, 1.0) * 0.14
+        macd_ratio = macd_diff / atr
+        macd_component = _clamp(macd_ratio / 1.4, -1.0, 1.0) * 0.18
+        change_component = _clamp(change_pct / 0.30, -1.0, 1.0) * 0.07
+        momentum_score = rsi_component + macd_component + change_component
+
         _sr_fallback = {
             'validation': (
-                f"Conserver un biais {signal} tant que le prix reste dans la direction du trend ({trend})."
+                f"Conserver un biais {trend} tant que le prix reste dans la direction du trend ({trend})."
                 if trend in {'bullish', 'bearish'}
                 else 'Validation conditionnelle: attendre une reprise de momentum.'
             ),
@@ -2295,6 +2473,24 @@ class TechnicalAnalystAgent:
         _mtf_result = dict(multi_timeframe_tool.get('data') or {})
         _divergences = _div_result.get('divergences') if isinstance(_div_result.get('divergences'), list) else []
         _patterns = _pat_result.get('patterns') if isinstance(_pat_result.get('patterns'), list) else []
+        _structure_levels = _structure_result.get('levels')
+        _primary_level = None
+        if isinstance(_structure_levels, list):
+            _primary_level = next((item for item in _structure_levels if isinstance(item, dict)), None)
+        _primary_level_price = (
+            _safe_float(_primary_level.get('price'), 0.0)
+            if isinstance(_primary_level, dict) and _primary_level.get('price') is not None
+            else 0.0
+        )
+        _has_primary_level = _primary_level_price > 0.0
+        _level_label = str((_primary_level or {}).get('type') or 'niveau').strip().lower() if isinstance(_primary_level, dict) else 'niveau'
+        _level_distance_pct = _safe_float((_primary_level or {}).get('distance_pct'), 1.0) if isinstance(_primary_level, dict) else 1.0
+
+        _latest_bar_index = len(_closes) - 1 if _closes else 0
+        for _pat in _patterns:
+            if isinstance(_pat, dict) and isinstance(_pat.get('bar_index'), (int, float)):
+                _latest_bar_index = max(_latest_bar_index, int(_pat.get('bar_index')))
+
         _pattern_bullish_count = sum(
             1
             for pat in _patterns
@@ -2316,27 +2512,37 @@ class TechnicalAnalystAgent:
             and _pattern_neutral_count > 0
         )
 
-        for div in _divergences:
-            if not isinstance(div, dict):
-                continue
-            if div.get('type') == 'bullish':
-                score += 0.06
-            elif div.get('type') == 'bearish':
-                score -= 0.06
-        pattern_delta = 0.0
+        raw_pattern_score = 0.0
+        pattern_score = 0.0
         for pat in _patterns:
             if not isinstance(pat, dict):
                 continue
-            strength = _safe_float(pat.get('strength'), 0.0)
-            if pat.get('signal') == 'bullish':
-                pattern_delta += strength * 0.04
-            elif pat.get('signal') == 'bearish':
-                pattern_delta -= strength * 0.04
+            direction = str(pat.get('signal') or '').strip().lower()
+            if direction not in {'bullish', 'bearish'}:
+                continue
+            strength = _safe_float(pat.get('strength'), 0.35)
+            strength = _clamp(strength, 0.05, 1.0)
+            base = strength * 0.06 if direction == 'bullish' else -strength * 0.06
+            raw_pattern_score += base
+            pattern_score += base * self._pattern_recency_weight(pat, latest_bar_index=_latest_bar_index)
         if _patterns_contradictory:
-            # Conflicting candlestick readings are treated as noisy context, not strong confirmation.
-            pattern_delta *= 0.35
-        score += pattern_delta
-        score = round(max(-1.0, min(1.0, score)), 4)
+            pattern_score *= 0.55
+        pattern_score = round(_clamp(pattern_score, -0.20, 0.20), 4)
+        pattern_recency_adjustment = pattern_score - raw_pattern_score
+
+        raw_divergence_score = 0.0
+        divergence_score = 0.0
+        for div in _divergences:
+            if not isinstance(div, dict):
+                continue
+            direction = str(div.get('type') or '').strip().lower()
+            if direction not in {'bullish', 'bearish'}:
+                continue
+            base = 0.08 if direction == 'bullish' else -0.08
+            raw_divergence_score += base
+            divergence_score += base * self._divergence_recency_weight(div)
+        divergence_score = round(_clamp(divergence_score, -0.18, 0.18), 4)
+        divergence_recency_adjustment = divergence_score - raw_divergence_score
 
         _trend_directional = trend in {'bullish', 'bearish'}
         _macd_aligned = (trend == 'bullish' and macd_diff > 0) or (trend == 'bearish' and macd_diff < 0)
@@ -2367,50 +2573,227 @@ class TechnicalAnalystAgent:
             and _mtf_alignment >= 0.66
         )
 
-        # --- market_bias vs trade_signal separation ---
-        market_bias = 'bullish' if score > 0.05 else 'bearish' if score < -0.05 else 'neutral'
+        multi_timeframe_score = 0.0
+        if _mtf_dominant in {'bullish', 'bearish'}:
+            _mtf_sign = 1.0 if _mtf_dominant == 'bullish' else -1.0
+            multi_timeframe_score = _mtf_sign * _clamp(_mtf_alignment, 0.0, 1.0) * 0.16
+        multi_timeframe_score = round(_clamp(multi_timeframe_score, -0.16, 0.16), 4)
 
-        # Setup quality: how many indicators converge clearly
-        _quality_factors = 0
-        if rsi > 60 or rsi < 40:
-            _quality_factors += 1
-        if _macd_aligned:
-            _quality_factors += 1
-        if abs(score) >= 0.35:
-            _quality_factors += 1
+        level_score = 0.0
+        if _has_primary_level and trend in {'bullish', 'bearish'}:
+            _near_factor = _clamp(1.0 - (_level_distance_pct / 1.0), 0.15, 1.0)
+            _level_type = str((_primary_level or {}).get('type') or '').strip().lower()
+            if trend == 'bullish':
+                if _level_type == 'support':
+                    level_score += 0.06 * _near_factor
+                elif _level_type == 'resistance':
+                    level_score -= 0.06 * _near_factor
+            elif trend == 'bearish':
+                if _level_type == 'resistance':
+                    level_score += 0.06 * _near_factor
+                elif _level_type == 'support':
+                    level_score -= 0.06 * _near_factor
+        level_score = round(_clamp(level_score, -0.08, 0.08), 4)
 
-        if _quality_factors >= 3:
+        structural_raw_score = structure_score + (multi_timeframe_score * 0.70) + (level_score * 0.55)
+        structural_bias = self._score_to_bias(structural_raw_score, threshold=0.06)
+
+        momentum_bias = self._score_to_bias(momentum_score, threshold=0.06)
+        rsi_bias = 'bullish' if rsi >= 55.0 else 'bearish' if rsi <= 45.0 else 'neutral'
+        macd_bias = self._score_to_bias(macd_component, threshold=0.04)
+        local_momentum = momentum_bias
+        if (
+            (rsi_bias in {'bullish', 'bearish'} and macd_bias in {'bullish', 'bearish'} and rsi_bias != macd_bias)
+            or (_trend_directional and _macd_conflict and _rsi_neutral)
+            or (_trend_directional and momentum_bias in {'bullish', 'bearish'} and momentum_bias != trend and abs(momentum_score) >= 0.06)
+        ):
+            local_momentum = 'mixed'
+
+        contradictions: list[dict[str, str]] = []
+        if structural_bias in {'bullish', 'bearish'}:
+            if local_momentum == 'mixed':
+                self._append_contradiction(
+                    contradictions,
+                    contradiction_type='trend_vs_momentum',
+                    severity='moderate',
+                    details='Le momentum local est mixte et ne confirme pas le biais structurel.',
+                )
+            elif local_momentum in {'bullish', 'bearish'} and local_momentum != structural_bias:
+                self._append_contradiction(
+                    contradictions,
+                    contradiction_type='trend_vs_momentum',
+                    severity='major' if abs(momentum_score) >= 0.14 else 'moderate',
+                    details='Le momentum local directionnel est opposé au biais structurel.',
+                )
+
+        divergence_bias = self._score_to_bias(divergence_score, threshold=0.04)
+        if (
+            structural_bias in {'bullish', 'bearish'}
+            and divergence_bias in {'bullish', 'bearish'}
+            and divergence_bias != structural_bias
+        ):
+            self._append_contradiction(
+                contradictions,
+                contradiction_type='trend_vs_divergence',
+                severity='major' if abs(divergence_score) >= 0.10 else 'moderate',
+                details='La divergence dominante s oppose à la structure.',
+            )
+
+        if _patterns_contradictory:
+            self._append_contradiction(
+                contradictions,
+                contradiction_type='pattern_conflict',
+                severity='moderate' if abs(pattern_score) >= 0.08 else 'minor',
+                details='Patterns récents contradictoires (mixed patterns).',
+            )
+
+        if (
+            _mtf_dominant in {'bullish', 'bearish'}
+            and structural_bias in {'bullish', 'bearish'}
+            and _mtf_dominant != structural_bias
+            and _mtf_alignment >= 0.55
+        ):
+            self._append_contradiction(
+                contradictions,
+                contradiction_type='mtf_conflict',
+                severity='major' if _mtf_alignment >= 0.80 else 'moderate',
+                details='Contexte multi-timeframe contraire au biais structurel.',
+            )
+
+        if structural_bias in {'bullish', 'bearish'} and level_score != 0.0:
+            if (structural_bias == 'bullish' and level_score < -0.04) or (structural_bias == 'bearish' and level_score > 0.04):
+                self._append_contradiction(
+                    contradictions,
+                    contradiction_type='other',
+                    severity='minor',
+                    details='Le niveau technique proche limite la tradabilité immédiate.',
+                )
+
+        contradiction_penalty = self._contradiction_penalty(contradictions)
+        pre_contradiction_score = (
+            structure_score
+            + momentum_score
+            + pattern_score
+            + divergence_score
+            + multi_timeframe_score
+            + level_score
+        )
+        if pre_contradiction_score > 0.0:
+            final_score = pre_contradiction_score - contradiction_penalty
+        elif pre_contradiction_score < 0.0:
+            final_score = pre_contradiction_score + contradiction_penalty
+        else:
+            final_score = 0.0
+        final_score = round(_clamp(final_score, -1.0, 1.0), 4)
+
+        recency_adjustment = round(pattern_recency_adjustment + divergence_recency_adjustment, 4)
+        score_breakdown = {
+            'structure_score': round(structure_score, 4),
+            'momentum_score': round(momentum_score, 4),
+            'pattern_score': round(pattern_score, 4),
+            'divergence_score': round(divergence_score, 4),
+            'multi_timeframe_score': round(multi_timeframe_score, 4),
+            'level_score': round(level_score, 4),
+            'contradiction_penalty': round(contradiction_penalty, 4),
+            'recency_adjustment': recency_adjustment,
+            'final_score': round(final_score, 4),
+        }
+
+        has_major_contradiction = any(
+            str(item.get('severity') or '').strip().lower() == 'major'
+            for item in contradictions
+        )
+        quality_score = abs(final_score)
+        if structural_bias in {'bullish', 'bearish'} and local_momentum == structural_bias:
+            quality_score += 0.12
+        if local_momentum == 'mixed':
+            quality_score -= 0.10
+        quality_score -= contradiction_penalty * 0.65
+        if quality_score >= 0.62 and not has_major_contradiction:
             setup_quality = 'high'
-        elif _quality_factors >= 2:
+        elif quality_score >= 0.34 and contradiction_penalty <= 0.20:
             setup_quality = 'medium'
         else:
             setup_quality = 'low'
 
-        if _divergence_conflict:
-            setup_quality = self._downgrade_setup_quality(setup_quality)
-        if _patterns_contradictory:
-            setup_quality = self._downgrade_setup_quality(setup_quality)
-        if _momentum_conflict:
-            setup_quality = 'low'
-        if _momentum_conflict and _patterns_contradictory:
-            setup_quality = 'low'
-        if _indicator_convergence <= 1:
-            setup_quality = 'low'
-
-        # trade_signal: when setup is low-quality and edge is weak, force neutral
-        if setup_quality == 'low' and abs(score) < 0.30:
-            signal = 'neutral'
-        else:
-            signal = 'bullish' if score > 0.15 else 'bearish' if score < -0.15 else 'neutral'
-        if _momentum_conflict and _patterns_contradictory and abs(score) < 0.45:
-            signal = 'neutral'
+        actionable_signal = self._score_to_bias(final_score, threshold=0.15)
+        if setup_quality == 'low' and abs(final_score) < 0.30:
+            actionable_signal = 'neutral'
+        if local_momentum == 'mixed' and abs(final_score) < 0.40:
+            actionable_signal = 'neutral'
+        if has_major_contradiction and abs(final_score) < 0.55:
+            actionable_signal = 'neutral'
+        if (
+            structural_bias in {'bullish', 'bearish'}
+            and actionable_signal in {'bullish', 'bearish'}
+            and actionable_signal != structural_bias
+            and abs(final_score) < 0.45
+        ):
+            actionable_signal = 'neutral'
         if (
             _mtf_strong_confirmation
-            and signal in {'bullish', 'bearish'}
-            and signal != _mtf_dominant
-            and abs(score) < 0.45
+            and actionable_signal in {'bullish', 'bearish'}
+            and actionable_signal != _mtf_dominant
+            and abs(final_score) < 0.45
         ):
-            signal = 'neutral'
+            actionable_signal = 'neutral'
+
+        tradability = abs(final_score) * 1.05
+        if actionable_signal in {'bullish', 'bearish'} and actionable_signal == structural_bias:
+            tradability += 0.10
+        if setup_quality == 'low':
+            tradability -= 0.12
+        if local_momentum == 'mixed':
+            tradability -= 0.18
+        if has_major_contradiction:
+            tradability -= 0.15
+        if actionable_signal == 'neutral':
+            tradability = min(tradability, 0.55)
+        tradability = round(_clamp(tradability, 0.0, 1.0), 3)
+
+        setup_state = self._derive_setup_state(
+            actionable_signal=actionable_signal,
+            structural_bias=structural_bias,
+            local_momentum=local_momentum,
+            setup_quality=setup_quality,
+            tradability=tradability,
+            contradictions=contradictions,
+            final_score=final_score,
+        )
+        market_bias = structural_bias if structural_bias in {'bullish', 'bearish'} else self._score_to_bias(final_score, threshold=0.05)
+        score = final_score
+        signal = actionable_signal
+        component_factors = [
+            ('structure', structure_score),
+            ('momentum', momentum_score),
+            ('pattern', pattern_score),
+            ('divergence', divergence_score),
+            ('multi_timeframe', multi_timeframe_score),
+            ('level', level_score),
+        ]
+        dominant_factors = [
+            f'{name}:{round(value, 3)}'
+            for name, value in sorted(component_factors, key=lambda item: abs(item[1]), reverse=True)
+            if abs(value) >= 0.02
+        ][:4]
+        for contradiction in contradictions[:2]:
+            dominant_factors.append(
+                f"contradiction:{contradiction.get('type')}({contradiction.get('severity')})"
+            )
+        dominant_factors = dominant_factors[:5]
+
+        if setup_state == 'high_conviction':
+            execution_comment = 'Convergence élevée: setup exécutable avec discipline de risque standard.'
+        elif setup_state == 'actionable':
+            execution_comment = 'Setup exploitable mais surveiller les contradictions mineures avant exécution.'
+        elif setup_state == 'weak_actionable':
+            execution_comment = 'Edge directionnel faible: privilégier taille réduite et validation stricte.'
+        elif setup_state == 'conditional':
+            execution_comment = (
+                f'Biais structurel {structural_bias} présent, attendre confirmation momentum locale avant exécution.'
+            )
+        else:
+            execution_comment = 'Pas de setup exploitable immédiat.'
 
         m_effective = {
             **m,
@@ -2439,7 +2822,7 @@ class TechnicalAnalystAgent:
         _has_primary_level = _primary_level_price > 0.0
         _level_label = str((_primary_level or {}).get('type') or 'niveau').strip().lower() if isinstance(_primary_level, dict) else 'niveau'
 
-        if trend == 'bullish':
+        if structural_bias == 'bullish':
             validation_condition = 'Maintenir bullish si MACD diff reste >= 0 et RSI reste >= 45.'
             invalidation_condition = (
                 f'Invalider si clôture repasse sous {_level_label} {self._format_prompt_value(_primary_level_price, decimals=6)} '
@@ -2447,7 +2830,7 @@ class TechnicalAnalystAgent:
                 if _has_primary_level
                 else 'Invalider si MACD diff passe durablement sous 0 et RSI rechute sous 45.'
             )
-        elif trend == 'bearish':
+        elif structural_bias == 'bearish':
             validation_condition = 'Maintenir bearish si MACD diff reste <= 0 et RSI reste <= 55.'
             invalidation_condition = (
                 f'Invalider si clôture repasse au-dessus de {_level_label} {self._format_prompt_value(_primary_level_price, decimals=6)} '
@@ -2456,7 +2839,11 @@ class TechnicalAnalystAgent:
                 else 'Invalider si MACD diff passe durablement au-dessus de 0 et RSI repasse au-dessus de 55.'
             )
         else:
-            validation_condition = 'Valider un biais seulement si trend et MACD diff convergent avec RSI hors zone 45-55.'
+            validation_condition = (
+                'Valider un biais seulement si structure et momentum convergent clairement.'
+                if setup_state == 'conditional'
+                else 'Valider un biais seulement si trend et MACD diff convergent avec RSI hors zone 45-55.'
+            )
             invalidation_condition = (
                 f'Invalider toute thèse directionnelle tant que le prix reste autour de {_level_label} {self._format_prompt_value(_primary_level_price, decimals=6)}.'
                 if _has_primary_level
@@ -2496,13 +2883,28 @@ class TechnicalAnalystAgent:
         llm_enabled = self.model_selector.is_enabled(db, self.name)
         deterministic_score = round(score, 3)
         deterministic_confidence = self._compute_confidence(score, setup_quality)
+        if setup_state == 'conditional':
+            deterministic_confidence = min(deterministic_confidence, 0.55)
+        elif setup_state == 'non_actionable':
+            deterministic_confidence = min(deterministic_confidence, 0.35)
+        elif setup_state == 'high_conviction':
+            deterministic_confidence = max(deterministic_confidence, 0.68)
+        elif setup_state == 'weak_actionable':
+            deterministic_confidence = min(deterministic_confidence, 0.65)
+        deterministic_confidence = round(_clamp(deterministic_confidence, 0.0, 0.95), 3)
         signal_threshold_reason = self._signal_threshold_reason(
             score=deterministic_score,
             signal=signal,
             market_bias=market_bias,
             setup_quality=setup_quality,
+            setup_state=setup_state,
         )
         output: dict[str, Any] = {
+            # Enriched contract
+            'structural_bias': structural_bias,
+            'local_momentum': local_momentum,
+            'setup_state': setup_state,
+            'actionable_signal': signal,
             'signal': signal,
             'score': deterministic_score,
             'raw_score': deterministic_score,
@@ -2511,18 +2913,39 @@ class TechnicalAnalystAgent:
             'final_confidence': deterministic_confidence,
             'confidence_method': 'deterministic_quality_weighted',
             'signal_threshold_reason': signal_threshold_reason,
+            'tradability': tradability,
+            'score_breakdown': dict(score_breakdown),
+            'dominant_factors': list(dominant_factors),
+            'contradictions': list(contradictions),
             'summary': self._business_summary(
                 signal=signal,
                 setup_quality=setup_quality,
                 market_bias=market_bias,
+                structural_bias=structural_bias,
+                local_momentum=local_momentum,
+                setup_state=setup_state,
             ),
             'reason': (
                 'Directional setup passes technical activation thresholds.'
                 if signal in {'bullish', 'bearish'}
-                else 'Directional bias remains below technical activation thresholds; non-actionable setup.'
+                else 'Directional bias remains below technical activation thresholds; non-actionable/conditional setup.'
             ),
             'market_bias': market_bias,
             'setup_quality': setup_quality,
+            'execution_comment': execution_comment,
+            'facts_observed': {
+                'trend': trend,
+                'rsi': round(rsi, 3),
+                'macd_diff': round(macd_diff, 6),
+                'change_pct': round(change_pct, 4),
+                'atr': round(atr, 6),
+            },
+            'interpretation': {
+                'structural_bias': structural_bias,
+                'local_momentum': local_momentum,
+                'setup_state': setup_state,
+            },
+            'trading_implication': execution_comment,
             'asset_class': instrument_aware_asset_class(ctx.pair),
             'indicators': m_effective,
             'degraded': False,
@@ -2545,6 +2968,14 @@ class TechnicalAnalystAgent:
                 'thresholds': {
                     'signal_threshold': 0.15,
                     'low_quality_activation_threshold': 0.30,
+                },
+                'technical_pipeline': {
+                    'structural_bias': structural_bias,
+                    'local_momentum': local_momentum,
+                    'setup_state': setup_state,
+                    'actionable_signal': signal,
+                    'contradictions': contradictions,
+                    'score_breakdown': score_breakdown,
                 },
             },
             'tooling': {
@@ -2576,20 +3007,71 @@ class TechnicalAnalystAgent:
             )
             output['score'] = adjusted_score
             output['signal'] = adjusted_signal
+            output['actionable_signal'] = adjusted_signal
             output['final_signal'] = adjusted_signal
-            output['confidence'] = self._compute_confidence(adjusted_score, setup_quality)
+            adjusted_tradability = abs(float(adjusted_score)) * 1.05
+            if adjusted_signal in {'bullish', 'bearish'} and adjusted_signal == structural_bias:
+                adjusted_tradability += 0.10
+            if setup_quality == 'low':
+                adjusted_tradability -= 0.12
+            if local_momentum == 'mixed':
+                adjusted_tradability -= 0.18
+            if has_major_contradiction:
+                adjusted_tradability -= 0.15
+            if adjusted_signal == 'neutral':
+                adjusted_tradability = min(adjusted_tradability, 0.55)
+            adjusted_tradability = round(_clamp(adjusted_tradability, 0.0, 1.0), 3)
+            adjusted_setup_state = self._derive_setup_state(
+                actionable_signal=adjusted_signal,
+                structural_bias=structural_bias,
+                local_momentum=local_momentum,
+                setup_quality=setup_quality,
+                tradability=adjusted_tradability,
+                contradictions=contradictions,
+                final_score=adjusted_score,
+            )
+            adjusted_confidence = self._compute_confidence(adjusted_score, setup_quality)
+            if adjusted_setup_state == 'conditional':
+                adjusted_confidence = min(adjusted_confidence, 0.55)
+            elif adjusted_setup_state == 'non_actionable':
+                adjusted_confidence = min(adjusted_confidence, 0.35)
+            elif adjusted_setup_state == 'high_conviction':
+                adjusted_confidence = max(adjusted_confidence, 0.68)
+            elif adjusted_setup_state == 'weak_actionable':
+                adjusted_confidence = min(adjusted_confidence, 0.65)
+            adjusted_confidence = round(_clamp(adjusted_confidence, 0.0, 0.95), 3)
+            output['tradability'] = adjusted_tradability
+            output['setup_state'] = adjusted_setup_state
+            output['confidence'] = adjusted_confidence
             output['final_confidence'] = output['confidence']
             output['signal_threshold_reason'] = self._signal_threshold_reason(
                 score=adjusted_score,
                 signal=adjusted_signal,
                 market_bias=market_bias,
                 setup_quality=setup_quality,
+                setup_state=adjusted_setup_state,
             )
             output['summary'] = self._business_summary(
                 signal=adjusted_signal,
                 setup_quality=setup_quality,
                 market_bias=market_bias,
+                structural_bias=structural_bias,
+                local_momentum=local_momentum,
+                setup_state=adjusted_setup_state,
             )
+            output['score_breakdown']['final_score'] = round(adjusted_score, 4)
+            output['execution_comment'] = (
+                execution_comment
+                if adjusted_setup_state == setup_state
+                else (
+                    f'Biais structurel {structural_bias} présent, attendre confirmation momentum locale avant exécution.'
+                    if adjusted_setup_state == 'conditional'
+                    else 'Pas de setup exploitable immédiat.'
+                )
+            )
+            output['trading_implication'] = output['execution_comment']
+            if isinstance(output.get('interpretation'), dict):
+                output['interpretation']['setup_state'] = adjusted_setup_state
             if changed:
                 output['reason'] = 'Skill guardrails applied (deterministic mode)'
             return output
@@ -2597,12 +3079,13 @@ class TechnicalAnalystAgent:
         fallback_system = (
             'Tu es un analyste technique multi-actifs discipliné. '
             'Tu sépares faits, inférences et incertitudes. '
-            'Tu raisonnes en conditions de validation/invalidation. '
+            'Tu imposes la hiérarchie: structure de fond, momentum local, niveaux, patterns/divergences, puis tradabilité. '
             'N invente jamais niveaux, patterns, volume, corrélations ou news absents. '
             'Si 45 <= RSI <= 55 et que MACD diff contredit le trend, setup_quality ne peut pas dépasser low. '
             'Si les patterns récents sont contradictoires, traite-les comme mixed patterns et réduis fortement la conviction. '
+            'Pondère patterns/divergences par récence et explicite toute contradiction avec type + gravité. '
             'Une dominance multi-timeframe seule ne suffit pas à produire medium/high sans confirmation momentum locale. '
-            'Sans convergence claire trend/RSI/MACD, privilégie neutral.'
+            'Si biais structurel sans timing confirmé, retourne setup_state=conditional et actionable_signal=neutral.'
         )
         fallback_user = (
             'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\n\n'
@@ -2610,12 +3093,20 @@ class TechnicalAnalystAgent:
             'Résultats tools pré-exécutés:\n{tool_results_block}\n\n'
             'Règles d interprétation:\n{interpretation_rules_block}\n\n'
             'Contrat de sortie strict:\n'
-            '- Ligne 1: bearish | bullish | neutral\n'
-            '- Ligne 2: setup_quality=high|medium|low\n'
-            '- Ligne 3: validation=<condition principale basée uniquement sur les faits fournis>\n'
-            '- Ligne 4: invalidation=<condition principale basée uniquement sur les faits fournis>\n'
-            '- Ligne 5: evidence_used=<liste courte des tools/champs réellement utilisés>\n'
-            '- Ligne 6 optionnelle (1 phrase max): justification factuelle uniquement\n'
+            '- Ligne 1: structural_bias=bearish|bullish|neutral\n'
+            '- Ligne 2: local_momentum=bearish|bullish|neutral|mixed\n'
+            '- Ligne 3: setup_state=non_actionable|conditional|weak_actionable|actionable|high_conviction\n'
+            '- Ligne 4: actionable_signal=bearish|bullish|neutral\n'
+            '- Ligne 5: setup_quality=high|medium|low\n'
+            '- Ligne 6: tradability=<0.00-1.00>\n'
+            '- Ligne 7: confidence=<0.00-1.00>\n'
+            '- Ligne 8: score_breakdown={{...}}\n'
+            '- Ligne 9: contradictions=[...] ou []\n'
+            '- Ligne 10: validation=<condition principale basée uniquement sur les faits fournis>\n'
+            '- Ligne 11: invalidation=<condition principale basée uniquement sur les faits fournis>\n'
+            '- Ligne 12: evidence_used=<liste courte des tools/champs réellement utilisés>\n'
+            '- Ligne 13: execution_comment=<implication trading disciplinée>\n'
+            '- Ligne 14: summary=<résumé factuel court>\n'
             '- Utilise uniquement [tool:...] comme source.'
         )
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
@@ -2714,6 +3205,11 @@ class TechnicalAnalystAgent:
         if llm_error_like and not llm_degraded:
             llm_degraded = True
         llm_signal = _parse_signal_from_text(llm_text)
+        llm_actionable_signal = self._extract_contract_line(llm_text, 'actionable_signal')
+        if llm_actionable_signal:
+            _candidate_actionable = str(llm_actionable_signal).strip().lower()
+            if _candidate_actionable in {'bullish', 'bearish', 'neutral'}:
+                llm_signal = _candidate_actionable
         merged_score, merged_signal = _merge_llm_signal(
             float(output['score']),
             llm_signal,
@@ -2722,6 +3218,18 @@ class TechnicalAnalystAgent:
         )
 
         resolved_skills = list(prompt_info.get('skills', runtime_skills)) if isinstance(prompt_info, dict) else list(runtime_skills)
+
+        llm_structural_bias = self._extract_contract_line(llm_text, 'structural_bias')
+        if llm_structural_bias:
+            _candidate_structural = str(llm_structural_bias).strip().lower()
+            if _candidate_structural in {'bullish', 'bearish', 'neutral'}:
+                structural_bias = _candidate_structural
+        llm_local_momentum = self._extract_contract_line(llm_text, 'local_momentum')
+        if llm_local_momentum:
+            _candidate_momentum = str(llm_local_momentum).strip().lower()
+            if _candidate_momentum in {'bullish', 'bearish', 'neutral', 'mixed'}:
+                local_momentum = _candidate_momentum
+        market_bias = structural_bias if structural_bias in {'bullish', 'bearish'} else market_bias
 
         # Parse setup_quality from LLM output (e.g. "setup_quality=low")
         for _sq_line in (llm_text or '').splitlines():
@@ -2754,6 +3262,44 @@ class TechnicalAnalystAgent:
         ):
             merged_signal = 'neutral'
 
+        merged_tradability = abs(float(merged_score)) * 1.05
+        if merged_signal in {'bullish', 'bearish'} and merged_signal == structural_bias:
+            merged_tradability += 0.10
+        if setup_quality == 'low':
+            merged_tradability -= 0.12
+        if local_momentum == 'mixed':
+            merged_tradability -= 0.18
+        if has_major_contradiction:
+            merged_tradability -= 0.15
+        if merged_signal == 'neutral':
+            merged_tradability = min(merged_tradability, 0.55)
+        merged_tradability = round(_clamp(merged_tradability, 0.0, 1.0), 3)
+
+        merged_setup_state = self._derive_setup_state(
+            actionable_signal=merged_signal,
+            structural_bias=structural_bias,
+            local_momentum=local_momentum,
+            setup_quality=setup_quality,
+            tradability=merged_tradability,
+            contradictions=contradictions,
+            final_score=merged_score,
+        )
+        llm_setup_state = self._extract_contract_line(llm_text, 'setup_state')
+        if llm_setup_state:
+            _candidate_setup_state = str(llm_setup_state).strip().lower()
+            if (
+                merged_signal == 'neutral'
+                and _candidate_setup_state in {'conditional', 'non_actionable'}
+            ) or (
+                merged_signal in {'bullish', 'bearish'}
+                and _candidate_setup_state in {'weak_actionable', 'actionable', 'high_conviction'}
+            ):
+                merged_setup_state = _candidate_setup_state
+
+        llm_execution_comment = self._extract_contract_line(llm_text, 'execution_comment')
+        if llm_execution_comment:
+            execution_comment = _compact_prompt_text(llm_execution_comment, max_chars=220)
+
         llm_validation = self._extract_contract_line(llm_text, 'validation')
         llm_invalidation = self._extract_contract_line(llm_text, 'invalidation')
         if llm_validation and self._fact_only_contract_line(llm_validation):
@@ -2773,6 +3319,9 @@ class TechnicalAnalystAgent:
                 signal=merged_signal,
                 setup_quality=setup_quality,
                 market_bias=market_bias,
+                structural_bias=structural_bias,
+                local_momentum=local_momentum,
+                setup_state=merged_setup_state,
             )
         else:
             parsed_summary_signal = _parse_signal_from_text(summary_text or '')
@@ -2781,25 +3330,70 @@ class TechnicalAnalystAgent:
                     signal=merged_signal,
                     setup_quality=setup_quality,
                     market_bias=market_bias,
+                    structural_bias=structural_bias,
+                    local_momentum=local_momentum,
+                    setup_state=merged_setup_state,
                 )
 
         merged_confidence = self._compute_confidence(merged_score, setup_quality)
+        llm_confidence_line = self._extract_contract_line(llm_text, 'confidence')
+        if llm_confidence_line and not llm_degraded:
+            _conf_match = re.match(r'^\s*([0-9]+(?:\.[0-9]+)?)\s*$', str(llm_confidence_line).strip())
+            if _conf_match:
+                llm_conf = _clamp(_safe_float(_conf_match.group(1), merged_confidence), 0.0, 1.0)
+                merged_confidence = merged_confidence * 0.7 + llm_conf * 0.3
+        llm_tradability_line = self._extract_contract_line(llm_text, 'tradability')
+        if llm_tradability_line and not llm_degraded:
+            _trad_match = re.match(r'^\s*([0-9]+(?:\.[0-9]+)?)\s*$', str(llm_tradability_line).strip())
+            if _trad_match:
+                merged_tradability = round(_clamp(_safe_float(_trad_match.group(1), merged_tradability), 0.0, 1.0), 3)
+        if merged_setup_state == 'conditional':
+            merged_confidence = min(merged_confidence, 0.55)
+        elif merged_setup_state == 'non_actionable':
+            merged_confidence = min(merged_confidence, 0.35)
+        elif merged_setup_state == 'high_conviction':
+            merged_confidence = max(merged_confidence, 0.68)
+        elif merged_setup_state == 'weak_actionable':
+            merged_confidence = min(merged_confidence, 0.65)
+        merged_confidence = round(_clamp(merged_confidence, 0.0, 0.95), 3)
         signal_threshold_reason = self._signal_threshold_reason(
             score=merged_score,
             signal=merged_signal,
             market_bias=market_bias,
             setup_quality=setup_quality,
+            setup_state=merged_setup_state,
         )
 
         output['llm_call_attempted'] = True
         output['llm_fallback_used'] = llm_degraded
         output['market_bias'] = market_bias
+        output['structural_bias'] = structural_bias
+        output['local_momentum'] = local_momentum
         output['setup_quality'] = setup_quality
+        output['setup_state'] = merged_setup_state
+        output['tradability'] = merged_tradability
         output['validation'] = validation_condition
         output['invalidation'] = invalidation_condition
         output['evidence_used'] = evidence_used
         output['evidence_total_count'] = len(evidence_used)
         output['evidence_exposed_count'] = len(evidence_used)
+        output['execution_comment'] = execution_comment
+        output['trading_implication'] = execution_comment
+        output['score_breakdown']['final_score'] = round(float(merged_score), 4)
+        output['contradictions'] = list(contradictions)
+        output['dominant_factors'] = list(dominant_factors)
+        output['facts_observed'] = {
+            'trend': trend,
+            'rsi': round(rsi, 3),
+            'macd_diff': round(macd_diff, 6),
+            'change_pct': round(change_pct, 4),
+            'atr': round(atr, 6),
+        }
+        output['interpretation'] = {
+            'structural_bias': structural_bias,
+            'local_momentum': local_momentum,
+            'setup_state': merged_setup_state,
+        }
         output['diagnostics']['llm'] = {
             'attempted': True,
             'fallback_used': llm_degraded,
@@ -2812,6 +3406,7 @@ class TechnicalAnalystAgent:
         }
         output.update(
             {
+                'actionable_signal': merged_signal,
                 'signal': merged_signal,
                 'score': merged_score,
                 'final_signal': merged_signal,
@@ -2823,7 +3418,7 @@ class TechnicalAnalystAgent:
                 'reason': (
                     'Directional setup passes technical activation thresholds.'
                     if merged_signal in {'bullish', 'bearish'}
-                    else 'Directional bias remains below technical activation thresholds; non-actionable setup.'
+                    else 'Directional bias remains below technical activation thresholds; non-actionable/conditional setup.'
                 ),
                 'llm_summary': llm_text,
                 'degraded': llm_degraded,
@@ -4966,10 +5561,30 @@ class TraderAgent:
         mc_execution_penalty = _clamp(_safe_float(_mc_output.get('execution_penalty'), 0.0), 0.0, 1.0)
         mc_tradability_score = _clamp(_safe_float(_mc_output.get('tradability_score'), 1.0), 0.0, 1.0)
 
-        technical_score = float(technical_output.get('score', 0.0) or 0.0)
-        technical_signal = str(technical_output.get('signal', '') or '').strip().lower()
+        technical_score = float(
+            technical_output.get(
+                'score',
+                ((technical_output.get('score_breakdown') or {}).get('final_score') if isinstance(technical_output.get('score_breakdown'), dict) else 0.0),
+            ) or 0.0
+        )
+        technical_signal = str(
+            technical_output.get('actionable_signal', technical_output.get('signal', '')) or ''
+        ).strip().lower()
         if technical_signal not in {'bullish', 'bearish', 'neutral'}:
             technical_signal = _score_to_signal(technical_score, 0.15)
+        technical_structural_bias = str(technical_output.get('structural_bias', technical_output.get('market_bias', 'neutral')) or 'neutral').strip().lower()
+        if technical_structural_bias not in {'bullish', 'bearish', 'neutral'}:
+            technical_structural_bias = 'neutral'
+        technical_local_momentum = str(technical_output.get('local_momentum', 'neutral') or 'neutral').strip().lower()
+        if technical_local_momentum not in {'bullish', 'bearish', 'neutral', 'mixed'}:
+            technical_local_momentum = 'neutral'
+        technical_setup_state = str(technical_output.get('setup_state', 'non_actionable') or 'non_actionable').strip().lower()
+        if technical_setup_state not in {'non_actionable', 'conditional', 'weak_actionable', 'actionable', 'high_conviction'}:
+            technical_setup_state = 'non_actionable'
+        technical_tradability = _clamp(_safe_float(technical_output.get('tradability'), abs(technical_score)), 0.0, 1.0)
+        technical_contradictions = technical_output.get('contradictions')
+        if not isinstance(technical_contradictions, list):
+            technical_contradictions = []
 
         source_thresholds = {
             'technical-analyst': 0.12,
@@ -5068,6 +5683,37 @@ class TraderAgent:
                 confidence_multiplier = policy.contradiction_weak_confidence_multiplier
                 volume_multiplier = policy.contradiction_weak_volume_multiplier
 
+        technical_contradiction_level = 'none'
+        technical_contradiction_types: list[str] = []
+        _severity_rank = {'none': 0, 'weak': 1, 'minor': 1, 'moderate': 2, 'major': 3}
+        for item in technical_contradictions:
+            if not isinstance(item, dict):
+                continue
+            raw_severity = str(item.get('severity') or '').strip().lower()
+            normalized_severity = 'weak' if raw_severity == 'minor' else raw_severity
+            if normalized_severity not in {'weak', 'moderate', 'major'}:
+                continue
+            if _severity_rank.get(normalized_severity, 0) > _severity_rank.get(technical_contradiction_level, 0):
+                technical_contradiction_level = normalized_severity
+            raw_type = str(item.get('type') or '').strip().lower()
+            if raw_type and raw_type not in technical_contradiction_types:
+                technical_contradiction_types.append(raw_type)
+
+        if _severity_rank.get(technical_contradiction_level, 0) > _severity_rank.get(contradiction_level, 0):
+            contradiction_level = technical_contradiction_level
+            if contradiction_level == 'major':
+                contradiction_penalty = max(contradiction_penalty, policy.contradiction_major_penalty)
+                confidence_multiplier = min(confidence_multiplier, policy.contradiction_major_confidence_multiplier)
+                volume_multiplier = min(volume_multiplier, policy.contradiction_major_volume_multiplier)
+            elif contradiction_level == 'moderate':
+                contradiction_penalty = max(contradiction_penalty, policy.contradiction_moderate_penalty)
+                confidence_multiplier = min(confidence_multiplier, policy.contradiction_moderate_confidence_multiplier)
+                volume_multiplier = min(volume_multiplier, policy.contradiction_moderate_volume_multiplier)
+            elif contradiction_level == 'weak':
+                contradiction_penalty = max(contradiction_penalty, policy.contradiction_weak_penalty)
+                confidence_multiplier = min(confidence_multiplier, policy.contradiction_weak_confidence_multiplier)
+                volume_multiplier = min(volume_multiplier, policy.contradiction_weak_volume_multiplier)
+
         combined_score = float(raw_combined_score)
         if contradiction_penalty > 0.0:
             if combined_score > 0.0:
@@ -5120,6 +5766,11 @@ class TraderAgent:
         aligned_source_count = len(aligned_sources)
 
         technical_neutral = technical_signal == 'neutral'
+        technical_conditional_setup = (
+            technical_setup_state == 'conditional'
+            and technical_signal == 'neutral'
+            and technical_structural_bias in {'bullish', 'bearish'}
+        )
         independent_aligned_count = len(independent_sources.get(candidate_signal, [])) if candidate_signal in {'bullish', 'bearish'} else 0
         independent_aligned_strength = independent_strength.get(candidate_signal, 0.0) if candidate_signal in {'bullish', 'bearish'} else 0.0
         technical_neutral_exception = bool(
@@ -5155,6 +5806,12 @@ class TraderAgent:
             technical_support = 0.25
             if aligned_source_count == 0 and abs(technical_score) >= 0.10:
                 technical_support = 0.35
+        elif (
+            candidate_signal in {'bullish', 'bearish'}
+            and technical_conditional_setup
+            and technical_structural_bias == candidate_signal
+        ):
+            technical_support = max(technical_support, 0.08)
         elif candidate_signal in {'bullish', 'bearish'} and technical_signal in {'bullish', 'bearish'}:
             technical_support = -0.10
 
@@ -5167,6 +5824,8 @@ class TraderAgent:
             contradiction_quality_penalty = 0.25
 
         neutral_quality_penalty = 0.15 if technical_neutral_block else 0.0
+        if technical_conditional_setup:
+            neutral_quality_penalty += 0.05
         evidence_quality = min(
             max(
                 source_coverage * 0.55 + independent_coverage * 0.25 + technical_support
@@ -5300,6 +5959,8 @@ class TraderAgent:
             reason = 'HOLD: major trend-momentum contradiction blocks execution.'
         elif memory_risk_block:
             reason = f'HOLD: memory risk block ({memory_block_reason}).'
+        elif technical_conditional_setup:
+            reason = 'HOLD: technical setup is conditional; wait for timing confirmation.'
         elif technical_neutral_block:
             reason = 'HOLD: technical-analyst neutral gate active.'
         else:
@@ -5310,6 +5971,8 @@ class TraderAgent:
             gate_reasons.append('technical_neutral_gate')
         if technical_neutral_exception:
             gate_reasons.append('technical_neutral_exception')
+        if technical_conditional_setup:
+            gate_reasons.append('technical_conditional_setup')
         if technical_single_source_override:
             gate_reasons.append('technical_single_source_override')
         if permissive_technical_override:
@@ -5338,6 +6001,10 @@ class TraderAgent:
             gate_reasons.append('memory_risk_block')
         if contradiction_level in {'weak', 'moderate', 'major'}:
             gate_reasons.append(f'trend_momentum_contradiction_{contradiction_level}')
+        if technical_contradiction_level in {'weak', 'moderate', 'major'}:
+            gate_reasons.append(f'technical_contract_contradiction_{technical_contradiction_level}')
+        for contradiction_type in technical_contradiction_types[:2]:
+            gate_reasons.append(f'technical_contract_{contradiction_type}')
         if mc_hard_block:
             gate_reasons.append('market_context_hard_block')
         if mc_execution_penalty > 0.3:
@@ -5400,6 +6067,8 @@ class TraderAgent:
                 follow_up_reason = 'strong_conflict'
             elif not minimum_evidence_ok:
                 follow_up_reason = 'insufficient_evidence'
+            elif technical_conditional_setup:
+                follow_up_reason = 'technical_conditional_setup'
             elif low_edge:
                 follow_up_reason = 'low_edge'
             elif technical_neutral_block:
@@ -5452,6 +6121,12 @@ class TraderAgent:
             'low_edge_override': low_edge_override,
             'technical_alignment_support': technical_alignment_support,
             'technical_signal': technical_signal,
+            'technical_structural_bias': technical_structural_bias,
+            'technical_local_momentum': technical_local_momentum,
+            'technical_setup_state': technical_setup_state,
+            'technical_tradability': round(technical_tradability, 3),
+            'technical_conditional_setup': technical_conditional_setup,
+            'technical_contradiction_level': technical_contradiction_level,
             'technical_neutral_exception': technical_neutral_exception,
             'minimum_evidence_ok': minimum_evidence_ok,
             'score_gate_ok': score_gate_ok,
@@ -5533,6 +6208,13 @@ class TraderAgent:
                 'low_edge_override': low_edge_override,
                 'technical_alignment_support': technical_alignment_support,
                 'technical_signal': technical_signal,
+                'technical_structural_bias': technical_structural_bias,
+                'technical_local_momentum': technical_local_momentum,
+                'technical_setup_state': technical_setup_state,
+                'technical_tradability': round(technical_tradability, 3),
+                'technical_conditional_setup': technical_conditional_setup,
+                'technical_contradiction_level': technical_contradiction_level,
+                'technical_contradiction_types': technical_contradiction_types,
                 'technical_neutral_exception': technical_neutral_exception,
                 'technical_single_source_override': technical_single_source_override,
                 'permissive_technical_override': permissive_technical_override,

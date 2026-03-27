@@ -694,6 +694,264 @@ def test_technical_strong_structure_without_local_momentum_stays_low(monkeypatch
     assert out['signal'] in {'bearish', 'neutral'}
 
 
+def test_technical_enriched_contract_fields_present() -> None:
+    agent = TechnicalAnalystAgent()
+    ctx = AgentContext(
+        pair='EURUSD',
+        timeframe='H1',
+        mode='simulation',
+        risk_percent=1.0,
+        market_snapshot={
+            'trend': 'bullish',
+            'rsi': 56.0,
+            'macd_diff': 0.0004,
+            'atr': 0.001,
+            'last_price': 1.1,
+            'change_pct': 0.1,
+            'ema_fast': 1.101,
+            'ema_slow': 1.099,
+        },
+        news_context={'news': []},
+        memory_context=[],
+    )
+    out = agent.run(ctx)
+
+    assert out['structural_bias'] in {'bullish', 'bearish', 'neutral'}
+    assert out['local_momentum'] in {'bullish', 'bearish', 'neutral', 'mixed'}
+    assert out['setup_state'] in {'non_actionable', 'conditional', 'weak_actionable', 'actionable', 'high_conviction'}
+    assert out['actionable_signal'] in {'bullish', 'bearish', 'neutral'}
+    assert isinstance(out.get('tradability'), float)
+    assert isinstance(out.get('score_breakdown'), dict)
+    assert isinstance(out.get('contradictions'), list)
+
+    breakdown = out['score_breakdown']
+    for key in (
+        'structure_score',
+        'momentum_score',
+        'pattern_score',
+        'divergence_score',
+        'multi_timeframe_score',
+        'level_score',
+        'contradiction_penalty',
+        'recency_adjustment',
+        'final_score',
+    ):
+        assert key in breakdown
+
+
+def test_technical_conditional_state_when_structure_bearish_but_momentum_mixed(monkeypatch) -> None:
+    import app.services.agent_runtime.mcp_trading_server as mcp
+
+    monkeypatch.setattr(
+        mcp,
+        'divergence_detector',
+        lambda **_kwargs: {
+            'divergences': [
+                {'type': 'bullish', 'bars_apart': 4, 'rsi_low_1': 31.2, 'rsi_low_2': 36.1},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        mcp,
+        'pattern_detector',
+        lambda **_kwargs: {
+            'patterns': [
+                {'type': 'bearish_engulfing', 'signal': 'bearish', 'strength': 0.84, 'bar_index': 238},
+                {'type': 'pin_bar', 'signal': 'bullish', 'strength': 0.81, 'bar_index': 239},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        mcp,
+        'multi_timeframe_context',
+        lambda **_kwargs: {'dominant_direction': 'bearish', 'alignment_score': 1.0, 'all_aligned': True},
+    )
+    monkeypatch.setattr(
+        mcp,
+        'support_resistance_detector',
+        lambda **_kwargs: {'levels': [{'price': 1.15814, 'distance_pct': 0.43, 'type': 'resistance'}]},
+    )
+
+    agent = TechnicalAnalystAgent()
+    monkeypatch.setattr(agent.model_selector, 'is_enabled', lambda *_a, **_k: False)
+    out = agent.run(
+        AgentContext(
+            pair='EURUSD.PRO',
+            timeframe='H1',
+            mode='simulation',
+            risk_percent=1.0,
+            market_snapshot={
+                'trend': 'bearish',
+                'rsi': 49.8,
+                'macd_diff': 0.0002,
+                'atr': 0.000734,
+                'last_price': 1.15321,
+                'change_pct': -0.05,
+                'ema_fast': 1.1538,
+                'ema_slow': 1.1550,
+            },
+            news_context={'news': []},
+            memory_context=[],
+            price_history=_price_history_bars(),
+        )
+    )
+
+    assert out['structural_bias'] == 'bearish'
+    assert out['local_momentum'] == 'mixed'
+    assert out['setup_state'] == 'conditional'
+    assert out['actionable_signal'] == 'neutral'
+
+
+def test_technical_non_actionable_state_when_no_directional_edge(monkeypatch) -> None:
+    import app.services.agent_runtime.mcp_trading_server as mcp
+
+    monkeypatch.setattr(mcp, 'divergence_detector', lambda **_kwargs: {'divergences': []})
+    monkeypatch.setattr(mcp, 'pattern_detector', lambda **_kwargs: {'patterns': []})
+    monkeypatch.setattr(mcp, 'support_resistance_detector', lambda **_kwargs: {'levels': []})
+    monkeypatch.setattr(
+        mcp,
+        'multi_timeframe_context',
+        lambda **_kwargs: {'dominant_direction': 'neutral', 'alignment_score': 0.0, 'all_aligned': False},
+    )
+
+    agent = TechnicalAnalystAgent()
+    monkeypatch.setattr(agent.model_selector, 'is_enabled', lambda *_a, **_k: False)
+    out = agent.run(
+        AgentContext(
+            pair='BTCUSD',
+            timeframe='H1',
+            mode='simulation',
+            risk_percent=1.0,
+            market_snapshot={
+                'trend': 'neutral',
+                'rsi': 50.0,
+                'macd_diff': 0.0,
+                'atr': 10.0,
+                'last_price': 70000.0,
+                'change_pct': 0.0,
+            },
+            news_context={'news': []},
+            memory_context=[],
+            price_history=_price_history_bars(start=70000.0),
+        )
+    )
+
+    assert out['setup_state'] == 'non_actionable'
+    assert out['actionable_signal'] == 'neutral'
+
+
+def test_technical_high_conviction_state_when_all_components_converge(monkeypatch) -> None:
+    import app.services.agent_runtime.mcp_trading_server as mcp
+
+    monkeypatch.setattr(
+        mcp,
+        'divergence_detector',
+        lambda **_kwargs: {'divergences': [{'type': 'bearish', 'bars_apart': 2}]},
+    )
+    monkeypatch.setattr(
+        mcp,
+        'pattern_detector',
+        lambda **_kwargs: {
+            'patterns': [
+                {'type': 'bearish_engulfing', 'signal': 'bearish', 'strength': 0.95, 'bar_index': 239},
+                {'type': 'continuation', 'signal': 'bearish', 'strength': 0.90, 'bar_index': 240},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        mcp,
+        'multi_timeframe_context',
+        lambda **_kwargs: {'dominant_direction': 'bearish', 'alignment_score': 1.0, 'all_aligned': True},
+    )
+    monkeypatch.setattr(
+        mcp,
+        'support_resistance_detector',
+        lambda **_kwargs: {'levels': [{'price': 1.15814, 'distance_pct': 0.25, 'type': 'resistance'}]},
+    )
+
+    agent = TechnicalAnalystAgent()
+    monkeypatch.setattr(agent.model_selector, 'is_enabled', lambda *_a, **_k: False)
+    out = agent.run(
+        AgentContext(
+            pair='EURUSD.PRO',
+            timeframe='M15',
+            mode='simulation',
+            risk_percent=1.0,
+            market_snapshot={
+                'trend': 'bearish',
+                'rsi': 30.0,
+                'macd_diff': -0.003,
+                'atr': 0.0007,
+                'last_price': 1.15321,
+                'change_pct': -0.35,
+                'ema_fast': 1.1530,
+                'ema_slow': 1.1560,
+            },
+            news_context={'news': []},
+            memory_context=[],
+            price_history=_price_history_bars(),
+        )
+    )
+
+    assert out['actionable_signal'] == 'bearish'
+    assert out['setup_state'] == 'high_conviction'
+    assert out['setup_quality'] == 'high'
+
+
+def test_technical_recency_weighting_amplifies_recent_patterns(monkeypatch) -> None:
+    import app.services.agent_runtime.mcp_trading_server as mcp
+
+    monkeypatch.setattr(mcp, 'divergence_detector', lambda **_kwargs: {'divergences': []})
+    monkeypatch.setattr(
+        mcp,
+        'multi_timeframe_context',
+        lambda **_kwargs: {'dominant_direction': 'bullish', 'alignment_score': 1.0, 'all_aligned': True},
+    )
+    monkeypatch.setattr(
+        mcp,
+        'support_resistance_detector',
+        lambda **_kwargs: {'levels': [{'price': 1.14800, 'distance_pct': 0.40, 'type': 'support'}]},
+    )
+
+    agent = TechnicalAnalystAgent()
+    monkeypatch.setattr(agent.model_selector, 'is_enabled', lambda *_a, **_k: False)
+    monkeypatch.setattr(
+        mcp,
+        'pattern_detector',
+        lambda **_kwargs: {
+            'patterns': [
+                {'type': 'flag', 'signal': 'bullish', 'strength': 1.0, 'bar_index': 120},
+                {'type': 'flag', 'signal': 'bullish', 'strength': 1.0, 'bar_index': 239},
+            ]
+        },
+    )
+    out = agent.run(
+        AgentContext(
+            pair='EURUSD.PRO',
+            timeframe='M15',
+            mode='simulation',
+            risk_percent=1.0,
+            market_snapshot={
+                'trend': 'bullish',
+                'rsi': 58.0,
+                'macd_diff': 0.0012,
+                'atr': 0.0009,
+                'last_price': 1.15321,
+                'change_pct': 0.20,
+                'ema_fast': 1.1540,
+                'ema_slow': 1.1510,
+            },
+            news_context={'news': []},
+            memory_context=[],
+            price_history=_price_history_bars(),
+        )
+    )
+
+    # Sans pondération par récence, deux patterns bullish de force 1.0 vaudraient 0.12.
+    assert out['score_breakdown']['pattern_score'] < 0.12
+    assert out['score_breakdown']['recency_adjustment'] < 0.0
+
+
 def test_technical_prompt_handles_partial_tools_without_hallucination(monkeypatch) -> None:
     captured_user_prompts: list[str] = []
     agent = TechnicalAnalystAgent()

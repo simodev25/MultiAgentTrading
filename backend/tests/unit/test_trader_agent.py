@@ -165,6 +165,39 @@ def test_trader_agent_holds_when_technical_signal_is_neutral_without_independent
     assert 'technical_neutral_gate' in result['rationale']['decision_gates']
 
 
+def test_trader_agent_consumes_conditional_technical_contract_fields() -> None:
+    agent = TraderAgent()
+    ctx = _context(trend='bearish', macd_diff=0.01)
+    outputs = {
+        'technical-analyst': {
+            'signal': 'neutral',
+            'actionable_signal': 'neutral',
+            'score': -0.18,
+            'structural_bias': 'bearish',
+            'local_momentum': 'mixed',
+            'setup_state': 'conditional',
+            'tradability': 0.42,
+            'contradictions': [
+                {'type': 'trend_vs_momentum', 'severity': 'moderate', 'details': 'MACD diff oppose la structure.'},
+            ],
+        },
+        'macro-analyst': {'signal': 'bullish', 'score': 0.08},
+        'sentiment-agent': {'signal': 'neutral', 'score': 0.0},
+        'news-analyst': {'signal': 'neutral', 'score': 0.0},
+    }
+    bullish = {'arguments': ['x'], 'confidence': 0.7}
+    bearish = {'arguments': ['y'], 'confidence': 0.0}
+
+    result = agent.run(ctx, outputs, bullish, bearish)
+
+    assert result['technical_signal'] == 'neutral'
+    assert result['technical_setup_state'] == 'conditional'
+    assert result['technical_structural_bias'] == 'bearish'
+    assert result['technical_local_momentum'] == 'mixed'
+    assert 'technical_conditional_setup' in result['decision_gates']
+    assert result['decision'] == 'HOLD'
+
+
 def test_trader_agent_permissive_holds_on_technical_neutral_and_weak_scores() -> None:
     agent = TraderAgent()
     agent.model_selector.settings.decision_mode = 'permissive'

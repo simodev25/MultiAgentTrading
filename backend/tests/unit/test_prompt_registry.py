@@ -179,15 +179,31 @@ def test_news_analyst_default_prompt_stays_pair_aware_for_fx() -> None:
 
 
 def test_default_prompts_include_structured_contracts_for_priority_agents() -> None:
+    technical_system = DEFAULT_PROMPTS['technical-analyst']['system']
     technical_user = DEFAULT_PROMPTS['technical-analyst']['user']
     news_user = DEFAULT_PROMPTS['news-analyst']['user']
     market_context_user = DEFAULT_PROMPTS['market-context-analyst']['user']
 
+    assert 'bullish = score positif' in technical_system
+    assert 'bearish = score négatif' in technical_system
+    assert 'neutral = score nul ou proche de zéro' in technical_system
+    assert 'score_breakdown runtime autoritaire' in technical_system
+    assert "n'en invente aucun" in technical_system
+
     assert 'Faits bruts' in technical_user
     assert 'Résultats tools pré-exécutés' in technical_user
+    assert 'Score breakdown runtime autoritaire' in technical_user
+    assert '{runtime_score_breakdown_block}' in technical_user
     assert 'Règles d\'interprétation' in technical_user
     assert '[tool:...]' in technical_user
     assert 'setup_quality=high|medium|low' in technical_user
+    assert 'structural_bias=bearish|bullish|neutral' in technical_user
+    assert 'local_momentum=bearish|bullish|neutral|mixed' in technical_user
+    assert 'setup_state=non_actionable|conditional|weak_actionable|actionable|high_conviction' in technical_user
+    assert 'actionable_signal=bearish|bullish|neutral' in technical_user
+    assert 'score_breakdown=' in technical_user
+    assert 'contradictions=' in technical_user
+    assert 'execution_comment=' in technical_user
     assert 'validation=<condition principale' in technical_user
     assert 'invalidation=<condition principale' in technical_user
     assert 'evidence_used=<liste courte des tools/champs réellement utilisés>' in technical_user
@@ -195,9 +211,93 @@ def test_default_prompts_include_structured_contracts_for_priority_agents() -> N
     assert 'MACD diff contredit le trend' in technical_user
     assert 'mixed patterns' in technical_user
     assert 'setup_quality=low au maximum' in technical_user
+    assert 'UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN' in technical_user
 
     assert 'horizon=intraday|swing|uncertain' in news_user
     assert 'impact=high|medium|low' in news_user
 
     assert 'regime=trending|ranging|calm|unstable|volatile' in market_context_user
     assert 'context_support=supportive|neutral|unsupportive' in market_context_user
+
+
+def test_prompt_registry_render_technical_runtime_score_breakdown_optional() -> None:
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(bind=engine)
+
+    service = PromptTemplateService()
+    with Session(engine) as db:
+        service.seed_defaults(db)
+        rendered = service.render(
+            db=db,
+            agent_name='technical-analyst',
+            fallback_system='system',
+            fallback_user='unused',
+            variables={
+                'pair': 'EURUSD',
+                'asset_class': 'forex',
+                'timeframe': 'M15',
+                'raw_facts_block': '- trend=bearish',
+                'tool_results_block': '- [tool:indicator_bundle] trend=bearish',
+                'interpretation_rules_block': '- règle test',
+            },
+        )
+
+        assert 'runtime_score_breakdown_block' not in rendered['missing_variables']
+        assert 'Score breakdown runtime autoritaire' in rendered['user_prompt']
+        assert 'UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN' in rendered['user_prompt']
+
+
+def test_prompt_registry_render_technical_runtime_score_breakdown_uses_runtime_values() -> None:
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(bind=engine)
+
+    service = PromptTemplateService()
+    with Session(engine) as db:
+        service.seed_defaults(db)
+        rendered = service.render(
+            db=db,
+            agent_name='technical-analyst',
+            fallback_system='system',
+            fallback_user='unused',
+            variables={
+                'pair': 'EURUSD',
+                'asset_class': 'forex',
+                'timeframe': 'M15',
+                'raw_facts_block': '- trend=bearish',
+                'tool_results_block': '- [tool:indicator_bundle] trend=bearish',
+                'interpretation_rules_block': '- règle test',
+                'score_breakdown': {
+                    'structure_score': -0.35,
+                    'momentum_score': -0.1286,
+                    'multi_timeframe_score': -0.16,
+                    'final_score': -0.4206,
+                },
+            },
+        )
+
+        assert 'structure_score=-0.35' in rendered['user_prompt']
+        assert 'momentum_score=-0.1286' in rendered['user_prompt']
+        assert 'multi_timeframe_score=-0.16' in rendered['user_prompt']
+        assert 'final_score=-0.4206' in rendered['user_prompt']
+
+
+def test_prompt_registry_render_technical_injects_sign_guardrails_for_legacy_prompt() -> None:
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(bind=engine)
+
+    service = PromptTemplateService()
+    with Session(engine) as db:
+        rendered = service.render(
+            db=db,
+            agent_name='technical-analyst',
+            fallback_system='Legacy technical prompt.',
+            fallback_user='Instrument: {pair}\nRésultats tools pré-exécutés:\n{tool_results_block}\n\n',
+            variables={
+                'pair': 'EURUSD',
+                'tool_results_block': '- [tool:indicator_bundle] trend=bearish',
+            },
+        )
+
+        assert 'Convention de signe unique: bullish = score positif' in rendered['system_prompt']
+        assert 'Score breakdown runtime autoritaire' in rendered['user_prompt']
+        assert 'UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN' in rendered['user_prompt']

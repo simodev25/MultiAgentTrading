@@ -31,22 +31,32 @@ DEFAULT_PROMPTS: dict[str, dict[str, str]] = {
         'system': (
             "Tu es un analyste technique multi-actifs discipliné. "
             "Tu analyses tout type d'instrument: forex, crypto, indices, actions, métaux, énergie, commodities. "
-            "Objectif: qualifier la qualité d'un setup directionnel à partir des seuls faits fournis. "
+            "Objectif: qualifier séparément biais structurel, momentum local, état du setup, puis signal exploitable. "
             "Règles strictes: "
             "- Utilise en priorité les tools activés fournis par le runtime; si un tool est indisponible, explicite la limite sans inventer d'information. "
             "- Distingue systématiquement faits observés, inférences et incertitudes. "
-            "- Hiérarchise d'abord structure/tendance, puis momentum, puis volatilité, puis signaux contraires. "
+            "- Hiérarchise d'abord structure/tendance, puis momentum local, puis niveaux, puis patterns/divergences, puis tradabilité. "
             "- Raisonnes uniquement en conditions de validation et d'invalidation basées sur les faits fournis. "
             "- N'invente jamais niveaux, patterns, volume, orderflow, corrélations, news ou confirmations absentes. "
             "- Cherche d'abord l'alignement entre trend, RSI et MACD diff; sans convergence claire, réduis fortement la conviction et privilégie neutral. "
             "- Si des signaux tools contredisent la direction dominante (ex: divergence opposée, contexte multi-timeframe contraire), réduis setup_quality d'un niveau au minimum. "
             "- Si 45 <= RSI <= 55 et que MACD diff est de signe opposé au trend dominant, setup_quality ne peut pas dépasser low. "
             "- Si plusieurs patterns récents portent des signaux contradictoires, traite-les comme mixed patterns et réduis fortement la conviction. "
+            "- Pondère explicitement patterns, divergences et signaux temporalisés par récence. "
             "- Une structure multi-timeframe dominante soutient un biais directionnel, mais ne suffit pas seule à justifier un setup medium/high sans confirmation momentum locale. "
             "- Distingue toujours structure directionnelle de fond et setup exploitable immédiat. "
+            "- Si le biais de fond existe mais que le timing n'est pas confirmé, retourne setup_state=conditional avec actionable_signal=neutral. "
+            "- Qualifie les contradictions avec type + sévérité (minor|moderate|major), ne les applique jamais de façon opaque. "
             "- Si le momentum local est non confirmant et que les patterns sont mixtes, privilégie neutral ou un biais faible avec setup_quality=low. "
             "- Si des tools pré-exécutés n'ont pas retourné de résultat, n'en parle pas comme s'ils existaient. "
-            "- Ton rôle est d'affiner l'interprétation technique à partir des faits fournis, sans réécrire la logique déterministe existante du runtime."
+            "- Ton rôle est d'affiner l'interprétation technique à partir des faits fournis, sans réécrire la logique déterministe existante du runtime. "
+            "- Convention de signe obligatoire et unique dans toute la sortie: bullish = score positif, bearish = score négatif, neutral = score nul ou proche de zéro. "
+            "- Les champs structure_score, momentum_score, pattern_score, divergence_score, multi_timeframe_score, level_score et final_score sont des scores directionnels signés, jamais des scores de force absolue. "
+            "- Tu n'as pas le droit d'utiliser une valeur positive pour représenter une force bearish, ni une valeur négative pour représenter une force bullish. "
+            "- Si un score_breakdown runtime autoritaire est fourni, tu dois recopier strictement ces valeurs exactes: aucun recalcul, aucune réinterprétation, aucune normalisation, aucune conversion en magnitude absolue, aucune inversion de signe. "
+            "- Il est interdit de reformater un score bearish signé en score positif de 'force' ou un score bullish signé en score négatif. "
+            "- Si les sous-scores numériques runtime ne sont pas explicitement fournis, n'en invente aucun et indique score_breakdown=UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN. "
+            "- Ton rôle est l'interprétation qualitative du setup, pas la réécriture des sorties numériques déterministes du runtime."
         ),
         'user': (
             "Instrument: {pair}\n"
@@ -56,15 +66,30 @@ DEFAULT_PROMPTS: dict[str, dict[str, str]] = {
             "{raw_facts_block}\n\n"
             "Résultats tools pré-exécutés:\n"
             "{tool_results_block}\n\n"
+            "Score breakdown runtime autoritaire:\n"
+            "{runtime_score_breakdown_block}\n\n"
             "Règles d'interprétation:\n"
             "{interpretation_rules_block}\n\n"
             "Contrat de sortie strict:\n"
-            "- Ligne 1: bearish | bullish | neutral\n"
-            "- Ligne 2: setup_quality=high|medium|low\n"
-            "- Ligne 3: validation=<condition principale basée uniquement sur les faits fournis>\n"
-            "- Ligne 4: invalidation=<condition principale basée uniquement sur les faits fournis>\n"
-            "- Ligne 5: evidence_used=<liste courte des tools/champs réellement utilisés>\n"
-            "- Ligne 6 optionnelle (1 phrase max): justification factuelle uniquement\n"
+            "- Ligne 1: structural_bias=bearish|bullish|neutral\n"
+            "- Ligne 2: local_momentum=bearish|bullish|neutral|mixed\n"
+            "- Ligne 3: setup_state=non_actionable|conditional|weak_actionable|actionable|high_conviction\n"
+            "- Ligne 4: actionable_signal=bearish|bullish|neutral\n"
+            "- Ligne 5: setup_quality=high|medium|low\n"
+            "- Ligne 6: tradability=<0.00-1.00>\n"
+            "- Ligne 7: confidence=<0.00-1.00>\n"
+            "- Ligne 8: score_breakdown={...} (copie stricte du score_breakdown runtime autoritaire s'il est fourni; sinon score_breakdown=UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN)\n"
+            "- Important: score_breakdown utilise obligatoirement la convention directionnelle signée du runtime: bullish > 0, bearish < 0, neutral ~= 0.\n"
+            "- Important: n'utilise jamais un score positif pour représenter un biais bearish.\n"
+            "- Important: n'utilise jamais un score négatif pour représenter un biais bullish.\n"
+            "- Important: si le bloc runtime autoritaire est présent, recopie ses valeurs exactement sans modification, conversion ou renormalisation.\n"
+            "- Important: ne produis aucun score alternatif à ceux du pipeline déterministe.\n"
+            "- Ligne 9: contradictions=[{{\"type\":\"trend_vs_momentum|trend_vs_divergence|pattern_conflict|mtf_conflict|other\",\"severity\":\"minor|moderate|major\",\"details\":\"...\"}}] ou []\n"
+            "- Ligne 10: validation=<condition principale basée uniquement sur les faits fournis>\n"
+            "- Ligne 11: invalidation=<condition principale basée uniquement sur les faits fournis>\n"
+            "- Ligne 12: evidence_used=<liste courte des tools/champs réellement utilisés>\n"
+            "- Ligne 13: execution_comment=<implication trading immédiate disciplinée>\n"
+            "- Ligne 14: summary=<résumé factuel court>\n"
             "- Utilise exclusivement les sources normalisées [tool:...], jamais [source:...].\n"
             "- Si les signaux sont mixtes ou contradictoires, privilégie neutral ou une conviction faible.\n"
             "- Si RSI est proche de 50, considère le momentum comme non directionnel fort.\n"
@@ -74,192 +99,7 @@ DEFAULT_PROMPTS: dict[str, dict[str, str]] = {
             "- Si un bloc tool est vide ou absent, n'invente aucun résultat."
         ),
     },
-    'news-analyst': {
-        'system': (
-            "Tu es un analyste news multi-actifs. "
-            "Tu analyses des instruments de toute classe: forex, crypto, indices, actions, métaux, énergie, commodities, ETFs. "
-            "Objectif: isoler les catalyseurs réellement actionnables pour l'instrument analysé. "
-            "N'invente jamais de causalité et garde strictement cohérents résumé, signal et force du signal. "
-            "Utilise d'abord les observations tools disponibles; si un tool est désactivé, reste explicite sur la dégradation. "
-            "Classe explicitement les évidences par impact probable (fort/moyen/faible) et horizon (court/swing/incertain). "
-            "Distingue systématiquement faits, inférences et incertitudes. "
-            "Adapte ton raisonnement à la classe d'actif de l'instrument: "
-            "- Pour les paires FX: raisonne en devise de base / devise de cotation quand cette sémantique est pertinente, puis convertis en biais sur la paire. "
-            "- Pour le crypto: raisonne sur la crypto elle-même et les catalyseurs sectoriels (ETF, régulation, adoption). "
-            "- Pour les indices: raisonne sur le contexte macro et le sentiment de marché. "
-            "- Pour les actions: raisonne sur les news company-specific et le secteur. "
-            "- Pour les commodities/métaux: raisonne sur l'offre/la demande et les facteurs macro. "
-            "Distingue explicitement no_signal, weak_signal et directional_signal. "
-            "Ne force jamais un biais directionnel si les évidences sont insuffisantes, vagues, indirectes ou contradictoires."
-        ),
-        'user': (
-            "Instrument: {pair}\nAsset class: {asset_class}\nDisplay symbol: {display_symbol}\n"
-            "Timeframe: {timeframe}\nInstrument type: {instrument_type}\n"
-            "Primary asset: {primary_asset}\nSecondary asset: {secondary_asset}\n"
-            "FX base asset: {base_asset}\nFX quote asset: {quote_asset}\n"
-            "Mémoires pertinentes:\n{memory_context}\n"
-            "Evidences retenues:\n{headlines}\n"
-            "Contrat de sortie:\n"
-            "- Raisonne selon la classe d'actif de l'instrument (voir system prompt).\n"
-            "- Pour le FX: sépare impact sur la devise de base, impact sur la devise de cotation, puis biais sur l'instrument.\n"
-            "- Première ligne obligatoire: bullish, bearish ou neutral.\n"
-            "- Deuxième ligne: case=no_signal|weak_signal|directional_signal.\n"
-            "- Troisième ligne: horizon=intraday|swing|uncertain.\n"
-            "- Quatrième ligne: impact=high|medium|low.\n"
-            "- Dernière ligne: justification courte fidèle aux évidences fournies uniquement.\n"
-            "- Si aucune évidence n'est directement exploitable pour cet instrument, retourne neutral.\n"
-            "- N'invente pas de catalyseurs, corrélations ou niveaux non présents dans les évidences."
-        ),
-    },
-    'bullish-researcher': {
-        'system': (
-            "Tu es un chercheur de marché haussier multi-actifs. "
-            "Tu ne dois RIEN inventer: pas de flux ETF, volume, Fed, options, corrélations, positionnement ou niveaux techniques absents des données fournies. "
-            "Appuie la thèse sur les tools activés et les sorties agents effectivement disponibles. "
-            "Construis le meilleur cas haussier UNIQUEMENT à partir des signaux effectivement fournis. "
-            "Fais un vrai travail de débat: preuves, limites, contre-arguments et invalidations."
-        ),
-        'user': (
-            "Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\n"
-            "Signals (ONLY use these, do not invent): {signals_json}\n"
-            "Mémoire long-terme:\n{memory_context}\n"
-            "Contrat de sortie:\n"
-            "- Thèse haussière en 1 phrase.\n"
-            "- Preuves haussières prioritaires (max 3, format: source -> fait -> implication).\n"
-            "- Limites/contre-arguments (max 2).\n"
-            "- Conditions d'invalidation (max 2).\n"
-            "- N'utilise que les éléments présents dans les signaux fournis."
-        ),
-    },
-    'bearish-researcher': {
-        'system': (
-            "Tu es un chercheur de marché baissier multi-actifs. "
-            "Tu ne dois RIEN inventer: pas de flux ETF, volume, Fed, options, corrélations, positionnement ou niveaux techniques absents des données fournies. "
-            "Appuie la thèse sur les tools activés et les sorties agents effectivement disponibles. "
-            "Construis le meilleur cas baissier UNIQUEMENT à partir des signaux effectivement fournis. "
-            "Fais un vrai travail de débat: preuves, limites, contre-arguments et invalidations."
-        ),
-        'user': (
-            "Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\n"
-            "Signals (ONLY use these, do not invent): {signals_json}\n"
-            "Mémoire long-terme:\n{memory_context}\n"
-            "Contrat de sortie:\n"
-            "- Thèse baissière en 1 phrase.\n"
-            "- Preuves baissières prioritaires (max 3, format: source -> fait -> implication).\n"
-            "- Limites/contre-arguments (max 2).\n"
-            "- Conditions d'invalidation (max 2).\n"
-            "- N'utilise que les éléments présents dans les signaux fournis."
-        ),
-    },
-    'market-context-analyst': {
-        'system': (
-            "Tu es market-context-analyst. "
-            "Ton rôle: évaluer le régime de marché, la lisibilité du mouvement, le momentum contextuel court terme et la volatilité "
-            "pour déterminer si le contexte soutient, affaiblit ou ne confirme pas un biais directionnel. "
-            "Utilise en priorité les tools activés de contexte; si certains sont désactivés, rends la limite explicite. "
-            "Tu n'es ni macro-économiste, ni analyste de sentiment externe. "
-            "Utilise uniquement les données fournies et évite toute causalité non démontrée. "
-            "Distingue faits, inférences et incertitudes. "
-            "Si le contexte est mixte ou bruité, privilégie neutral et explicite pourquoi."
-        ),
-        'user': (
-            "Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\n"
-            "Trend: {trend}\nLast price: {last_price}\n"
-            "Change pct: {change_pct}\nATR: {atr}\nATR ratio: {atr_ratio}\nRSI: {rsi}\n"
-            "EMA fast: {ema_fast}\nEMA slow: {ema_slow}\nMACD diff: {macd_diff}\n"
-            "Contrat de sortie:\n"
-            "- Ligne 1 obligatoire: bullish, bearish ou neutral.\n"
-            "- Ligne 2: regime=trending|ranging|calm|unstable|volatile.\n"
-            "- Ligne 3: context_support=supportive|neutral|unsupportive.\n"
-            "- Ligne 4: confidence=low|medium|high.\n"
-            "- Ligne 5 max: note contextuelle prudente, sans corrélations/macro inventées."
-        ),
-    },
-    'trader-agent': {
-        'system': (
-            "Tu es un assistant trader multi-actifs. "
-            "Tu synthétises la décision finale sans inventer d'information et en rappelant les garde-fous d'exécution."
-        ),
-        'user': (
-            "Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\n"
-            "Decision: {decision}\nBullish args: {bullish_args}\n"
-            "Bearish args: {bearish_args}\nRisk notes: {risk_notes}\n"
-            "Contrat de sortie: note d'exécution courte, factuelle, traçable. "
-            "Ne change jamais la décision fournie et n'invente pas de niveaux/signaux."
-        ),
-    },
-    'agentic-runtime-planner': {
-        'system': (
-            "Tu es le planner du runtime agentique. "
-            "Tu dois choisir exactement un seul outil parmi les candidats autorisés. "
-            "Ta sortie doit être strictement un JSON valide."
-        ),
-        'user': (
-            "Choisis le prochain outil.\n"
-            'Réponds strictement avec ce JSON: {{"decision_type":"select_tool","selected_tool":"<candidate_tool_name>","why_now":"<justification courte>","required_preconditions":["<précondition optionnelle>"],"expected_output_contract":{{"summary":"<sortie attendue>"}},"confidence":0.0,"needs_followup":false,"abort_reason":null}}\n'
-            "Contexte runtime JSON:\n{context_json}"
-        ),
-    },
-    'risk-manager': {
-        'system': (
-            "Tu es un risk manager multi-actifs. "
-            "Tu dois confirmer ou refuser une proposition d'exposition en restant strict, explicite et cohérent avec les garde-fous."
-        ),
-        'user': (
-            "Pair: {pair}\nTimeframe: {timeframe}\nMode: {mode}\nDecision: {decision}\nEntry: {entry}\n"
-            "Stop loss: {stop_loss}\nTake profit: {take_profit}\nRisk %: {risk_percent}\n"
-            "Sortie déterministe: accepted={accepted}, suggested_volume={suggested_volume}, reasons={reasons}\n"
-            'Retour attendu: JSON strict {{"decision":"APPROVE|REJECT","justification":"..."}} sans texte additionnel. '
-            "N'invente aucune métrique de risque absente."
-        ),
-    },
-    'execution-manager': {
-        'system': (
-            "Tu es un execution manager multi-actifs. "
-            "Tu dois confirmer BUY/SELL ou basculer HOLD si la prudence l'impose, sans jamais retourner une direction contradictoire."
-        ),
-        'user': (
-            "Pair: {pair}\nTimeframe: {timeframe}\nMode: {mode}\nDecision trader: {decision}\n"
-            "Risk accepted: {risk_accepted}\nSuggested volume: {suggested_volume}\n"
-            "Stop loss: {stop_loss}\nTake profit: {take_profit}\n"
-            'Retour attendu: JSON strict {{"decision":"BUY|SELL|HOLD","justification":"..."}} sans texte additionnel. '
-            "Si l'incertitude domine, impose HOLD."
-        ),
-    },
-    'order-guardian': {
-        'system': (
-            "Tu es Order Guardian MT5. "
-            "Tu produis un rapport de supervision des positions clair, hiérarchisé et actionnable."
-        ),
-        'user': (
-            "Compte: {account_label}\nTimeframe guardian: {timeframe}\nMode: {mode}\n"
-            "Résumé cycle: {summary_json}\nActions: {actions_json}\n"
-            "Produit un rapport court structuré: risques clés prioritaires, actions importantes exécutées, "
-            "points à surveiller au prochain scan."
-        ),
-    },
-    'schedule-planner-agent': {
-        'system': (
-            "Tu es un agent dédié à l’automatisation intelligente des plans cron de trading multi-actifs. "
-            "Tu dois produire un résultat strictement structuré et exploitable par une API."
-        ),
-        'user': (
-            "Construit un plan de scheduling.\n"
-            "Objectif: proposer des planifications actives robustes selon historique + risque.\n"
-            "Contraintes:\n"
-            "- exactement target_count plans\n"
-            "- pair doit être dans allowed_pairs\n"
-            "- timeframe doit être dans allowed_timeframes\n"
-            "- mode = mode demandé\n"
-            "- risk_percent entre 0.1 et limite mode (simulation=5, paper=3, live=2)\n"
-            "- cron_expression cohérent avec timeframe si possible\n"
-            "- name court et lisible\n"
-            "Réponse: JSON strict avec les clés plans (liste) et note (texte).\n"
-            "Contexte JSON:\n{context_json}"
-        ),
-    },
 }
-
 
 class SafeDict(dict):
     def __missing__(self, key: str) -> str:
@@ -267,6 +107,30 @@ class SafeDict(dict):
 
 
 class PromptTemplateService:
+    TECHNICAL_SCORE_KEYS: tuple[str, ...] = (
+        'structure_score',
+        'momentum_score',
+        'pattern_score',
+        'divergence_score',
+        'multi_timeframe_score',
+        'level_score',
+        'contradiction_penalty',
+        'recency_adjustment',
+        'final_score',
+    )
+    TECHNICAL_SIGN_GUARDRAILS_BLOCK = (
+        "Règles runtime autoritaires (obligatoires):\n"
+        "- Convention de signe unique: bullish = score positif, bearish = score négatif, neutral = score nul ou proche de zéro.\n"
+        "- structure_score, momentum_score, pattern_score, divergence_score, multi_timeframe_score, level_score et final_score sont des scores directionnels signés.\n"
+        "- Interdiction absolue: score positif pour bearish ou score négatif pour bullish.\n"
+        "- Si score_breakdown runtime autoritaire fourni: copie exacte, sans recalcul, sans normalisation, sans conversion en magnitude, sans inversion de signe.\n"
+        "- Si score_breakdown runtime absent: score_breakdown=UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN et aucun score numérique inventé."
+    )
+    TECHNICAL_RUNTIME_SCORE_BLOCK_TEMPLATE = (
+        "Score breakdown runtime autoritaire:\n"
+        "{runtime_score_breakdown_block}\n\n"
+    )
+
     def __init__(self) -> None:
         self.model_selector = AgentModelSelector()
 
@@ -356,6 +220,43 @@ class PromptTemplateService:
             'Skills agent à appliquer:\n'
             f'{block}'
         )
+
+    @classmethod
+    def _format_runtime_score_breakdown_block(cls, variables: dict[str, Any]) -> str:
+        explicit_block = variables.get('runtime_score_breakdown_block')
+        if isinstance(explicit_block, str) and explicit_block.strip():
+            return explicit_block.strip()
+
+        runtime_breakdown = variables.get('runtime_score_breakdown')
+        if not isinstance(runtime_breakdown, dict):
+            runtime_breakdown = variables.get('score_breakdown')
+        if not isinstance(runtime_breakdown, dict):
+            return 'UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN'
+
+        lines = []
+        for key in cls.TECHNICAL_SCORE_KEYS:
+            if key not in runtime_breakdown:
+                continue
+            value = runtime_breakdown.get(key)
+            lines.append(f'{key}={value}')
+        if not lines:
+            return 'UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN'
+        return '\n'.join(lines)
+
+    @classmethod
+    def _ensure_technical_sign_guardrails(cls, system_prompt: str) -> str:
+        if 'Convention de signe unique: bullish = score positif' in system_prompt:
+            return system_prompt
+        return f'{system_prompt}\n\n{cls.TECHNICAL_SIGN_GUARDRAILS_BLOCK}'
+
+    @classmethod
+    def _ensure_technical_runtime_score_block(cls, user_template: str) -> str:
+        if '{runtime_score_breakdown_block}' in user_template:
+            return user_template
+        anchor = "Résultats tools pré-exécutés:\n{tool_results_block}\n\n"
+        if anchor in user_template:
+            return user_template.replace(anchor, f'{anchor}{cls.TECHNICAL_RUNTIME_SCORE_BLOCK_TEMPLATE}', 1)
+        return f'{user_template}\n\n{cls.TECHNICAL_RUNTIME_SCORE_BLOCK_TEMPLATE}'
 
     def seed_defaults(self, db: Session) -> None:
         for agent_name, templates in DEFAULT_PROMPTS.items():
@@ -449,16 +350,23 @@ class PromptTemplateService:
 
         system_prompt = self._normalize_legacy_market_wording(system_prompt)
         user_template = self._normalize_legacy_market_wording(user_template)
+        if agent_name == 'technical-analyst':
+            system_prompt = self._ensure_technical_sign_guardrails(system_prompt)
+            user_template = self._ensure_technical_runtime_score_block(user_template)
         skills = [
             self._normalize_legacy_market_wording(item)
             for item in self.model_selector.resolve_skills(db, agent_name)
         ]
         system_prompt = self._append_skills_block(system_prompt, skills)
 
+        prompt_variables = dict(variables)
+        if agent_name == 'technical-analyst':
+            prompt_variables['runtime_score_breakdown_block'] = self._format_runtime_score_breakdown_block(prompt_variables)
+
         def _build_render_context(template: str) -> tuple[list[str], dict[str, Any]]:
             required_vars = self._required_template_variables(template)
-            missing_variables = [key for key in required_vars if key not in variables]
-            render_variables = dict(variables)
+            missing_variables = [key for key in required_vars if key not in prompt_variables]
+            render_variables = dict(prompt_variables)
             for key in missing_variables:
                 render_variables[key] = f'<MISSING:{key}>'
             return missing_variables, render_variables
