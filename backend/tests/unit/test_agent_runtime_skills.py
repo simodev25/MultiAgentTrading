@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -15,6 +18,40 @@ def _context() -> AgentContext:
         market_snapshot={'last_price': 1.1, 'atr': 0.001, 'trend': 'bullish', 'change_pct': 0.15, 'rsi': 50, 'macd_diff': 0.1},
         news_context={'news': [{'title': 'Dollar falls as recession fears rise'}]},
         memory_context=[],
+    )
+
+
+def _news_llm_context() -> AgentContext:
+    return AgentContext(
+        pair='EURUSD',
+        timeframe='H1',
+        mode='simulation',
+        risk_percent=1.0,
+        market_snapshot={'last_price': 1.1, 'atr': 0.001, 'trend': 'bullish', 'change_pct': 0.15, 'rsi': 50, 'macd_diff': 0.1},
+        news_context={
+            'symbol': 'EURUSD=X',
+            'news': [
+                {
+                    'title': 'ECB officials signal higher-for-longer rates as euro inflation stays sticky',
+                    'summary': 'The euro strengthens after ECB policymakers back a restrictive stance while US dollar demand eases.',
+                    'published_at': '2026-03-27T08:00:00Z',
+                    'source_name': 'Reuters',
+                    'credibility_score': 0.95,
+                    'freshness_score': 0.95,
+                },
+                {
+                    'title': 'Euro rises as ECB hawkish guidance lifts EUR against the dollar',
+                    'summary': 'Traders reprice the euro higher after a clearly hawkish ECB message.',
+                    'published_at': '2026-03-27T09:00:00Z',
+                    'source_name': 'Bloomberg',
+                    'credibility_score': 0.9,
+                    'freshness_score': 0.9,
+                },
+            ],
+        },
+        memory_context=[
+            {'summary': 'Prior retained catalyst: ECB communication mattered for EURUSD when repricing rate expectations.'},
+        ],
     )
 
 
@@ -50,6 +87,104 @@ def test_market_context_agent_applies_deterministic_skill_guardrails() -> None:
         assert result['prompt_meta']['skills_count'] == 1
         assert result['tooling']['llm_tool_calls']
         assert result['tooling']['llm_tool_calls'][0]['source'] == 'runtime_preload'
+
+
+def test_news_agent_prompt_contract_is_event_driven_and_scope_limited(monkeypatch) -> None:
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(bind=engine)
+
+    with Session(engine) as db:
+        db.add(
+            ConnectorConfig(
+                connector_name='ollama',
+                enabled=True,
+                settings={
+                    'agent_llm_enabled': {'news-analyst': True},
+                },
+            )
+        )
+        db.commit()
+
+        agent = NewsAnalystAgent(prompt_service=agent_prompt_service())
+        seen_prompts: list[tuple[str, str, bool]] = []
+
+        def fake_chat(system_prompt: str, user_prompt: str, **kwargs):
+            seen_prompts.append((system_prompt, user_prompt, bool(kwargs.get('tools'))))
+            if kwargs.get('tools'):
+                return {'text': '', 'degraded': False}
+            return {
+                'text': (
+                    'bullish\n'
+                    'case=directional_signal\n'
+                    'horizon=swing\n'
+                    'impact=high\n'
+                    'Retained ECB catalysts support euro strength versus the dollar.'
+                ),
+                'degraded': False,
+            }
+
+        monkeypatch.setattr(agent.llm, 'chat', fake_chat)
+
+        result = agent.run(_news_llm_context(), db=db)
+
+        assert result['llm_call_attempted'] is True
+        assert seen_prompts
+        prompt_blob = '\n'.join(seen_prompts[0][:2]).lower()
+        assert 'retained news' in prompt_blob
+        assert 'identifiable catalysts' in prompt_blob
+        assert 'direct relevance' in prompt_blob
+        assert 'linked relevance' in prompt_blob
+        assert 'transmission to price' in prompt_blob
+        assert 'market-context-analyst' in prompt_blob
+        assert 'broad market environment or regime analysis' in prompt_blob
+
+
+def test_market_context_agent_prompt_contract_excludes_news_catalyst_role(monkeypatch) -> None:
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(bind=engine)
+
+    with Session(engine) as db:
+        db.add(
+            ConnectorConfig(
+                connector_name='ollama',
+                enabled=True,
+                settings={
+                    'agent_llm_enabled': {'market-context-analyst': True},
+                },
+            )
+        )
+        db.commit()
+
+        agent = MarketContextAnalystAgent()
+        seen_prompts: list[tuple[str, str, bool]] = []
+
+        def fake_chat(system_prompt: str, user_prompt: str, **kwargs):
+            seen_prompts.append((system_prompt, user_prompt, bool(kwargs.get('tools'))))
+            if kwargs.get('tools'):
+                return {'text': '', 'degraded': False}
+            return {
+                'text': (
+                    'bullish\n'
+                    'regime=trending\n'
+                    'context_support=supportive\n'
+                    'confidence=medium\n'
+                    'Context is readable but does not interpret specific news catalysts.'
+                ),
+                'degraded': False,
+            }
+
+        monkeypatch.setattr(agent.llm, 'chat', fake_chat)
+
+        result = agent.run(_context(), db=db)
+
+        assert result['llm_call_attempted'] is True
+        assert seen_prompts
+        prompt_blob = '\n'.join(seen_prompts[0][:2]).lower()
+        assert 'broad market environment' in prompt_blob
+        assert 'regime' in prompt_blob
+        assert 'retained news' in prompt_blob
+        assert 'identifiable catalysts' in prompt_blob
+        assert 'do not interpret' in prompt_blob
 
 
 def test_technical_agent_injects_tools_into_llm_and_executes_tool_calls(monkeypatch) -> None:
@@ -285,6 +420,19 @@ def test_trader_agent_uses_skill_hold_guardrail_when_llm_disabled() -> None:
         assert result['rationale']['decision_buy_threshold'] == 0.32
         assert result['decision'] == 'HOLD'
         assert result['prompt_meta']['skills_count'] == 2
+
+
+def test_default_news_agent_skills_define_event_driven_scope_boundary() -> None:
+    config_path = Path(__file__).resolve().parents[3] / 'backend' / 'config' / 'agent-skills.json'
+    payload = json.loads(config_path.read_text(encoding='utf-8'))
+
+    news_skills = payload['agent_skills']['news-analyst']
+    combined = ' '.join(news_skills).lower()
+
+    assert 'direct relevance' in combined
+    assert 'linked relevance' in combined
+    assert 'transmission' in combined
+    assert 'market-context-analyst' in combined
 
 
 def agent_prompt_service():

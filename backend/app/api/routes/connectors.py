@@ -9,6 +9,7 @@ from app.db.models.connector_config import ConnectorConfig
 from app.db.session import get_db
 from app.schemas.connector import ConnectorConfigOut, ConnectorConfigUpdate, MarketSymbolsOut, MarketSymbolsUpdate
 from app.services.connectors.runtime_settings import RuntimeConnectorSettings
+from app.services.llm.skill_bootstrap import bootstrap_agent_skills_into_settings
 from app.services.llm.model_selector import (
     AgentModelSelector,
     DEFAULT_DECISION_MODE,
@@ -175,6 +176,22 @@ def _sanitize_ollama_settings(raw_settings: dict) -> dict:
     return settings
 
 
+def _bootstrap_and_sanitize_ollama_settings(raw_settings: dict, app_settings) -> dict:
+    base_settings = {
+        **dict(raw_settings or {}),
+        'provider': dict(raw_settings or {}).get('provider', app_settings.llm_provider),
+        'decision_mode': dict(raw_settings or {}).get('decision_mode', app_settings.decision_mode),
+        'memory_context_enabled': dict(raw_settings or {}).get('memory_context_enabled', False),
+    }
+    bootstrapped_settings, _changed, _status = bootstrap_agent_skills_into_settings(
+        current_settings=base_settings,
+        bootstrap_file=app_settings.agent_skills_bootstrap_file,
+        mode=app_settings.agent_skills_bootstrap_mode,
+        apply_once=app_settings.agent_skills_bootstrap_apply_once,
+    )
+    return _sanitize_ollama_settings(bootstrapped_settings if isinstance(bootstrapped_settings, dict) else base_settings)
+
+
 def _validate_decision_mode_value(raw_settings: dict) -> None:
     if not isinstance(raw_settings, dict):
         return
@@ -225,11 +242,7 @@ def list_connectors(
         if connector_name not in existing:
             connector_settings: dict = {}
             if connector_name == 'ollama':
-                connector_settings = {
-                    'provider': settings.llm_provider,
-                    'decision_mode': normalize_decision_mode(settings.decision_mode),
-                    'memory_context_enabled': False,
-                }
+                connector_settings = _bootstrap_and_sanitize_ollama_settings({}, settings)
             connector_settings, _ = _inject_env_secret_defaults(connector_name, connector_settings, settings)
             conn = ConnectorConfig(connector_name=connector_name, enabled=True, settings=connector_settings)
             db.add(conn)
@@ -240,14 +253,7 @@ def list_connectors(
         has_changes = False
 
         if conn.connector_name == 'ollama':
-            sanitized_settings = _sanitize_ollama_settings(
-                {
-                    **current_settings,
-                    'provider': current_settings.get('provider', settings.llm_provider),
-                    'decision_mode': current_settings.get('decision_mode', settings.decision_mode),
-                    'memory_context_enabled': current_settings.get('memory_context_enabled', False),
-                }
-            )
+            sanitized_settings = _bootstrap_and_sanitize_ollama_settings(current_settings, settings)
             if sanitized_settings != next_settings:
                 next_settings = sanitized_settings
                 has_changes = True
@@ -263,6 +269,8 @@ def list_connectors(
     db.commit()
     for connector_name in updated_connector_names:
         RuntimeConnectorSettings.clear_cache(connector_name)
+    if 'ollama' in updated_connector_names:
+        AgentModelSelector.clear_cache()
     connectors = db.query(ConnectorConfig).filter(ConnectorConfig.connector_name.in_(SUPPORTED_CONNECTORS)).all()
     return [ConnectorConfigOut.model_validate(conn) for conn in connectors]
 

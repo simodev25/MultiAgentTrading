@@ -1172,8 +1172,11 @@ def test_all_agents_expose_raw_vs_final_contract_fields(monkeypatch) -> None:
     mc_out = mc.run(common_ctx)
     news_out = news.run(common_ctx, db=None)
 
-    for output in (ta_out, mc_out, news_out):
+    for output in (ta_out, mc_out):
         assert 'raw_score' in output
+    assert 'raw_score' not in news_out
+
+    for output in (ta_out, mc_out, news_out):
         assert 'final_signal' in output
         assert 'final_confidence' in output
         assert 'diagnostics' in output

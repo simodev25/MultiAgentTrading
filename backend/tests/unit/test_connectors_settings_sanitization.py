@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import create_engine
@@ -12,6 +14,7 @@ from app.api.routes.connectors import (
 )
 from app.core.config import get_settings
 from app.db.base import Base
+from app.db.models.connector_config import ConnectorConfig
 from app.schemas.connector import ConnectorConfigUpdate
 
 
@@ -231,3 +234,47 @@ def test_list_connectors_injects_env_secret_defaults_when_missing() -> None:
         settings.tradingeconomics_api_key = previous_values['tradingeconomics_api_key']
         settings.finnhub_api_key = previous_values['finnhub_api_key']
         settings.alphavantage_api_key = previous_values['alphavantage_api_key']
+
+
+def test_list_connectors_bootstraps_ollama_agent_skills_on_first_load(tmp_path) -> None:
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(bind=engine)
+
+    bootstrap_file = tmp_path / 'skills.json'
+    bootstrap_file.write_text(
+        json.dumps(
+            {
+                'agent_skills': {
+                    'news-analyst': ['Interpret retained catalysts first'],
+                    'trader-agent': ['Prefer HOLD if the edge is unclear'],
+                }
+            }
+        ),
+        encoding='utf-8',
+    )
+
+    settings = get_settings()
+    previous_values = {
+        'agent_skills_bootstrap_file': settings.agent_skills_bootstrap_file,
+        'agent_skills_bootstrap_mode': settings.agent_skills_bootstrap_mode,
+        'agent_skills_bootstrap_apply_once': settings.agent_skills_bootstrap_apply_once,
+    }
+    try:
+        settings.agent_skills_bootstrap_file = str(bootstrap_file)
+        settings.agent_skills_bootstrap_mode = 'merge'
+        settings.agent_skills_bootstrap_apply_once = True
+
+        with Session(engine) as db:
+            rows = list_connectors(db, _=None)
+            by_name = {row.connector_name: row.settings for row in rows}
+            ollama_settings = by_name['ollama']
+            assert ollama_settings['agent_skills']['news-analyst'] == ['Interpret retained catalysts first']
+            assert ollama_settings['agent_skills']['trader-agent'] == ['Prefer HOLD if the edge is unclear']
+
+            persisted = db.query(ConnectorConfig).filter(ConnectorConfig.connector_name == 'ollama').first()
+            assert persisted is not None
+            assert persisted.settings['agent_skills']['news-analyst'] == ['Interpret retained catalysts first']
+    finally:
+        settings.agent_skills_bootstrap_file = previous_values['agent_skills_bootstrap_file']
+        settings.agent_skills_bootstrap_mode = previous_values['agent_skills_bootstrap_mode']
+        settings.agent_skills_bootstrap_apply_once = previous_values['agent_skills_bootstrap_apply_once']

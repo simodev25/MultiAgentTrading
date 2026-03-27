@@ -46,16 +46,16 @@ const AGENT_PROMPT_FALLBACKS: Record<string, { system: string; user: string }> =
     user: 'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nTrend: {trend}\nRSI: {rsi}\nMACD diff: {macd_diff}\nPrice: {last_price}',
   },
   'news-analyst': {
-    system: "You are a multi-asset news analyst. Adapt your reasoning to the asset class and never invent causality.",
+    system: "You are a multi-asset event-driven news analyst. Interpret retained news and identifiable catalysts for the instrument, classify direct and linked relevance, estimate transmission to price, and never duplicate market-context-analyst.",
     user: (
       'Instrument: {pair}\nAsset class: {asset_class}\nDisplay symbol: {display_symbol}\nTimeframe: {timeframe}\n'
       + 'Instrument type: {instrument_type}\nPrimary asset: {primary_asset}\nSecondary asset: {secondary_asset}\n'
       + 'FX base asset: {base_asset}\nFX quote asset: {quote_asset}\nRelevant memories:\n{memory_context}\n'
-      + 'Retained evidence:\n{headlines}'
+      + 'Retained news and catalysts:\n{headlines}'
     ),
   },
   'market-context-analyst': {
-    system: "You are a multi-asset market context analyst. You evaluate regime, readability and volatility without external assumptions.",
+    system: "You are a multi-asset market context analyst. You evaluate the broad market environment, regime, readability and volatility without re-interpreting retained news or identifiable catalysts.",
     user: (
       'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nTrend: {trend}\nLast price: {last_price}\n'
       + 'Change pct: {change_pct}\nATR: {atr}\nATR ratio: {atr_ratio}\nRSI: {rsi}\n'

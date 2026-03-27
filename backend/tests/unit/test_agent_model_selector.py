@@ -1,6 +1,9 @@
+import json
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.db.base import Base
 from app.db.models.connector_config import ConnectorConfig
 from app.services.llm.model_selector import AgentModelSelector
@@ -155,6 +158,37 @@ def test_agent_model_selector_resolves_agent_skills() -> None:
         assert selector.resolve_skills(db, 'trader-agent') == ['Executable decision', 'Risk compliance']
         assert selector.resolve_skills(db, 'risk-manager') == ['Validate risk, without splitting the sentence']
         assert selector.resolve_skills(db, 'market-context-analyst') == []
+
+
+def test_agent_model_selector_synthesizes_bootstrap_skills_when_connector_missing(tmp_path, monkeypatch) -> None:
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(bind=engine)
+
+    bootstrap_file = tmp_path / 'skills.json'
+    bootstrap_file.write_text(
+        json.dumps(
+            {
+                'agent_skills': {
+                    'news-analyst': ['Interpret retained catalysts first'],
+                }
+            }
+        ),
+        encoding='utf-8',
+    )
+
+    monkeypatch.setenv('AGENT_SKILLS_BOOTSTRAP_FILE', str(bootstrap_file))
+    monkeypatch.setenv('AGENT_SKILLS_BOOTSTRAP_MODE', 'merge')
+    monkeypatch.setenv('AGENT_SKILLS_BOOTSTRAP_APPLY_ONCE', 'true')
+    get_settings.cache_clear()
+    AgentModelSelector.clear_cache()
+
+    try:
+        selector = AgentModelSelector()
+        with Session(engine) as db:
+            assert selector.resolve_skills(db, 'news-analyst') == ['Interpret retained catalysts first']
+    finally:
+        get_settings.cache_clear()
+        AgentModelSelector.clear_cache()
 
 
 def test_agent_model_selector_resolves_decision_mode_with_fallback() -> None:

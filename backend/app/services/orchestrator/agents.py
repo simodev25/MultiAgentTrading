@@ -149,6 +149,49 @@ def _parse_signal_from_text(text: str) -> str:
     return 'neutral'
 
 
+def _extract_contract_line_value(text: str, label: str) -> str | None:
+    pattern = re.compile(
+        rf'^\s*{re.escape(label)}\s*[:=]\s*(.+?)\s*$',
+        re.IGNORECASE | re.MULTILINE,
+    )
+    match = pattern.search(text or '')
+    if not match:
+        return None
+    value = str(match.group(1)).strip()
+    return value or None
+
+
+def _parse_choice_contract_line(text: str, label: str, *, allowed: set[str]) -> str | None:
+    value = _extract_contract_line_value(text, label)
+    if value is None:
+        return None
+    candidate = str(value).strip().lower()
+    if candidate in allowed:
+        return candidate
+    return None
+
+
+def _parse_float_contract_line(
+    text: str,
+    label: str,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> float | None:
+    value = _extract_contract_line_value(text, label)
+    if value is None:
+        return None
+    match = re.match(r'^\s*([-+]?(?:\d+(?:\.\d+)?|\.\d+))\s*$', value)
+    if not match:
+        return None
+    parsed = float(match.group(1))
+    if minimum is not None:
+        parsed = max(parsed, minimum)
+    if maximum is not None:
+        parsed = min(parsed, maximum)
+    return parsed
+
+
 def _parse_trade_decision_from_text(text: str) -> str:
     patterns = (
         re.compile(r'(?:d[ée]cision|ex[ée]cution|trade|side)\s*[:=-]?\s*(?:\*+)?\s*(buy|sell|hold)\b', re.IGNORECASE),
@@ -1534,9 +1577,11 @@ def _optimize_news_prompts_for_latency(system_prompt: str, user_prompt: str) -> 
     guidance = (
         'Strict output format: line 1 bullish/bearish/neutral; '
         'line 2 case=no_signal|weak_signal|directional_signal; '
-        'line 3 horizon=intraday|swing|uncertain; '
-        'line 4 impact=high|medium|low; '
-        'line 5 very short justification.'
+        'line 3 score=-1.00..1.00; '
+        'line 4 confidence=0.00..1.00; '
+        'line 5 horizon=intraday|swing|uncertain; '
+        'line 6 impact=high|medium|low; '
+        'line 7 very short justification.'
     )
     if guidance not in system:
         system = f'{system}\n\n{guidance}'
@@ -1709,8 +1754,6 @@ def _validate_news_output(
     directional_evidence_count = sum(1 for item in selected_evidence if _has_directional_instrument_effect(item))
     no_signal_summary = _news_summary_implies_no_signal(summary) or _news_summary_implies_no_signal(llm_summary)
     score = float(output.get('score', 0.0) or 0.0)
-    raw_score = float(output.get('raw_score', output.get('score', 0.0) or 0.0) or 0.0)
-    output['raw_score'] = round(_clamp(raw_score, -1.0, 1.0), 3)
 
     if no_signal_summary and output.get('signal') != 'neutral':
         actions.append('summary_forced_neutral')
@@ -1842,7 +1885,6 @@ def _validate_news_output(
     output['validation_actions'] = actions
     output['selected_evidence_count'] = len(selected_evidence)
     output['rejected_evidence_count'] = len(rejected_evidence)
-    output['directional_evidence_count'] = directional_evidence_count
     output['strongest_pair_relevance'] = round(strongest_relevance, 3)
     return output
 
@@ -3954,6 +3996,8 @@ class NewsAnalystAgent:
         llm_retry_used = False
         llm_call_attempted = False
         llm_skipped_reason: str | None = None
+        llm_primary_used = False
+        llm_direct_fields_used = False
         llm_tool_calls: list[dict[str, Any]] = []
         llm_res: dict[str, Any] = {}
         prompt_info: dict[str, Any] = {'prompt_id': None, 'version': 0}
@@ -4037,8 +4081,12 @@ class NewsAnalystAgent:
             evidence_text = '\n'.join(evidence_lines) or '- none'
 
             fallback_system = (
-                'You are a multi-asset news analyst. '
-                'Objective: isolate only actionable catalysts for the analyzed instrument. '
+                'You are a multi-asset event-driven news analyst. '
+                'Objective: interpret retained news and identifiable catalysts for the analyzed instrument and produce a news-driven directional hypothesis. '
+                'Classify direct relevance and linked relevance. '
+                'Estimate the transmission to price before forming direction. '
+                'You may reference market context only as a transmission mechanism for retained news. '
+                'Do not perform broad market environment or regime analysis; that belongs to market-context-analyst. '
                 'Never invent causality. '
                 'You must keep the summary, signal and signal strength coherent. '
                 'Distinguish facts, inferences and uncertainties. '
@@ -4047,17 +4095,25 @@ class NewsAnalystAgent:
             fallback_user = (
                 'Instrument: {pair}\nDisplay symbol: {display_symbol}\nAsset class: {asset_class}\nInstrument type: {instrument_type}\n'
                 'Primary asset: {primary_asset}\nSecondary asset: {secondary_asset}\nFX base: {base_asset}\nFX quote: {quote_asset}\n'
-                'Initial deterministic signal: {signal}\nInitial score: {score}\n'
+                'Evidence diagnostics: coverage={coverage}, strongest_pair_relevance={strongest_relevance}, evidence_strength={evidence_strength}\n'
+                'Relevant memories:\n{memory_context}\n'
+                'Retained news and catalysts:\n{evidence}\n'
                 'Contract rules:\n'
+                '- Interpret only retained news and identifiable catalysts already provided.\n'
+                '- For each retained item, classify direct relevance or linked relevance to the instrument.\n'
+                '- Linked relevance is valid only if you can state a concrete transmission to price for this instrument.\n'
+                '- You may mention market context only as a transmission mechanism for retained news; broad market environment or regime analysis belongs to market-context-analyst.\n'
                 '- For FX, first interpret the probable effect on the primary asset and the reference asset, then convert into a bias on the pair.\n'
                 '- For other asset classes, reason about the instrument itself, its underlying or its sector if these elements are actually present.\n'
                 '- If no evidence is directly actionable for the instrument, return neutral.\n'
                 '- If evidence is only weak or indirect, return neutral.\n'
                 '- First mandatory line: bullish, bearish or neutral.\n'
                 '- Second line: case=no_signal|weak_signal|directional_signal.\n'
-                '- Third line: horizon=intraday|swing|uncertain.\n'
-                '- Fourth line: impact=high|medium|low.\n'
-                '- Fifth line max: short justification linking evidence to the instrument.\n'
+                '- Third line: score=<between -1.00 and 1.00>.\n'
+                '- Fourth line: confidence=<between 0.00 and 1.00>.\n'
+                '- Fifth line: horizon=intraday|swing|uncertain.\n'
+                '- Sixth line: impact=high|medium|low.\n'
+                '- Seventh line max: short justification linking retained evidence, transmission to price and the instrument.\n'
                 '- Never declare bullish/bearish if the text concludes no relevant news.'
             )
             if db is not None:
@@ -4076,6 +4132,8 @@ class NewsAnalystAgent:
                         'coverage': coverage,
                         'signal': signal,
                         'score': score,
+                        'strongest_relevance': round(strongest_relevance, 3),
+                        'evidence_strength': evidence_strength,
                         'evidence': evidence_text,
                         'memory_context': _compact_memory_for_prompt(ctx.memory_context, limit=3),
                         'headlines': evidence_text,
@@ -4095,8 +4153,11 @@ class NewsAnalystAgent:
                         'coverage': coverage,
                         'signal': signal,
                         'score': score,
+                        'strongest_relevance': round(strongest_relevance, 3),
+                        'evidence_strength': evidence_strength,
                         'headlines': evidence_text,
                         'evidence': evidence_text,
+                        'memory_context': _compact_memory_for_prompt(ctx.memory_context, limit=3),
                     },
                 ))
             system = _append_tools_prompt_guidance(system, enabled_tools=enabled_tools)
@@ -4192,36 +4253,55 @@ class NewsAnalystAgent:
             llm_summary = llm_text
             if not llm_degraded and llm_text.strip():
                 llm_signal = _parse_signal_from_text(llm_text)
-                # LLM influence weight: stronger when rule-based system was uncertain
-                if llm_semantic_mode:
-                    # Semantic mode: LLM is the primary signal source since rule-based failed
-                    llm_weight = 0.6
-                    deterministic_weight = 0.4
+                llm_case = _parse_choice_contract_line(
+                    llm_text,
+                    'case',
+                    allowed={'no_signal', 'weak_signal', 'directional_signal'},
+                )
+                llm_score = _parse_float_contract_line(llm_text, 'score', minimum=-1.0, maximum=1.0)
+                llm_confidence = _parse_float_contract_line(llm_text, 'confidence', minimum=0.0, maximum=1.0)
+
+                llm_primary_used = True
+                if llm_score is not None:
+                    score = round(_clamp(llm_score, -1.0, 1.0), 3)
+                    llm_direct_fields_used = True
+                elif llm_signal == 'neutral' or llm_case == 'no_signal':
+                    score = 0.0
                 else:
-                    # Standard mode: LLM refines the rule-based signal
-                    llm_weight = 0.3
-                    deterministic_weight = 0.7
-                llm_score = {'bullish': 0.15, 'bearish': -0.15, 'neutral': 0.0}[llm_signal]
-                score = round(_clamp(score * deterministic_weight + llm_score * llm_weight, -1.0, 1.0), 3)
-                if llm_signal == 'neutral':
+                    inferred_magnitude = max(abs(float(score)), 0.12)
+                    score = round(inferred_magnitude if llm_signal == 'bullish' else -inferred_magnitude, 3)
+
+                if llm_signal == 'neutral' or llm_case == 'no_signal':
                     signal = 'neutral'
-                elif llm_signal in {'bullish', 'bearish'} and signal == 'neutral':
-                    if strongest_relevance >= min_directional_relevance or llm_semantic_mode:
-                        signal = llm_signal
-                        if llm_semantic_mode:
-                            decision_mode = 'llm_semantic_override'
-                            information_state = 'llm_disambiguated'
-                            reason = 'LLM semantic analysis resolved directional bias that rule-based scoring could not determine'
-                        elif decision_mode == 'neutral_from_mixed_news' and directional_evidence_count >= 2:
-                            pass  # score already set by weighted blend above
-                    # Set minimum meaningful score when LLM gives a directional signal
-                    if signal in {'bullish', 'bearish'} and abs(score) < 0.10:
+                    if llm_score is not None and abs(score) >= 0.10:
+                        score = round(_clamp(score * 0.20, -0.05, 0.05), 3)
+                else:
+                    signal = llm_signal
+                    if abs(score) < 0.10:
                         score = 0.12 if signal == 'bullish' else -0.12
-                # Keep the reported signal and score directionally coherent for traceability.
+
                 if signal == 'bullish' and score <= 0.0:
                     score = round(max(abs(score), 0.01), 3)
                 elif signal == 'bearish' and score >= 0.0:
                     score = round(-max(abs(score), 0.01), 3)
+
+                if llm_confidence is not None:
+                    confidence = round(_clamp(llm_confidence, 0.0, 0.95), 3)
+                    llm_direct_fields_used = True
+
+                if llm_semantic_mode and signal in {'bullish', 'bearish'}:
+                    decision_mode = 'llm_semantic_override'
+                    information_state = 'llm_disambiguated'
+                    reason = 'LLM semantic analysis resolved directional bias from retained news and catalysts.'
+                elif signal in {'bullish', 'bearish'}:
+                    decision_mode = 'llm_primary'
+                    information_state = 'llm_directional_bias'
+                    reason = 'LLM analyzed retained news and catalysts and identified a directional transmission to price.'
+                else:
+                    decision_mode = 'llm_neutral'
+                    information_state = 'llm_no_directional_bias'
+                    reason = 'LLM analyzed retained news and catalysts and found no reliable directional transmission to price.'
+
                 llm_fallback_used = False
                 summary = llm_text
                 self._record_llm_success()
@@ -4255,14 +4335,6 @@ class NewsAnalystAgent:
                         'instrument_type': item.get('instrument_type'),
                         'primary_asset': item.get('primary_asset'),
                         'secondary_asset': item.get('secondary_asset'),
-                        'directional_hint': item.get('directional_hint'),
-                        'instrument_directional_effect': item.get('instrument_directional_effect'),
-                        'instrument_bias_score': item.get('instrument_bias_score'),
-                        'impacted_assets': item.get('impacted_assets'),
-                        'impacted_currencies': item.get('impacted_currencies'),
-                        'impact_on_base': item.get('impact_on_base'),
-                        'impact_on_quote': item.get('impact_on_quote'),
-                        'pair_directional_effect': item.get('pair_directional_effect'),
                     }
                 )
             else:
@@ -4285,27 +4357,19 @@ class NewsAnalystAgent:
                         'secondary_asset': item.get('secondary_asset'),
                         'asset_symbols_detected': item.get('asset_symbols_detected'),
                         'macro_tags': item.get('macro_tags'),
-                        'sentiment_hint': item.get('sentiment_hint'),
                         'asset_class': item.get('asset_class'),
-                        'directional_eligible': item.get('directional_eligible'),
-                        'signal_case': item.get('signal_case'),
-                        'instrument_directional_effect': item.get('instrument_directional_effect'),
-                        'instrument_bias_score': item.get('instrument_bias_score'),
-                        'impacted_assets': item.get('impacted_assets'),
-                        'impacted_currencies': item.get('impacted_currencies'),
-                        'impact_on_base': item.get('impact_on_base'),
-                        'impact_on_quote': item.get('impact_on_quote'),
-                        'pair_directional_effect': item.get('pair_directional_effect'),
                     }
                 )
 
         resolved_skills = list(prompt_info.get('skills', runtime_skills)) if isinstance(prompt_info, dict) else list(runtime_skills)
         if llm_call_attempted and llm_fallback_used:
             _news_conf_method = 'deterministic_fallback'
-        elif llm_call_attempted and decision_mode == 'llm_semantic_override':
-            _news_conf_method = 'llm_semantic'
+        elif llm_call_attempted and llm_direct_fields_used:
+            _news_conf_method = 'llm_direct'
+        elif llm_call_attempted and llm_primary_used:
+            _news_conf_method = 'llm_primary'
         elif llm_call_attempted:
-            _news_conf_method = 'evidence_weighted'
+            _news_conf_method = 'llm_semantic'
         else:
             _news_conf_method = 'deterministic_evidence'
         if llm_call_attempted and llm_fallback_used and signal == 'neutral':
@@ -4948,7 +5012,8 @@ class MarketContextAnalystAgent:
         if llm_enabled:
             fallback_system = (
                 'You are market-context-analyst. '
-                'Evaluate only the market regime, short-term contextual momentum, movement readability and volatility. '
+                'Evaluate only the broad market environment, market regime, short-term contextual momentum, movement readability and volatility. '
+                'Your role is contextual and regime analysis, not retained news or identifiable catalyst interpretation. '
                 'Distinguish facts, inferences and uncertainties. '
                 'Do not invent macro-fundamental causality or external correlations.'
             )
@@ -4957,6 +5022,7 @@ class MarketContextAnalystAgent:
                 'Change pct: {change_pct}\nATR: {atr}\nATR ratio: {atr_ratio}\nRSI: {rsi}\n'
                 'EMA fast: {ema_fast}\nEMA slow: {ema_slow}\nMACD diff: {macd_diff}\n'
                 'Output contract:\n'
+                '- Evaluate the broad market environment and regime only; do not interpret retained news or identifiable catalysts.\n'
                 '- Line 1: bullish|bearish|neutral.\n'
                 '- Line 2: regime=trending|ranging|calm|unstable|volatile.\n'
                 '- Line 3: context_support=supportive|neutral|unsupportive.\n'

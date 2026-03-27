@@ -274,6 +274,69 @@ def test_news_analyst_keeps_directional_signal_for_clean_fx_catalysts(monkeypatc
     assert out['retained_news_count'] >= 2
 
 
+def test_news_analyst_prefers_explicit_llm_score_and_confidence_over_deterministic_blend(monkeypatch) -> None:
+    agent = NewsAnalystAgent(PromptTemplateService())
+    ctx = _news_context()
+    _configure_llm(
+        agent,
+        monkeypatch,
+        (
+            'bearish\n'
+            'case=directional_signal\n'
+            'score=-0.34\n'
+            'confidence=0.27\n'
+            'horizon=swing\n'
+            'impact=medium\n'
+            'Dollar repricing dominates the retained EUR headlines.'
+        ),
+        enabled=True,
+    )
+
+    out = agent.run(ctx, db=None)
+
+    assert out['signal'] == 'bearish'
+    assert out['score'] == -0.34
+    assert out['confidence'] == 0.27
+    assert out['confidence_method'] == 'llm_direct'
+
+
+def test_news_analyst_hides_deterministic_directional_diagnostics_from_public_output(monkeypatch) -> None:
+    agent = NewsAnalystAgent(PromptTemplateService())
+    ctx = _news_context()
+    _configure_llm(
+        agent,
+        monkeypatch,
+        (
+            'bearish\n'
+            'case=directional_signal\n'
+            'score=-0.31\n'
+            'confidence=0.41\n'
+            'horizon=intraday\n'
+            'impact=medium\n'
+            'ETF outflows and defensive BTC positioning dominate.'
+        ),
+        enabled=True,
+    )
+
+    out = agent.run(ctx, db=None)
+
+    assert 'raw_score' not in out
+    assert 'directional_evidence_count' not in out
+    assert out['evidence']
+    first = out['evidence'][0]
+    for forbidden_key in (
+        'sentiment_hint',
+        'directional_eligible',
+        'signal_case',
+        'instrument_directional_effect',
+        'instrument_bias_score',
+        'impact_on_base',
+        'impact_on_quote',
+        'pair_directional_effect',
+    ):
+        assert forbidden_key not in first
+
+
 def test_news_analyst_never_claims_macro_contribution_when_macro_counts_are_zero(monkeypatch) -> None:
     agent = NewsAnalystAgent(PromptTemplateService())
     ctx = _news_context()
@@ -558,7 +621,6 @@ def test_news_analyst_maps_usd_weakness_generically_by_pair_structure(monkeypatc
 
     assert out['signal'] == expected_signal
     assert out['score'] > 0.10 if expected_signal == 'bullish' else out['score'] < -0.10
-    assert out['evidence'][0]['pair_directional_effect'] == expected_signal
 
 
 @pytest.mark.parametrize(
@@ -583,7 +645,6 @@ def test_news_analyst_handles_cross_pairs_without_symbol_hardcode(
     out = agent.run(ctx, db=None)
 
     assert out['signal'] == expected_signal
-    assert out['evidence'][0]['pair_directional_effect'] == expected_signal
 
 
 def test_news_analyst_downshifts_ambiguous_fx_news_to_neutral(monkeypatch) -> None:
@@ -600,7 +661,6 @@ def test_news_analyst_downshifts_ambiguous_fx_news_to_neutral(monkeypatch) -> No
     assert out['signal'] == 'neutral'
     assert abs(out['score']) <= 0.10
     assert out['confidence'] <= 0.45
-    assert out['evidence'][0]['pair_directional_effect'] == 'neutral'
 
 
 def test_news_analyst_downweights_vague_fx_macro_noise(monkeypatch) -> None:
@@ -655,6 +715,6 @@ def test_validate_news_output_removes_hidden_directional_push_from_neutral_fx_ou
     assert abs(output['score']) <= 0.05
     # Confidence scales with relevance quality instead of hard cap at 0.18
     assert output['confidence'] <= 0.50
-    assert output['directional_evidence_count'] == 0
+    assert 'directional_evidence_count' not in output
     # High-relevance fx evidence (>=0.60) is no longer force-classified as fx_neutral_only
     assert output['decision_mode'] in ('neutral_from_low_relevance', 'neutral_from_mixed_news')

@@ -388,7 +388,28 @@ class AgentModelSelector:
                 .filter(ConnectorConfig.connector_name == 'ollama')
                 .first()
             )
-            settings = connector.settings if connector is not None and isinstance(connector.settings, dict) else {}
+            settings = dict(connector.settings) if connector is not None and isinstance(connector.settings, dict) else {}
+
+            runtime_settings = get_settings()
+            if 'provider' not in settings:
+                settings['provider'] = normalize_llm_provider(runtime_settings.llm_provider, fallback='ollama')
+
+            # Docker first-start path: Celery workers can resolve agent settings before
+            # the FastAPI startup seeded connector configs into the database.
+            # Synthesize bootstrap skills from env/config so the first analysis run
+            # sees the expected agent_skills even when the connector row is not yet persisted.
+            if runtime_settings.agent_skills_bootstrap_file:
+                from app.services.llm.skill_bootstrap import bootstrap_agent_skills_into_settings
+
+                synthesized_settings, _changed, _status = bootstrap_agent_skills_into_settings(
+                    current_settings=settings,
+                    bootstrap_file=runtime_settings.agent_skills_bootstrap_file,
+                    mode=runtime_settings.agent_skills_bootstrap_mode,
+                    apply_once=runtime_settings.agent_skills_bootstrap_apply_once,
+                )
+                if isinstance(synthesized_settings, dict):
+                    settings = synthesized_settings
+
             cls._settings_cache[db] = (now, settings)
 
             if len(cls._settings_cache) > 128:
