@@ -57,14 +57,24 @@ def test_ollama_url_gets_v1_suffix():
 from app.services.agentscope.formatter_factory import build_formatter
 
 
-def test_ollama_chat_formatter():
-    f = build_formatter("ollama", multi_agent=False)
+def test_ollama_local_chat_formatter():
+    f = build_formatter("ollama", multi_agent=False, base_url="http://localhost:11434")
     assert f.__class__.__name__ == "OllamaChatFormatter"
 
 
-def test_ollama_multi_agent_formatter():
-    f = build_formatter("ollama", multi_agent=True)
+def test_ollama_local_multi_agent_formatter():
+    f = build_formatter("ollama", multi_agent=True, base_url="http://localhost:11434")
     assert f.__class__.__name__ == "OllamaMultiAgentFormatter"
+
+
+def test_ollama_cloud_uses_openai_formatter():
+    f = build_formatter("ollama", multi_agent=False, base_url="https://ollama.com")
+    assert f.__class__.__name__ == "OpenAIChatFormatter"
+
+
+def test_ollama_cloud_multi_agent_uses_openai_formatter():
+    f = build_formatter("ollama", multi_agent=True, base_url="https://ollama.com")
+    assert f.__class__.__name__ == "OpenAIMultiAgentFormatter"
 
 
 def test_openai_chat_formatter():
@@ -77,6 +87,6 @@ def test_mistral_uses_openai_formatter():
     assert f.__class__.__name__ == "OpenAIMultiAgentFormatter"
 
 
-def test_formatter_unknown_provider_raises():
-    with pytest.raises(ValueError, match="Unknown provider"):
-        build_formatter("unknown")
+def test_formatter_unknown_provider_falls_back_to_openai():
+    f = build_formatter("unknown")
+    assert f.__class__.__name__ == "OpenAIChatFormatter"

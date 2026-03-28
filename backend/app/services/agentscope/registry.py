@@ -152,8 +152,8 @@ class AgentScopeRegistry:
                 provider, model_name, base_url,
             )
             model = build_model(provider, model_name, base_url, api_key)
-            chat_formatter = build_formatter(provider, multi_agent=False)
-            debate_formatter = build_formatter(provider, multi_agent=True)
+            chat_formatter = build_formatter(provider, multi_agent=False, base_url=base_url)
+            debate_formatter = build_formatter(provider, multi_agent=True, base_url=base_url)
 
             # Resolve market data
             market_data = self._resolve_market_data(pair, timeframe)
