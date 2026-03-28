@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings, get_settings
 from app.db.models.metaapi_account import MetaApiAccount
 from app.db.models.run import AnalysisRun
-from app.services.agent_runtime.constants import AGENTIC_V2_RUNTIME
+AGENTIC_V2_RUNTIME = 'agentscope_v1'  # migrated from agent_runtime.constants
 from app.services.market.symbols import canonical_symbol, get_market_symbols_config
 
 logger = logging.getLogger(__name__)
