@@ -9,7 +9,7 @@ Validates that:
 import pytest
 
 from app.services.risk.rules import RiskEngine
-from app.services.agent_runtime.mcp_trading_server import position_size_calculator
+from app.services.mcp.trading_server import position_size_calculator
 
 
 engine = RiskEngine()
