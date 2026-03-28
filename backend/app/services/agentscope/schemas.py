@@ -1,7 +1,25 @@
 """Pydantic output schemas for structured agent output (msg.metadata)."""
 from __future__ import annotations
-from typing import Literal
+from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+_SIGNAL_ALIASES = {"hold": "neutral", "none": "neutral", "flat": "neutral", "buy": "bullish", "sell": "bearish"}
+_DECISION_ALIASES = {"bullish": "BUY", "bearish": "SELL", "neutral": "HOLD", "hold": "HOLD", "buy": "BUY", "sell": "SELL"}
+
+
+def _normalize_signal(value: Any) -> str:
+    if not isinstance(value, str):
+        return "neutral"
+    lower = value.strip().lower()
+    return _SIGNAL_ALIASES.get(lower, lower)
+
+
+def _normalize_decision(value: Any) -> str:
+    if not isinstance(value, str):
+        return "HOLD"
+    lower = value.strip().lower()
+    return _DECISION_ALIASES.get(lower, value.strip().upper())
 
 
 class _SchemaBase(BaseModel):
@@ -20,6 +38,15 @@ class TechnicalAnalysisResult(_SchemaBase):
     degraded: bool = False
     reason: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_signals(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            for field in ("signal", "structural_bias", "local_momentum"):
+                if field in data:
+                    data[field] = _normalize_signal(data[field])
+        return data
+
 
 class NewsAnalysisResult(_SchemaBase):
     signal: Literal["bullish", "bearish", "neutral"]
@@ -30,6 +57,13 @@ class NewsAnalysisResult(_SchemaBase):
     summary: str = Field(min_length=1)
     degraded: bool = False
     reason: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_signals(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "signal" in data:
+            data["signal"] = _normalize_signal(data["signal"])
+        return data
 
 
 class MarketContextResult(_SchemaBase):
@@ -43,6 +77,13 @@ class MarketContextResult(_SchemaBase):
     hard_block: bool = False
     degraded: bool = False
     reason: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_signals(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "signal" in data:
+            data["signal"] = _normalize_signal(data["signal"])
+        return data
 
 
 class DebateThesis(_SchemaBase):
@@ -71,6 +112,13 @@ class TraderDecisionDraft(_SchemaBase):
     take_profit: float | None = None
     degraded: bool = False
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_decision(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "decision" in data:
+            data["decision"] = _normalize_decision(data["decision"])
+        return data
+
     @model_validator(mode="after")
     def validate_execution_levels(self) -> "TraderDecisionDraft":
         if self.decision == "HOLD" or not self.execution_allowed:
@@ -98,3 +146,13 @@ class ExecutionPlanResult(_SchemaBase):
     volume: float = Field(ge=0.0)
     reason: str = Field(min_length=1)
     degraded: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_decision(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "decision" in data:
+                data["decision"] = _normalize_decision(data["decision"])
+            if "side" in data and data["side"]:
+                data["side"] = _normalize_decision(data["side"])
+        return data
