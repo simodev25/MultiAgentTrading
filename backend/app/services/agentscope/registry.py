@@ -611,24 +611,123 @@ class AgentScopeRegistry:
             "user_prompt": (rendered.get("user_prompt") or "")[:3000],
         }
 
-    async def _run_deterministic(self, agent_name: str, toolkit, context_msg: Msg) -> Msg:
-        """Run agent tools deterministically without LLM — returns raw tool results."""
+    async def _run_deterministic(
+        self, agent_name: str, toolkit, context_msg: Msg,
+        ohlc: dict | None = None, snapshot: dict | None = None,
+        pair: str = "", timeframe: str = "", risk_percent: float = 1.0,
+        analysis_outputs: dict | None = None,
+        trader_out: dict | None = None, risk_out: dict | None = None,
+    ) -> Msg:
+        """Run agent tools deterministically without LLM — passes proper args."""
         from app.services.agentscope.toolkit import AGENT_TOOL_MAP
         from app.services.mcp.client import get_mcp_client
 
         client = get_mcp_client()
+        ohlc = ohlc or {}
+        snapshot = snapshot or {}
         tool_ids = AGENT_TOOL_MAP.get(agent_name, [])
         results = {}
+
         for tool_id in tool_ids:
             try:
-                # Call with empty kwargs — preset_kwargs will fill OHLC
-                result = await client.call_tool(tool_id, {})
+                kwargs = self._build_tool_kwargs(
+                    tool_id, ohlc=ohlc, snapshot=snapshot,
+                    pair=pair, timeframe=timeframe, risk_percent=risk_percent,
+                    trader_out=trader_out, risk_out=risk_out,
+                )
+                result = await client.call_tool(tool_id, kwargs)
                 results[tool_id] = result
             except Exception as exc:
                 results[tool_id] = {"error": str(exc)}
 
         text = json.dumps(results, default=str)
         return Msg(agent_name, f"[deterministic] {text}", "assistant")
+
+    @staticmethod
+    def _build_tool_kwargs(
+        tool_id: str, ohlc: dict, snapshot: dict,
+        pair: str = "", timeframe: str = "", risk_percent: float = 1.0,
+        trader_out: dict | None = None, risk_out: dict | None = None,
+    ) -> dict:
+        """Build appropriate kwargs for each MCP tool in deterministic mode."""
+        closes = ohlc.get("closes", [])
+        highs = ohlc.get("highs", [])
+        lows = ohlc.get("lows", [])
+        opens = ohlc.get("opens", [])
+
+        if tool_id == "indicator_bundle":
+            return {"closes": closes, "highs": highs, "lows": lows}
+        if tool_id == "divergence_detector":
+            return {"closes": closes}
+        if tool_id == "pattern_detector":
+            return {"opens": opens, "highs": highs, "lows": lows, "closes": closes}
+        if tool_id == "support_resistance_detector":
+            return {"highs": highs, "lows": lows, "closes": closes}
+        if tool_id == "multi_timeframe_context":
+            return {
+                "current_tf_trend": snapshot.get("trend", "neutral"),
+                "current_tf_rsi": snapshot.get("rsi", 50.0),
+            }
+        if tool_id == "market_regime_detector":
+            return {"closes": closes}
+        if tool_id == "volatility_analyzer":
+            return {"closes": closes, "highs": highs, "lows": lows}
+        if tool_id == "session_context":
+            return {}
+        if tool_id == "correlation_analyzer":
+            return {"primary_closes": closes, "secondary_closes": closes, "primary_symbol": pair}
+        if tool_id == "market_snapshot":
+            return {
+                "symbol": pair, "timeframe": timeframe,
+                "last_price": snapshot.get("last_price", 0),
+                "open_price": opens[-1] if opens else 0,
+                "high_price": highs[-1] if highs else 0,
+                "low_price": lows[-1] if lows else 0,
+            }
+        if tool_id == "technical_scoring":
+            return {
+                "trend": snapshot.get("trend", "neutral"),
+                "rsi": snapshot.get("rsi", 50.0),
+                "macd_diff": snapshot.get("macd_diff", 0.0),
+                "atr": snapshot.get("atr", 0.0),
+                "ema_fast_above_slow": snapshot.get("ema_fast", 0) > snapshot.get("ema_slow", 0),
+                "change_pct": snapshot.get("change_pct", 0.0),
+            }
+        if tool_id == "decision_gating":
+            return {
+                "combined_score": 0.0, "confidence": 0.0,
+                "aligned_sources": 0, "mode": "balanced",
+            }
+        if tool_id == "contradiction_detector":
+            return {
+                "macd_diff": snapshot.get("macd_diff", 0.0),
+                "atr": snapshot.get("atr", 0.001),
+                "trend": snapshot.get("trend", "neutral"),
+            }
+        if tool_id == "trade_sizing":
+            return {
+                "price": snapshot.get("last_price", 0.0),
+                "atr": snapshot.get("atr", 0.0),
+                "decision_side": "HOLD",
+            }
+        if tool_id == "position_size_calculator":
+            td = (trader_out or {}).get("metadata", {})
+            return {
+                "asset_class": "forex",
+                "entry_price": td.get("entry", snapshot.get("last_price", 0)),
+                "stop_loss": td.get("stop_loss", 0),
+                "risk_percent": risk_percent,
+            }
+        if tool_id == "risk_evaluation":
+            return {
+                "trader_decision": (trader_out or {}).get("metadata", {}),
+                "risk_percent": risk_percent,
+            }
+        if tool_id in ("news_search", "macro_event_feed", "sentiment_parser", "symbol_relevance_filter"):
+            return {"symbol": pair}
+        if tool_id in ("evidence_query", "thesis_support_extractor", "scenario_validation"):
+            return {}
+        return {}
 
     async def execute(self, db, run, pair: str, timeframe: str, risk_percent: float,
                       metaapi_account_ref: str | None = None):
@@ -691,7 +790,10 @@ class AgentScopeRegistry:
             # Store tool invocations per agent (filled after each call)
             agent_tool_invocations: dict[str, dict] = {}
 
-            async def _call_agent(name: str, msg: Msg) -> Msg:
+            async def _call_agent(
+                name: str, msg: Msg,
+                trader_out: dict | None = None, risk_out: dict | None = None,
+            ) -> Msg:
                 """Call agent via LLM (with structured output) or deterministic."""
                 if name in agents:
                     schema = AGENT_STRUCTURED_MODELS.get(name)
@@ -699,10 +801,14 @@ class AgentScopeRegistry:
                         result = await agents[name](msg, structured_model=schema)
                     else:
                         result = await agents[name](msg)
-                    # Extract tool invocations from agent memory
                     agent_tool_invocations[name] = await _extract_tool_invocations(agents[name])
                     return result
-                return await self._run_deterministic(name, toolkits.get(name), msg)
+                return await self._run_deterministic(
+                    name, toolkits.get(name), msg,
+                    ohlc=ohlc, snapshot=snapshot, pair=pair, timeframe=timeframe,
+                    risk_percent=risk_percent, analysis_outputs=analysis_outputs,
+                    trader_out=trader_out, risk_out=risk_out,
+                )
 
             # ── Phase 1: Parallel analysts ──
             logger.info("Phase 1: Running 3 analysts in parallel for %s/%s", pair, timeframe)
@@ -781,9 +887,14 @@ class AgentScopeRegistry:
                 f"Phase 1 analysis:\n{analysis_summary}"
             )
             current_msg = Msg("system", decision_context, "system")
+            _trader_out: dict | None = None
+            _risk_out: dict | None = None
             for name in ["trader-agent", "risk-manager", "execution-manager"]:
                 t0 = time.time()
-                current_msg = await _call_agent(name, current_msg)
+                current_msg = await _call_agent(
+                    name, current_msg,
+                    trader_out=_trader_out, risk_out=_risk_out,
+                )
                 step_ms = (time.time() - t0) * 1000
                 d = _msg_to_dict(current_msg, tool_invocations=agent_tool_invocations.get(name, {}))
                 d["llm_enabled"] = llm_enabled.get(name, False)
@@ -792,6 +903,11 @@ class AgentScopeRegistry:
                 self._record_step(db, run, name,
                     {"phase": "decision", "llm_enabled": llm_enabled.get(name, False)},
                     d, elapsed_ms=step_ms)
+                # Pass outputs downstream
+                if name == "trader-agent":
+                    _trader_out = d
+                elif name == "risk-manager":
+                    _risk_out = d
 
             # ── Build decision in frontend-compatible format ──
             elapsed = time.time() - start_time
