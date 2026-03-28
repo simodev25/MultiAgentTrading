@@ -40,3 +40,31 @@ def test_ollama_url_gets_v1_suffix():
     assert _ensure_v1("http://localhost:11434").endswith("/v1")
     assert _ensure_v1("http://localhost:11434/v1").endswith("/v1")
     assert not _ensure_v1("http://localhost:11434/v1").endswith("/v1/v1")
+
+
+from app.services.agentscope.formatter_factory import build_formatter
+
+
+def test_ollama_chat_formatter():
+    f = build_formatter("ollama", multi_agent=False)
+    assert f.__class__.__name__ == "OllamaChatFormatter"
+
+
+def test_ollama_multi_agent_formatter():
+    f = build_formatter("ollama", multi_agent=True)
+    assert f.__class__.__name__ == "OllamaMultiAgentFormatter"
+
+
+def test_openai_chat_formatter():
+    f = build_formatter("openai", multi_agent=False)
+    assert f.__class__.__name__ == "OpenAIChatFormatter"
+
+
+def test_mistral_uses_openai_formatter():
+    f = build_formatter("mistral", multi_agent=True)
+    assert f.__class__.__name__ == "OpenAIMultiAgentFormatter"
+
+
+def test_formatter_unknown_provider_raises():
+    with pytest.raises(ValueError, match="Unknown provider"):
+        build_formatter("unknown")
