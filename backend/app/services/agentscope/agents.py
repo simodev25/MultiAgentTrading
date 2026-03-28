@@ -26,15 +26,15 @@ def _build_agent(
     )
 
 
-def build_technical_analyst(*, model, formatter, toolkit, sys_prompt: str, max_iters: int = 3) -> ReActAgent:
+def build_technical_analyst(*, model, formatter, toolkit, sys_prompt: str, max_iters: int = 5) -> ReActAgent:
     return _build_agent("technical-analyst", model, formatter, toolkit, sys_prompt, max_iters, parallel_tool_calls=True)
 
 
-def build_news_analyst(*, model, formatter, toolkit, sys_prompt: str, max_iters: int = 3) -> ReActAgent:
+def build_news_analyst(*, model, formatter, toolkit, sys_prompt: str, max_iters: int = 4) -> ReActAgent:
     return _build_agent("news-analyst", model, formatter, toolkit, sys_prompt, max_iters, parallel_tool_calls=True)
 
 
-def build_market_context_analyst(*, model, formatter, toolkit, sys_prompt: str, max_iters: int = 3) -> ReActAgent:
+def build_market_context_analyst(*, model, formatter, toolkit, sys_prompt: str, max_iters: int = 4) -> ReActAgent:
     return _build_agent("market-context-analyst", model, formatter, toolkit, sys_prompt, max_iters, parallel_tool_calls=True)
 
 
