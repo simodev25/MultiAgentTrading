@@ -34,14 +34,19 @@ class AgentScopeRegistry:
 
     def _resolve_provider_config(self, db) -> tuple[str, str, str, str]:
         """Resolve LLM provider, model_name, base_url, api_key from DB/env."""
+        from app.core.config import get_settings
         from app.services.llm.model_selector import AgentModelSelector
+
         selector = AgentModelSelector()
         provider = selector.resolve_provider(db)
-        settings = selector._load_llm_settings(db)
-        model_name = settings.get("model", "llama3.1")
-        base_url = settings.get("base_url", "http://localhost:11434")
-        api_key = settings.get("api_key", "")
-        return provider, model_name, base_url, api_key
+        s = get_settings()
+
+        if provider == "openai":
+            return provider, s.openai_model, s.openai_base_url, s.openai_api_key
+        if provider == "mistral":
+            return provider, s.mistral_model, s.mistral_base_url, s.mistral_api_key
+        # Default: ollama
+        return "ollama", s.ollama_model, s.ollama_base_url, s.ollama_api_key
 
     async def _resolve_market_data(self, db, pair, timeframe, metaapi_account_ref=None):
         """Resolve market snapshot, news context, multi-TF snapshots."""
@@ -85,6 +90,10 @@ class AgentScopeRegistry:
         try:
             # Resolve config
             provider, model_name, base_url, api_key = self._resolve_provider_config(db)
+            logger.info(
+                "LLM config: provider=%s, model=%s, base_url=%s",
+                provider, model_name, base_url,
+            )
             model = build_model(provider, model_name, base_url, api_key)
             chat_formatter = build_formatter(provider, multi_agent=False)
             debate_formatter = build_formatter(provider, multi_agent=True)

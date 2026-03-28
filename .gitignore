@@ -6,6 +6,7 @@ __pycache__/
 *.db
 *debug-traces*
 .agents*
+.remember/*
 .env
 .env.*
 !.env.example
