@@ -96,20 +96,22 @@ OHLC_PARAMS = frozenset({"closes", "highs", "lows", "opens"})
 async def build_toolkit(
     agent_name: str,
     ohlc: dict[str, list[float]] | None = None,
+    news: dict | None = None,
 ) -> Toolkit:
     """Build a Toolkit with the MCP tools assigned to the given agent.
 
     Args:
         agent_name: Agent identifier.
         ohlc: Optional dict with keys "opens", "highs", "lows", "closes".
-              If provided, tools that accept these params get them as
-              preset_kwargs (hidden from LLM, injected at call time).
+        news: Optional dict with keys "news" (list), "macro_events" (list).
+              If provided, news tools get items as preset_kwargs.
     """
     from app.services.mcp import trading_server
 
     toolkit = Toolkit()
     tool_ids = AGENT_TOOL_MAP.get(agent_name, [])
     ohlc = ohlc or {}
+    news = news or {}
 
     for tool_id in tool_ids:
         original_fn = getattr(trading_server, tool_id, None)
@@ -125,6 +127,19 @@ async def build_toolkit(
         for param_name in sig.parameters:
             if param_name in OHLC_PARAMS and param_name in ohlc:
                 preset[param_name] = ohlc[param_name]
+
+        # Inject news items for news-related tools
+        if tool_id == "news_search" and news.get("news"):
+            preset["items"] = news["news"]
+        elif tool_id == "macro_event_feed" and news.get("macro_events"):
+            preset["items"] = news["macro_events"]
+        elif tool_id == "sentiment_parser" and news.get("news"):
+            preset["headlines"] = [n.get("title", "") for n in news["news"] if n.get("title")]
+        elif tool_id == "symbol_relevance_filter":
+            if news.get("news"):
+                preset["news_items"] = news["news"]
+            if news.get("macro_events"):
+                preset["macro_items"] = news["macro_events"]
 
         toolkit.register_tool_function(wrapped, preset_kwargs=preset if preset else None)
 

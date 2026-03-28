@@ -798,7 +798,7 @@ class AgentScopeRegistry:
             # Build toolkits with OHLC preset
             toolkits = {}
             for name in ALL_AGENT_FACTORIES:
-                toolkits[name] = await build_toolkit(name, ohlc=ohlc)
+                toolkits[name] = await build_toolkit(name, ohlc=ohlc, news=market_data.get("news", {}))
 
             # Build prompt variables for context injection
             base_vars = self._build_prompt_variables(pair, timeframe, snapshot, market_data.get("news", {}))
