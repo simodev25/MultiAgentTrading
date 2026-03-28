@@ -55,7 +55,14 @@ async def run_debate(
             structured_model=DebateResult,
         )
 
-        result = DebateResult(**(judge_msg.metadata or {}))
+        meta = judge_msg.metadata if isinstance(getattr(judge_msg, "metadata", None), dict) and judge_msg.metadata else {}
+        try:
+            result = DebateResult(**meta)
+        except Exception:
+            # Fallback if structured output failed
+            logger.warning("DebateResult validation failed, using fallback (metadata=%s)", meta)
+            result = DebateResult(finished=True, winning_side="neutral", confidence=0.3,
+                                 reason="Structured output failed — debate inconclusive")
         logger.info(
             "Debate round %d/%d: finished=%s, side=%s, confidence=%.2f",
             round_num + 1, config.max_rounds, result.finished,
