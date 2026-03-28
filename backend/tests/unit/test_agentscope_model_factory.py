@@ -4,7 +4,7 @@ from app.services.agentscope.model_factory import build_model, _ensure_v1
 
 
 @patch("app.services.agentscope.model_factory.OllamaChatModel")
-def test_build_ollama_model(mock_cls):
+def test_build_ollama_local_model(mock_cls):
     mock_cls.return_value = MagicMock()
     build_model(provider="ollama", model_name="llama3.1", base_url="http://localhost:11434", api_key="")
     mock_cls.assert_called_once()
@@ -13,6 +13,17 @@ def test_build_ollama_model(mock_cls):
     assert call_kwargs["host"] == "http://localhost:11434"
     assert call_kwargs["stream"] is False
     assert call_kwargs["options"]["temperature"] == 0.0
+
+
+@patch("app.services.agentscope.model_factory.OpenAIChatModel")
+def test_build_ollama_cloud_model(mock_cls):
+    mock_cls.return_value = MagicMock()
+    build_model(provider="ollama", model_name="gpt-oss:120b", base_url="https://ollama.com", api_key="key123")
+    mock_cls.assert_called_once()
+    call_kwargs = mock_cls.call_args[1]
+    assert call_kwargs["model_name"] == "gpt-oss:120b"
+    assert call_kwargs["client_kwargs"]["base_url"].endswith("/v1")
+    assert call_kwargs["api_key"] == "key123"
 
 
 @patch("app.services.agentscope.model_factory.OpenAIChatModel")
