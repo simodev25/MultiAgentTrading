@@ -32,7 +32,7 @@ def _serialize_run(
         'timeframe': run.timeframe,
         'mode': run.mode,
         'status': run.status,
-        'decision': run.decision,
+        'decision': run.decision if isinstance(run.decision, dict) else {},
         'trace': trace,
         'error': run.error,
         'created_by_id': run.created_by_id,
