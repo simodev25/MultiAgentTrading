@@ -24,6 +24,7 @@ langchain-core==0.3.79
 mcp[cli]>=1.13
 fastmcp==2.5.1
 agentscope==1.0.18
+ollama>=0.4.0
 metaapi-cloud-sdk
 email-validator==2.2.0
 pytest==8.4.1
