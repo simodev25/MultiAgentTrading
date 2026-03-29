@@ -397,6 +397,13 @@ class AgentScopeRegistry:
         except Exception:
             pass
 
+        # Store the full scoring result for runtime injection (Fix 1)
+        _scoring_result: dict[str, Any] = {}
+        try:
+            _scoring_result = scoring  # type: ignore[possibly-undefined]
+        except NameError:
+            pass
+
         variables = {
             "pair": pair,
             "asset_class": asset_class,
@@ -414,6 +421,7 @@ class AgentScopeRegistry:
             "decision_mode": "balanced",
             "mode": "simulation",
             "risk_percent": "1.0",
+            "_scoring_result": _scoring_result,
         }
 
         # Debate variables
@@ -882,6 +890,21 @@ class AgentScopeRegistry:
                 )
                 msg_dict["llm_enabled"] = llm_enabled.get(name, False)
                 msg_dict["prompt_meta"] = self._build_prompt_meta(db, name, model_name, llm_enabled.get(name, False), variables=base_vars)
+
+                # Fix 1: Inject pre-computed scoring into technical-analyst metadata
+                if name == "technical-analyst" and base_vars.get("_scoring_result"):
+                    sr = base_vars["_scoring_result"]
+                    msg_dict.setdefault("metadata", {}).update({
+                        "score_breakdown": sr.get("components", {}),
+                        "raw_score": sr.get("score", 0.0),
+                        "structure": sr.get("components", {}).get("structure", 0.0),
+                        "momentum": sr.get("components", {}).get("momentum", 0.0),
+                        "pattern": sr.get("components", {}).get("pattern", 0.0),
+                        "divergence": sr.get("components", {}).get("divergence", 0.0),
+                        "multi_tf": sr.get("components", {}).get("multi_tf", 0.0),
+                        "level": sr.get("components", {}).get("level", 0.0),
+                    })
+
                 analysis_outputs[name] = msg_dict
                 self._record_step(db, run, name,
                     {"pair": pair, "timeframe": timeframe, "llm_enabled": llm_enabled.get(name, False)},
@@ -944,10 +967,24 @@ class AgentScopeRegistry:
                 if rname in agents:
                     agent_tool_invocations[rname] = await _extract_tool_invocations(agents[rname])
 
+            # Fix 4: Get news-analyst scores for researcher confidence constraints
+            _news_meta = analysis_outputs.get("news-analyst", {}).get("metadata", {})
+            _news_score = float(_news_meta.get("score", 0))
+            _news_confidence = float(_news_meta.get("confidence", 0))
+
             for name, msg in [("bullish-researcher", bullish_msg), ("bearish-researcher", bearish_msg)]:
                 d = _msg_to_dict(msg, tool_invocations=agent_tool_invocations.get(name, {}))
                 d["llm_enabled"] = llm_enabled.get(name, False)
                 d["prompt_meta"] = self._build_prompt_meta(db, name, model_name, llm_enabled.get(name, False), variables=base_vars)
+
+                # Fix 4: Constrain researcher confidence by Phase 1 news scores
+                d.setdefault("metadata", {})
+                cur_conf = float(d["metadata"].get("confidence", 0.5))
+                if name == "bullish-researcher" and _news_score < -0.50:
+                    d["metadata"]["confidence"] = min(cur_conf, 0.40)
+                elif name == "bearish-researcher" and _news_confidence > 0.70:
+                    d["metadata"]["confidence"] = max(cur_conf, 0.55)
+
                 analysis_outputs[name] = d
                 self._record_step(db, run, name,
                     {"phase": "debate", "llm_enabled": llm_enabled.get(name, False)},

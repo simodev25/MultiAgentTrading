@@ -92,6 +92,20 @@ class NewsAnalysisResult(_SchemaBase):
             data["signal"] = _normalize_signal(data["signal"])
         return data
 
+    @model_validator(mode="after")
+    def enforce_coverage_bounds(self) -> "NewsAnalysisResult":
+        """Fix 2: Hard numeric bounds on scores based on coverage level."""
+        if self.coverage == "none":
+            self.signal = "neutral"
+            self.score = 0.0
+            self.confidence = min(self.confidence, 0.10)
+        elif self.coverage == "low":
+            self.score = max(-0.45, min(0.45, self.score))
+            self.confidence = min(self.confidence, 0.65)
+        elif self.coverage == "medium":
+            self.confidence = min(self.confidence, 0.85)
+        return self
+
 
 class MarketContextResult(_SchemaBase):
     signal: Literal["bullish", "bearish", "neutral"]
@@ -111,6 +125,17 @@ class MarketContextResult(_SchemaBase):
         if isinstance(data, dict) and "signal" in data:
             data["signal"] = _normalize_signal(data["signal"])
         return data
+
+    @model_validator(mode="after")
+    def enforce_regime_bounds(self) -> "MarketContextResult":
+        """Fix 3: Stability bounds based on regime and tradability."""
+        regime_lower = self.regime.strip().lower()
+        if regime_lower == "calm":
+            self.confidence = max(0.40, min(0.75, self.confidence))
+            self.score = max(-0.20, min(0.20, self.score))
+        if self.tradability_score <= 0.35:
+            self.execution_penalty = max(self.execution_penalty, 0.10)
+        return self
 
 
 class DebateThesis(_SchemaBase):
