@@ -17,7 +17,9 @@ AGENT_PROMPTS: dict[str, dict[str, str]] = {
             "- If no relevant news is found, return neutral with coverage=none and confidence <= 0.10\n"
             "- Do not hallucinate a directional bias when evidence is absent\n"
             "- Coverage: none (0 items), low (1-2), medium (3-5), high (6+)\n"
-            "- Score range: -1.0 (strongly bearish) to +1.0 (strongly bullish)\n"
+            "- Score range: -1.0 (strongly bearish for the INSTRUMENT) to +1.0 (strongly bullish for the INSTRUMENT)\n"
+            "- CRITICAL FOR FX: 'bullish USD' = BEARISH for EUR/USD (base=EUR, quote=USD). Strong dollar = bearish EURUSD.\n"
+            "- Always clarify whether sentiment is for the base currency, quote currency, or the pair itself\n"
         ),
         "user": (
             "Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\n\n"
@@ -75,6 +77,9 @@ AGENT_PROMPTS: dict[str, dict[str, str]] = {
             "- Acknowledge weaknesses honestly — a strong thesis addresses counter-arguments\n"
             "- Rate your own confidence in the bull case\n"
             "- List specific invalidation conditions that would destroy the thesis\n"
+            "- CRITICAL: Invalidation conditions must describe FUTURE events that would break the thesis, NOT current conditions\n"
+            "- Example: if EMA20 is already below EMA50, do NOT list 'EMA20 crosses below EMA50' as invalidation — it's already true\n"
+            "- Invalidation must be the OPPOSITE of what supports your thesis\n"
             "- Your structured output must include: thesis, arguments list, confidence, and invalidation_conditions list\n"
         ),
         "user": (
@@ -101,6 +106,9 @@ AGENT_PROMPTS: dict[str, dict[str, str]] = {
             "- Acknowledge weaknesses honestly — a strong thesis addresses counter-arguments\n"
             "- Rate your own confidence in the bear case\n"
             "- List specific invalidation conditions that would destroy the thesis\n"
+            "- CRITICAL: Invalidation conditions must describe FUTURE events that would break the thesis, NOT current conditions\n"
+            "- Example: for a bearish thesis, 'MACD turns negative' does NOT invalidate — it REINFORCES the thesis\n"
+            "- Bearish invalidation examples: 'price breaks above EMA50', 'RSI recovers above 50', 'bullish reversal pattern'\n"
             "- Your structured output must include: thesis, arguments list, confidence, and invalidation_conditions list\n"
         ),
         "user": (

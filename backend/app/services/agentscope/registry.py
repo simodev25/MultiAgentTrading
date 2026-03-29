@@ -379,6 +379,7 @@ class AgentScopeRegistry:
         raw_facts_block = "\n".join(raw_facts_lines) if raw_facts_lines else "No raw facts available."
 
         # Pre-compute technical_scoring for score_breakdown
+        runtime_score_breakdown_text = "UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN"
         try:
             from app.services.mcp.trading_server import technical_scoring
             scoring = technical_scoring(
@@ -392,7 +393,7 @@ class AgentScopeRegistry:
             components = scoring.get("components", {})
             score_lines = [f"{k}={v}" for k, v in components.items()]
             score_lines.append(f"final_score={scoring.get('score', 0)}")
-            raw_facts_block += f"\n\nAuthoritative runtime score breakdown:\n" + "\n".join(score_lines)
+            runtime_score_breakdown_text = "\n".join(score_lines)
         except Exception:
             pass
 
@@ -403,7 +404,7 @@ class AgentScopeRegistry:
             "snapshot_block": snapshot_block,
             "raw_facts_block": raw_facts_block,
             "tool_results_block": "Use your tools to gather additional data.",
-            "runtime_score_breakdown_block": "UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN",
+            "runtime_score_breakdown_block": runtime_score_breakdown_text,
             "interpretation_rules_block": "",
             "news_count": str(len(news_items)),
             "news_items_block": news_block,
@@ -972,15 +973,36 @@ class AgentScopeRegistry:
             current_msg = Msg("system", decision_context, "system")
             _trader_out: dict | None = None
             _risk_out: dict | None = None
+            _trader_decision_is_hold = False
             for name in ["trader-agent", "risk-manager", "execution-manager"]:
                 t0 = time.time()
-                current_msg = await _call_agent(
-                    name, current_msg,
-                    trader_out=_trader_out, risk_out=_risk_out,
-                )
-                step_ms = (time.time() - t0) * 1000
-                d = _msg_to_dict(current_msg, tool_invocations=agent_tool_invocations.get(name, {}))
-                d["llm_enabled"] = llm_enabled.get(name, False)
+
+                # Skip LLM for risk-manager and execution-manager when trader decided HOLD
+                if _trader_decision_is_hold and name in ("risk-manager", "execution-manager"):
+                    if name == "risk-manager":
+                        hold_text = (
+                            "APPROVE — No risk evaluation needed. "
+                            "Trader decision is HOLD; no position to assess."
+                        )
+                        hold_meta = {"verdict": "APPROVE", "reason": "HOLD — no exposure"}
+                    else:
+                        hold_text = (
+                            "HOLD — No execution required. "
+                            "Trader decision is HOLD; standing aside."
+                        )
+                        hold_meta = {"action": "HOLD", "reason": "No trade to execute"}
+                    current_msg = Msg(name, hold_text, "assistant", metadata=hold_meta)
+                    step_ms = (time.time() - t0) * 1000
+                    d = _msg_to_dict(current_msg)
+                    d["llm_enabled"] = False
+                else:
+                    current_msg = await _call_agent(
+                        name, current_msg,
+                        trader_out=_trader_out, risk_out=_risk_out,
+                    )
+                    step_ms = (time.time() - t0) * 1000
+                    d = _msg_to_dict(current_msg, tool_invocations=agent_tool_invocations.get(name, {}))
+                    d["llm_enabled"] = llm_enabled.get(name, False)
                 # Update vars with trader/risk outputs for downstream agents
                 if name == "trader-agent":
                     meta = d.get("metadata", {})
@@ -989,6 +1011,7 @@ class AgentScopeRegistry:
                     base_vars["stop_loss"] = str(meta.get("stop_loss", "N/A"))
                     base_vars["take_profit"] = str(meta.get("take_profit", "N/A"))
                     base_vars["risk_percent"] = str(risk_percent)
+                    _trader_decision_is_hold = meta.get("decision", "HOLD") == "HOLD"
                 elif name == "risk-manager":
                     base_vars["risk_result"] = d.get("text", "")[:500]
                 d["prompt_meta"] = self._build_prompt_meta(db, name, model_name, llm_enabled.get(name, False), variables=base_vars)
@@ -1042,6 +1065,18 @@ class AgentScopeRegistry:
                 # Merge trader metadata if structured output was used
                 **trader_out.get("metadata", {}),
             }
+
+            # Fix combined_score divergence: if metadata has 0.0, check tool invocations
+            if not run.decision.get("combined_score"):
+                trader_invocations = agent_tool_invocations.get("trader-agent", {})
+                gating_inv = trader_invocations.get("decision_gating", {})
+                tool_combined = gating_inv.get("input", {}).get("combined_score")
+                if tool_combined is not None and tool_combined != 0.0:
+                    run.decision["combined_score"] = tool_combined
+                    # Also try to extract from tool output data
+                elif gating_inv.get("data", {}).get("combined_score"):
+                    run.decision["combined_score"] = gating_inv["data"]["combined_score"]
+
             run.trace = {
                 "runtime_engine": "agentscope_v1",
                 "elapsed_seconds": round(elapsed, 1),
