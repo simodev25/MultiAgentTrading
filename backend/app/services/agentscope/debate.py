@@ -8,7 +8,7 @@ from agentscope.agent import ReActAgent
 from agentscope.message import Msg
 from agentscope.pipeline import MsgHub
 
-from app.services.agentscope.schemas import DebateResult
+from app.services.agentscope.schemas import DebateResult, DebateThesis
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +42,14 @@ async def run_debate(
                 "system",
             ),
         ):
-            bullish_msg = await bullish(context_msg if round_num == 0 else None)
-            bearish_msg = await bearish(context_msg if round_num == 0 else None)
+            bullish_msg = await bullish(
+                context_msg if round_num == 0 else None,
+                structured_model=DebateThesis,
+            )
+            bearish_msg = await bearish(
+                context_msg if round_num == 0 else None,
+                structured_model=DebateThesis,
+            )
 
         eval_content = (
             f"Bullish thesis:\n{bullish_msg.get_text_content()}\n\n"
