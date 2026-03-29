@@ -168,6 +168,59 @@ def _msg_to_dict(msg: Msg | None, tool_invocations: dict | None = None) -> dict[
     return result
 
 
+def _filter_invalid_invalidations(metadata: dict, agent_name: str, snapshot: dict) -> None:
+    """Remove invalidation conditions that describe current state or reinforce the thesis.
+
+    Bearish thesis: invalidation must be BULLISH events (price up, RSI up, etc.)
+    Bullish thesis: invalidation must be BEARISH events (price down, RSI down, etc.)
+    """
+    conditions = metadata.get("invalidation_conditions", [])
+    if not conditions:
+        return
+
+    is_bearish_researcher = "bearish" in agent_name
+    trend = snapshot.get("trend", "neutral")
+    ema_fast = snapshot.get("ema_fast", 0)
+    ema_slow = snapshot.get("ema_slow", 0)
+    ema_fast_below_slow = ema_fast < ema_slow if ema_fast and ema_slow else False
+
+    filtered = []
+    for cond in conditions:
+        cond_lower = cond.lower() if isinstance(cond, str) else ""
+
+        # Bearish researcher: invalidation must be bullish (price goes UP)
+        if is_bearish_researcher:
+            # Skip conditions that REINFORCE bearishness
+            if any(phrase in cond_lower for phrase in [
+                "macd turns negative", "macd histogram negative",
+                "dxy rises", "dxy strengthens", "dxy > 99", "dxy above",
+                "dollar strengthens", "usd strengthens",
+                "price breaks below", "price falls below",
+                "rsi drops below", "rsi falls below",
+            ]):
+                continue  # This reinforces bearish — not an invalidation
+
+        # Bullish researcher: invalidation must be bearish (price goes DOWN)
+        else:
+            # Skip conditions that describe current bearish state
+            if ema_fast_below_slow and any(phrase in cond_lower for phrase in [
+                "ema20 crosses below ema50", "ema crosses below",
+                "fast ema below slow", "ema re-crosses below",
+            ]):
+                continue  # Already true — not a future invalidation
+
+            if any(phrase in cond_lower for phrase in [
+                "macd turns positive", "macd histogram positive",
+                "dollar weakens", "usd weakens",
+                "price breaks above", "price rises above",
+            ]):
+                continue  # This reinforces bullishness — not an invalidation
+
+        filtered.append(cond)
+
+    metadata["invalidation_conditions"] = filtered
+
+
 class AgentScopeRegistry:
     """Orchestrates 8 trading agents through 4 phases."""
 
@@ -891,19 +944,29 @@ class AgentScopeRegistry:
                 msg_dict["llm_enabled"] = llm_enabled.get(name, False)
                 msg_dict["prompt_meta"] = self._build_prompt_meta(db, name, model_name, llm_enabled.get(name, False), variables=base_vars)
 
-                # Fix 1: Inject pre-computed scoring into technical-analyst metadata
+                # Fix 1: FORCE-OVERRIDE deterministic scoring into technical-analyst metadata
+                # The LLM may return score=0.0 or UNAVAILABLE — runtime values always win
                 if name == "technical-analyst" and base_vars.get("_scoring_result"):
                     sr = base_vars["_scoring_result"]
-                    msg_dict.setdefault("metadata", {}).update({
-                        "score_breakdown": sr.get("components", {}),
-                        "raw_score": sr.get("score", 0.0),
-                        "structure": sr.get("components", {}).get("structure", 0.0),
-                        "momentum": sr.get("components", {}).get("momentum", 0.0),
-                        "pattern": sr.get("components", {}).get("pattern", 0.0),
-                        "divergence": sr.get("components", {}).get("divergence", 0.0),
-                        "multi_tf": sr.get("components", {}).get("multi_tf", 0.0),
-                        "level": sr.get("components", {}).get("level", 0.0),
-                    })
+                    runtime_score = sr.get("score", 0.0)
+                    runtime_signal = sr.get("signal", "neutral")
+                    runtime_confidence = sr.get("confidence", 0.5)
+                    runtime_setup = sr.get("setup_state", "conditional")
+                    components = sr.get("components", {})
+
+                    meta = msg_dict.setdefault("metadata", {})
+                    # Always override these from runtime — LLM cannot change them
+                    meta["score_breakdown"] = components
+                    meta["raw_score"] = runtime_score
+                    meta["score"] = runtime_score  # Override LLM's score
+                    meta["signal"] = runtime_signal  # Override LLM's signal
+                    # Only override confidence/setup_state if LLM returned 0 or empty
+                    if not meta.get("confidence") or meta.get("confidence") == 0:
+                        meta["confidence"] = runtime_confidence
+                    if not meta.get("setup_state"):
+                        meta["setup_state"] = runtime_setup
+                    for comp_key in ("structure", "momentum", "pattern", "divergence", "multi_tf", "level"):
+                        meta[comp_key] = components.get(comp_key, 0.0)
 
                 analysis_outputs[name] = msg_dict
                 self._record_step(db, run, name,
@@ -984,6 +1047,9 @@ class AgentScopeRegistry:
                     d["metadata"]["confidence"] = min(cur_conf, 0.40)
                 elif name == "bearish-researcher" and _news_confidence > 0.70:
                     d["metadata"]["confidence"] = max(cur_conf, 0.55)
+
+                # Fix invalidation: filter out conditions that REINFORCE the thesis
+                _filter_invalid_invalidations(d["metadata"], name, snapshot)
 
                 analysis_outputs[name] = d
                 self._record_step(db, run, name,
