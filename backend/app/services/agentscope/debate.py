@@ -1,4 +1,14 @@
-"""Configurable multi-turn debate between Bullish and Bearish researchers."""
+"""Configurable multi-turn debate following AgentScope multiagent_debate pattern.
+
+Reference: docs/agentscope/docs/tutorial/en/src/workflow_multiagent_debate.py
+
+Key pattern from AgentScope tutorial:
+- All 3 participants (bullish, bearish, moderator) are in the MsgHub
+  so the moderator hears the full debate history
+- Moderator is called OUTSIDE the MsgHub so debaters don't hear the verdict
+- Each debater receives a specific role message (affirmative/negative side)
+- Loop continues until moderator says finished=True
+"""
 from __future__ import annotations
 
 import logging
@@ -26,38 +36,50 @@ async def run_debate(
     context_msg: Msg,
     config: DebateConfig | None = None,
 ) -> tuple[Msg, Msg, DebateResult]:
-    """Run multi-turn debate, return final bullish msg, bearish msg, and moderator result."""
+    """Run multi-turn debate following AgentScope tutorial pattern.
+
+    All 3 agents are MsgHub participants so the moderator hears the full
+    debate. The moderator is called outside MsgHub so debaters don't hear
+    the verdict until next round.
+    """
     config = config or DebateConfig()
     result = DebateResult(finished=False)
     bullish_msg = context_msg
     bearish_msg = context_msg
 
     for round_num in range(config.max_rounds):
-        async with MsgHub(
-            participants=[bullish, bearish],
-            announcement=Msg(
-                "system",
-                f"Debate round {round_num + 1}/{config.max_rounds}. "
-                "Present your case and respond to the opposing arguments.",
-                "system",
-            ),
-        ):
+        # All 3 in MsgHub — moderator hears the debate
+        async with MsgHub(participants=[bullish, bearish, moderator]):
             bullish_msg = await bullish(
-                context_msg if round_num == 0 else None,
+                Msg(
+                    "user",
+                    f"You are the BULLISH side (round {round_num + 1}/{config.max_rounds}). "
+                    "Present your bull case and respond to any opposing bearish arguments."
+                    + (f"\n\nContext:\n{context_msg.get_text_content()}" if round_num == 0 else ""),
+                    "user",
+                ),
                 structured_model=DebateThesis,
             )
             bearish_msg = await bearish(
-                context_msg if round_num == 0 else None,
+                Msg(
+                    "user",
+                    f"You are the BEARISH side (round {round_num + 1}/{config.max_rounds}). "
+                    "Present your bear case and respond to any opposing bullish arguments."
+                    + (f"\n\nContext:\n{context_msg.get_text_content()}" if round_num == 0 else ""),
+                    "user",
+                ),
                 structured_model=DebateThesis,
             )
 
-        eval_content = (
-            f"Bullish thesis:\n{bullish_msg.get_text_content()}\n\n"
-            f"Bearish thesis:\n{bearish_msg.get_text_content()}\n\n"
-            "Evaluate: is the debate settled? Which side has stronger evidence?"
-        )
+        # Moderator called OUTSIDE MsgHub — debaters don't hear the verdict
         judge_msg = await moderator(
-            Msg("user", eval_content, "user"),
+            Msg(
+                "user",
+                "You have heard both sides of the debate. "
+                "Has the debate reached a conclusion? Which side has stronger evidence? "
+                "Can you determine the winning direction (bullish, bearish, or neutral)?",
+                "user",
+            ),
             structured_model=DebateResult,
         )
 
@@ -65,10 +87,10 @@ async def run_debate(
         try:
             result = DebateResult(**meta)
         except Exception:
-            # Fallback if structured output failed
             logger.warning("DebateResult validation failed, using fallback (metadata=%s)", meta)
             result = DebateResult(finished=True, winning_side="neutral", confidence=0.3,
                                  reason="Structured output failed — debate inconclusive")
+
         logger.info(
             "Debate round %d/%d: finished=%s, side=%s, confidence=%.2f",
             round_num + 1, config.max_rounds, result.finished,
