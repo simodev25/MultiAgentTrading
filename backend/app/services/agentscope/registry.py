@@ -980,17 +980,23 @@ class AgentScopeRegistry:
                 # Skip LLM for risk-manager and execution-manager when trader decided HOLD
                 if _trader_decision_is_hold and name in ("risk-manager", "execution-manager"):
                     if name == "risk-manager":
-                        hold_text = (
-                            "APPROVE — No risk evaluation needed. "
-                            "Trader decision is HOLD; no position to assess."
-                        )
-                        hold_meta = {"verdict": "APPROVE", "reason": "HOLD — no exposure"}
+                        hold_text = "accepted=false, suggested_volume=0, reasons=[\"HOLD decision\"]"
+                        hold_meta = {
+                            "accepted": False,
+                            "suggested_volume": 0.0,
+                            "reasons": ["HOLD decision"],
+                            "degraded": False,
+                        }
                     else:
-                        hold_text = (
-                            "HOLD — No execution required. "
-                            "Trader decision is HOLD; standing aside."
-                        )
-                        hold_meta = {"action": "HOLD", "reason": "No trade to execute"}
+                        hold_text = "decision=HOLD, should_execute=false, volume=0, reason=\"HOLD — no trade to execute\""
+                        hold_meta = {
+                            "decision": "HOLD",
+                            "should_execute": False,
+                            "side": None,
+                            "volume": 0.0,
+                            "reason": "HOLD — no trade to execute",
+                            "degraded": False,
+                        }
                     current_msg = Msg(name, hold_text, "assistant", metadata=hold_meta)
                     step_ms = (time.time() - t0) * 1000
                     d = _msg_to_dict(current_msg)
