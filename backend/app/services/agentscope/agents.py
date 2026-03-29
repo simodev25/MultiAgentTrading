@@ -34,7 +34,7 @@ def build_news_analyst(*, model, formatter, toolkit, sys_prompt: str, max_iters:
     return _build_agent("news-analyst", model, formatter, toolkit, sys_prompt, max_iters, parallel_tool_calls=True)
 
 
-def build_market_context_analyst(*, model, formatter, toolkit, sys_prompt: str, max_iters: int = 4) -> ReActAgent:
+def build_market_context_analyst(*, model, formatter, toolkit, sys_prompt: str, max_iters: int = 5) -> ReActAgent:
     return _build_agent("market-context-analyst", model, formatter, toolkit, sys_prompt, max_iters, parallel_tool_calls=True)
 
 
@@ -46,7 +46,7 @@ def build_bearish_researcher(*, model, formatter, toolkit, sys_prompt: str, max_
     return _build_agent("bearish-researcher", model, formatter, toolkit, sys_prompt, max_iters)
 
 
-def build_trader(*, model, formatter, toolkit, sys_prompt: str, max_iters: int = 3) -> ReActAgent:
+def build_trader(*, model, formatter, toolkit, sys_prompt: str, max_iters: int = 5) -> ReActAgent:
     return _build_agent("trader-agent", model, formatter, toolkit, sys_prompt, max_iters)
 
 
