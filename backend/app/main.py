@@ -29,6 +29,7 @@ from app.observability.metrics import backend_http_request_duration_seconds, bac
 from app.observability.prometheus import build_metrics_payload
 from app.services.prompts.registry import PromptTemplateService
 from app.services.llm.skill_bootstrap import bootstrap_agent_skills_into_settings
+from app.services.trading.price_stream import PriceStreamManager
 
 logger = logging.getLogger(__name__)
 
@@ -342,6 +343,42 @@ async def trading_orders_socket(websocket: WebSocket) -> None:
             await asyncio.sleep(poll_interval)
     except WebSocketDisconnect:
         return
+
+
+@app.websocket('/ws/market/prices')
+async def market_prices_socket(websocket: WebSocket) -> None:
+    """Stream real-time prices from MetaAPI SDK to frontend chart."""
+    if not await _authorize_websocket(websocket):
+        return
+    await websocket.accept()
+
+    symbol_filter = (websocket.query_params.get('symbol') or '').strip() or None
+    manager = PriceStreamManager.get_instance()
+
+    # Lazily connect the manager if not yet connected
+    if not manager.is_connected and settings.metaapi_token and settings.metaapi_account_id:
+        try:
+            await manager.connect(settings.metaapi_token, settings.metaapi_account_id)
+        except Exception as exc:
+            logger.warning('Price stream connect failed: %s', exc)
+
+    sub_id, queue = manager.subscribe()
+    try:
+        # Send latest cached price immediately if available
+        if symbol_filter:
+            cached = manager.get_latest_price(symbol_filter)
+            if cached:
+                await websocket.send_json(cached)
+
+        while True:
+            data = await queue.get()
+            if symbol_filter and data.get('symbol') != symbol_filter:
+                continue
+            await websocket.send_json(data)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        manager.unsubscribe(sub_id)
 
 
 @app.get('/')
