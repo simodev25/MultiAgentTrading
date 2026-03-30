@@ -1354,6 +1354,17 @@ export function ConnectorsPage() {
                           ) : (
                             <button
                               type="button"
+                              className="btn-ghost btn-small"
+                              onClick={() => {
+                                setPromptAgent(agentName);
+                                setActiveConfigTab('models');
+                                requestAnimationFrame(() => {
+                                  document.getElementById('agent-prompts-editor')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                                });
+                              }}
+                            >
+                              Edit prompt + skills
+                            </button>
                           )}
                         </td>
                       </tr>
@@ -1403,10 +1414,7 @@ export function ConnectorsPage() {
                     placeholder={'e.g.:\nPrioritize high-impact events for the analyzed instrument\nExplicitly flag uncertainties'}
                   />
                 </label>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 items-end">
-                  <button className="btn-primary" disabled={promptSaving}>{promptSaving ? 'Saving...' : 'Create + activate prompt and skills version'}</button>
-                  <button
-                </div>
+                <button className="btn-primary" disabled={promptSaving}>{promptSaving ? 'Saving...' : 'Create + activate prompt and skills version'}</button>
               </form>
               <p className="model-source">
                 Selected agent: <code>{promptAgent}</code> | active version: <code>v{activePromptByAgent.get(promptAgent)?.version ?? 0}</code>
