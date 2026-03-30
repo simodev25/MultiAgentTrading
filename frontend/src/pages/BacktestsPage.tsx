@@ -4,9 +4,9 @@ import { ButtonSpinner } from '../components/LoadingIndicators';
 import { DEFAULT_PAIR, DEFAULT_TIMEFRAMES } from '../constants/markets';
 import { useAuth } from '../hooks/useAuth';
 import { useMarketSymbols } from '../hooks/useMarketSymbols';
-import { FlaskConical, Play, TrendingUp, TrendingDown, Target, BarChart3, Activity } from 'lucide-react';
+import { FlaskConical, Play, TrendingUp, TrendingDown, Target, BarChart3, Activity, Brain, CheckCircle, XCircle, ChevronDown, ChevronRight } from 'lucide-react';
 import { ExpansionPanel } from '../components/ExpansionPanel';
-import type { BacktestRun } from '../types';
+import type { BacktestRun, AgentValidationDetail } from '../types';
 
 const STRATEGIES = [
   { value: 'ema_rsi', label: 'Trend Following (EMA + RSI)' },
@@ -297,6 +297,86 @@ function PnlDistribution({ trades }: { trades: Array<{ pnl_pct: number }> }) {
 
 
 // ── Position Distribution donut ──
+function WinLossDistribution({ trades }: { trades: Array<{ pnl_pct: number }> }) {
+  const wins = trades.filter(t => t.pnl_pct > 0);
+  const losses = trades.filter(t => t.pnl_pct < 0);
+  const flats = trades.filter(t => t.pnl_pct === 0);
+  const total = trades.length || 1;
+  const winPct = (wins.length / total) * 100;
+  const lossPct = (losses.length / total) * 100;
+  const flatPct = (flats.length / total) * 100;
+  const avgWin = wins.length ? wins.reduce((s, t) => s + t.pnl_pct, 0) / wins.length : 0;
+  const avgLoss = losses.length ? losses.reduce((s, t) => s + t.pnl_pct, 0) / losses.length : 0;
+  const bestTrade = trades.length ? Math.max(...trades.map(t => t.pnl_pct)) : 0;
+  const worstTrade = trades.length ? Math.min(...trades.map(t => t.pnl_pct)) : 0;
+
+  const r = 60;
+  const cx = 80;
+  const cy = 80;
+  const circumference = 2 * Math.PI * r;
+  const winArc = (winPct / 100) * circumference;
+  const lossArc = (lossPct / 100) * circumference;
+  const flatArc = circumference - winArc - lossArc;
+
+  return (
+    <div className="hw-surface p-0 overflow-hidden">
+      <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border">
+        <Target className="w-3.5 h-3.5 text-accent" />
+        <span className="text-[11px] font-bold tracking-[0.12em] text-accent uppercase">WIN_LOSS_DISTRIBUTION</span>
+      </div>
+      <div className="p-5 flex items-center gap-8">
+        <svg width="160" height="160" viewBox="0 0 160 160">
+          <circle cx={cx} cy={cy} r={r} fill="none" stroke="#1e222d" strokeWidth="18" />
+          <circle cx={cx} cy={cy} r={r} fill="none" stroke="#22c55e" strokeWidth="18"
+            strokeDasharray={`${winArc} ${circumference}`} strokeDashoffset="0"
+            transform={`rotate(-90 ${cx} ${cy})`} />
+          <circle cx={cx} cy={cy} r={r} fill="none" stroke="#ef4444" strokeWidth="18"
+            strokeDasharray={`${lossArc} ${circumference}`} strokeDashoffset={`${-winArc}`}
+            transform={`rotate(-90 ${cx} ${cy})`} />
+          {flatArc > 0 && (
+            <circle cx={cx} cy={cy} r={r} fill="none" stroke="#6b7280" strokeWidth="18"
+              strokeDasharray={`${flatArc} ${circumference}`} strokeDashoffset={`${-(winArc + lossArc)}`}
+              transform={`rotate(-90 ${cx} ${cy})`} />
+          )}
+          <text x={cx} y={cy - 5} textAnchor="middle" className="fill-text" fontSize="18" fontWeight="bold">{winPct.toFixed(0)}%</text>
+          <text x={cx} y={cy + 12} textAnchor="middle" className="fill-text-dim" fontSize="9">WIN RATE</text>
+        </svg>
+
+        <div className="flex flex-col gap-2.5 flex-1">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="w-3 h-3 rounded-full bg-green-500" />
+              <span className="text-[11px] font-bold text-green-400">WIN</span>
+            </div>
+            <span className="text-[11px] font-mono text-text">{wins.length} ({winPct.toFixed(0)}%)</span>
+            <span className="text-[10px] font-mono text-text-dim">Avg: +{avgWin.toFixed(2)}%</span>
+          </div>
+          <div className="w-full h-1.5 rounded-full bg-border overflow-hidden">
+            <div className="h-full bg-green-500 rounded-full" style={{ width: `${winPct}%` }} />
+          </div>
+
+          <div className="flex items-center justify-between mt-1">
+            <div className="flex items-center gap-2">
+              <div className="w-3 h-3 rounded-full bg-red-500" />
+              <span className="text-[11px] font-bold text-red-400">LOSS</span>
+            </div>
+            <span className="text-[11px] font-mono text-text">{losses.length} ({lossPct.toFixed(0)}%)</span>
+            <span className="text-[10px] font-mono text-text-dim">Avg: {avgLoss.toFixed(2)}%</span>
+          </div>
+          <div className="w-full h-1.5 rounded-full bg-border overflow-hidden">
+            <div className="h-full bg-red-500 rounded-full" style={{ width: `${lossPct}%` }} />
+          </div>
+
+          <div className="flex justify-between mt-2 pt-2 border-t border-border/30">
+            <span className="text-[9px] font-mono text-green-400">Best: +{bestTrade.toFixed(2)}%</span>
+            <span className="text-[9px] font-mono text-red-400">Worst: {worstTrade.toFixed(2)}%</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PositionDistribution({ trades }: { trades: Array<{ side: string; pnl_pct: number }> }) {
   const longs = trades.filter(t => t.side?.toUpperCase() === 'BUY');
   const shorts = trades.filter(t => t.side?.toUpperCase() === 'SELL');
@@ -434,6 +514,129 @@ function TradeHistoryTable({ trades }: { trades: Array<{ side: string; entry_pri
 }
 
 
+// ── Agent Analysis Panel ──
+function AgentAnalysisPanel({ validations }: { validations: BacktestRun['agent_validations'] }) {
+  const items = validations ?? [];
+  const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
+  const [agentPage, setAgentPage] = useState(1);
+  const ITEMS_PER_PAGE = 10;
+
+  const confirmed = items.filter(v => v.status === 'confirmed').length;
+  const rejected = items.filter(v => v.status === 'rejected').length;
+  const totalPages = Math.max(1, Math.ceil(items.length / ITEMS_PER_PAGE));
+  const pageItems = items.slice((agentPage - 1) * ITEMS_PER_PAGE, agentPage * ITEMS_PER_PAGE);
+
+  return (
+    <ExpansionPanel title="AGENT_ANALYSIS" id="agent-analysis">
+      {/* Summary bar */}
+      <div className="grid grid-cols-3 gap-3 mb-4">
+        <div className="hw-surface-alt p-3 text-center">
+          <span className="micro-label">TOTAL ENTRIES</span>
+          <div className="text-lg font-bold text-text mt-1">{items.length}</div>
+        </div>
+        <div className="hw-surface-alt p-3 text-center">
+          <span className="micro-label">CONFIRMED</span>
+          <div className="text-lg font-bold text-success mt-1">{confirmed}</div>
+        </div>
+        <div className="hw-surface-alt p-3 text-center">
+          <span className="micro-label">REJECTED</span>
+          <div className="text-lg font-bold text-danger mt-1">{rejected}</div>
+        </div>
+      </div>
+
+      {/* Validations list */}
+      <div className="space-y-2">
+        {pageItems.map((v, idx) => {
+          const globalIdx = (agentPage - 1) * ITEMS_PER_PAGE + idx;
+          const isExpanded = expandedIdx === globalIdx;
+          const details = v.agent_details ?? {};
+          const detailKeys = Object.keys(details);
+
+          return (
+            <div key={globalIdx} className="border border-border/40 rounded overflow-hidden">
+              {/* Row header */}
+              <button
+                type="button"
+                className="w-full flex items-center gap-3 px-3 py-2 hover:bg-surface-alt/30 transition-colors text-left"
+                onClick={() => setExpandedIdx(isExpanded ? null : globalIdx)}
+              >
+                {isExpanded ? <ChevronDown className="w-3 h-3 text-text-dim" /> : <ChevronRight className="w-3 h-3 text-text-dim" />}
+                <span className={`text-[9px] font-bold tracking-wider px-2 py-0.5 rounded ${
+                  v.status === 'confirmed' ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'
+                }`}>
+                  {v.status === 'confirmed' ? <CheckCircle className="w-3 h-3 inline mr-1" /> : <XCircle className="w-3 h-3 inline mr-1" />}
+                  {v.status.toUpperCase()}
+                </span>
+                <span className={`text-[10px] font-bold ${v.strategy_signal === 'BUY' ? 'text-success' : 'text-danger'}`}>
+                  {v.strategy_signal}
+                </span>
+                <span className="text-[10px] text-text-dim">→</span>
+                <span className={`text-[10px] font-bold ${
+                  v.agent_decision === 'BUY' ? 'text-success' : v.agent_decision === 'SELL' ? 'text-danger' : 'text-text-muted'
+                }`}>
+                  {v.agent_decision}
+                </span>
+                <span className="text-[10px] font-mono text-text-dim ml-auto">{v.price.toFixed(5)}</span>
+                <span className="text-[9px] text-text-dim">{v.time?.slice(0, 16)}</span>
+                <span className="text-[9px] text-text-dim">conf: {(v.confidence * 100).toFixed(0)}%</span>
+              </button>
+
+              {/* Expanded detail */}
+              {isExpanded && detailKeys.length > 0 && (
+                <div className="border-t border-border/30 bg-surface-alt/20 px-4 py-3 space-y-3">
+                  <div className="flex flex-wrap gap-1 mb-2">
+                    {v.agents_used.map(a => (
+                      <span key={a} className="text-[8px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent">{a}</span>
+                    ))}
+                  </div>
+                  {detailKeys.map(agentName => {
+                    const d = details[agentName];
+                    return (
+                      <div key={agentName} className="border-l-2 border-accent/30 pl-3">
+                        <div className="flex items-center gap-2 mb-1">
+                          <Brain className="w-3 h-3 text-accent" />
+                          <span className="text-[10px] font-bold text-accent">{agentName}</span>
+                          {d.signal && (
+                            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                              d.signal === 'bullish' || d.signal === 'BUY' ? 'bg-green-500/10 text-green-400' :
+                              d.signal === 'bearish' || d.signal === 'SELL' ? 'bg-red-500/10 text-red-400' :
+                              'bg-border/30 text-text-dim'
+                            }`}>
+                              {d.signal}
+                            </span>
+                          )}
+                          {d.score != null && <span className="text-[9px] font-mono text-text-dim">score: {Number(d.score).toFixed(3)}</span>}
+                          {d.confidence != null && <span className="text-[9px] font-mono text-text-dim">conf: {(Number(d.confidence) * 100).toFixed(0)}%</span>}
+                        </div>
+                        {d.summary && <p className="text-[10px] text-text-muted leading-relaxed">{d.summary}</p>}
+                        {d.reason && <p className="text-[10px] text-text-muted italic">{d.reason}</p>}
+                        {d.winning_side && <span className="text-[9px] font-bold text-accent">Winner: {d.winning_side}</span>}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Pagination */}
+      {items.length > ITEMS_PER_PAGE && (
+        <div className="flex items-center justify-between mt-3 pt-3 border-t border-border/30">
+          <span className="text-[9px] font-mono text-text-dim">{(agentPage - 1) * ITEMS_PER_PAGE + 1}-{Math.min(agentPage * ITEMS_PER_PAGE, items.length)} of {items.length}</span>
+          <div className="flex gap-2">
+            <button type="button" className="text-[10px] px-2 py-1 border border-border rounded hover:bg-surface-alt disabled:opacity-30" disabled={agentPage <= 1} onClick={() => setAgentPage(p => p - 1)}>Previous</button>
+            <span className="text-[9px] font-mono text-text-dim self-center">Page {agentPage} / {totalPages}</span>
+            <button type="button" className="text-[10px] px-2 py-1 border border-border rounded hover:bg-surface-alt disabled:opacity-30" disabled={agentPage >= totalPages} onClick={() => setAgentPage(p => p + 1)}>Next</button>
+          </div>
+        </div>
+      )}
+    </ExpansionPanel>
+  );
+}
+
+
 export function BacktestsPage() {
   const { token } = useAuth();
   const { instruments } = useMarketSymbols(token);
@@ -442,6 +645,7 @@ export function BacktestsPage() {
   const [strategy, setStrategy] = useState('ema_rsi');
   const [rangeDays, setRangeDays] = useState(90);
   const [useAgentPipeline, setUseAgentPipeline] = useState(false);
+  const [maxEntries, setMaxEntries] = useState(0); // 0 = ALL
   const [agentConfig, setAgentConfig] = useState<Record<string, boolean>>(() =>
     Object.fromEntries(AGENTS.map(a => [a.key, true]))
   );
@@ -451,8 +655,8 @@ export function BacktestsPage() {
     ? agentConfig
     : Object.fromEntries(AGENTS.map(a => [a.key, false]));
 
-  // Effective strategy: multi_agent when pipeline is on, otherwise selected strategy
-  const effectiveStrategy = useAgentPipeline ? 'multi_agent' : strategy;
+  // Strategy is always the selected one; agent pipeline is a validation layer on top
+  const effectiveStrategy = strategy;
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -501,7 +705,7 @@ export function BacktestsPage() {
         start_date: daysAgo(rangeDays),
         end_date: todayStr(),
         llm_enabled: useAgentPipeline,
-        agent_config: effectiveAgentConfig,
+        agent_config: { ...effectiveAgentConfig, max_entries: maxEntries || undefined },
       })) as BacktestRun;
 
       // Poll until completed or failed
@@ -634,11 +838,35 @@ export function BacktestsPage() {
                 );
               })}
             </div>
-            {useAgentPipeline && (
-              <p className="text-[9px] text-text-dim">
-                Agent pipeline active — each bar scored using the same MCP tools as live analysis.
-              </p>
-            )}
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[9px] font-mono text-text-dim">
+                  {useAgentPipeline ? 'Max entries validated by agents' : 'Max entries (strategy signals)'}
+                </span>
+                <div className="flex items-center gap-3">
+                  <span className="text-[10px] font-bold font-mono text-accent">
+                    {maxEntries === 0 ? 'ALL' : `${maxEntries} entries`}
+                  </span>
+                  {maxEntries > 0 && (
+                    <span className="text-[9px] font-mono text-text-dim">
+                      ~{useAgentPipeline ? `${maxEntries}min` : `${Math.max(1, Math.ceil(maxEntries * 0.2))}s`}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={50}
+                value={maxEntries}
+                onChange={(e) => setMaxEntries(Number(e.target.value))}
+                className="w-full h-1.5 bg-border rounded-full appearance-none cursor-pointer accent-accent"
+              />
+              <div className="flex justify-between text-[8px] font-mono text-text-dim">
+                <span>1</span>
+                <span>ALL</span>
+              </div>
+            </div>
           </div>
 
           {/* Range presets */}
@@ -665,20 +893,8 @@ export function BacktestsPage() {
             </span>
           </div>
 
-          {/* Run button / progress */}
-          {running ? (
-            <div className="flex items-center gap-4">
-              <div className="flex-1 h-8 rounded-lg bg-surface-alt overflow-hidden relative">
-                <div
-                  className="h-full bg-gradient-to-r from-accent/80 to-accent transition-all duration-500"
-                  style={{ width: `${progress}%` }}
-                />
-                <span className="absolute inset-0 flex items-center justify-center text-[11px] font-bold tracking-widest text-white/90">
-                  SIMULATING... {progress}%
-                </span>
-              </div>
-            </div>
-          ) : (
+          {/* Run button */}
+          {!running && (
             <button className="btn-primary w-full md:w-auto md:self-start flex items-center gap-2" disabled={running}>
               <Play className="w-3.5 h-3.5" /> RUN_BACKTEST
             </button>
@@ -687,6 +903,21 @@ export function BacktestsPage() {
           {error && <p className="alert">{error}</p>}
         </form>
       </div>
+
+      {/* ── Failed Run Error ── */}
+      {selectedRun && selectedRun.status === 'failed' && (
+        <div className="hw-surface p-0 overflow-hidden">
+          <div className="flex items-center gap-3 px-4 py-2.5 border-b border-red-500/30">
+            <XCircle className="w-3.5 h-3.5 text-red-400" />
+            <span className="text-[11px] font-bold tracking-[0.12em] text-red-400 uppercase">BACKTEST_FAILED</span>
+            <span className="text-[10px] text-text-dim">|</span>
+            <span className="text-[10px] text-text-dim">Run #{selectedRun.id} — {selectedRun.pair} {selectedRun.timeframe} {selectedRun.strategy}</span>
+          </div>
+          <div className="p-5">
+            <p className="text-[11px] font-mono text-red-400 leading-relaxed whitespace-pre-wrap">{selectedRun.error || 'Unknown error'}</p>
+          </div>
+        </div>
+      )}
 
       {/* ── Results Panel ── */}
       {selectedRun && metrics && (
@@ -723,9 +954,10 @@ export function BacktestsPage() {
               {/* Drawdown */}
               {equityCurve.length > 0 && <DrawdownChart data={equityCurve} />}
 
-              {/* Analytics grid: 3 panels in one row */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+              {/* Analytics grid: 2x2 */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                 <PositionDistribution trades={trades} />
+                <WinLossDistribution trades={trades} />
                 <MonthlyReturnsHeatmap trades={trades} />
                 <PnlDistribution trades={trades} />
               </div>
@@ -733,6 +965,11 @@ export function BacktestsPage() {
               {/* Trade history with pagination */}
               <TradeHistoryTable trades={trades} />
             </>
+          )}
+
+          {/* Agent Analysis — only shown when agent_validations has data */}
+          {selectedRun?.agent_validations && selectedRun.agent_validations.length > 0 && (
+            <AgentAnalysisPanel validations={selectedRun.agent_validations} />
           )}
         </div>
       )}
@@ -753,14 +990,16 @@ export function BacktestsPage() {
                   <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Agents</th>
                   <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Period</th>
                   <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Status</th>
+                  <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Running Time</th>
+                  <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Trades</th>
                   <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Return</th>
                   <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Action</th>
                 </tr>
               </thead>
               <tbody>
                 {backtests.map((bt) => {
-                  const m = bt.metrics as Record<string, number> | null;
-                  const ret = m?.total_return_pct;
+                  const m = bt.metrics as Record<string, unknown> | null;
+                  const ret = m?.total_return_pct as number | undefined;
                   return (
                     <tr key={bt.id} className="border-b border-border/30 hover:bg-surface-alt/30 transition-colors">
                       <td className="px-3 py-2 text-[10px] font-mono text-text-dim">{bt.id}</td>
@@ -769,13 +1008,21 @@ export function BacktestsPage() {
                       <td className="px-3 py-2 text-[10px] text-text-dim">{bt.strategy}</td>
                       <td className="px-3 py-2">
                         <span className={`text-[9px] font-bold tracking-wider px-2 py-0.5 rounded ${
-                          m?.llm_enabled ? 'bg-green-500/10 text-green-400' : 'bg-border/30 text-text-dim'
+                          bt.llm_enabled ? 'bg-green-500/10 text-green-400' : 'bg-border/30 text-text-dim'
                         }`}>
-                          {m?.llm_enabled ? 'ON' : 'OFF'}
+                          {bt.llm_enabled ? 'ON' : 'OFF'}
                         </span>
                       </td>
                       <td className="px-3 py-2 text-[10px] text-text-dim">{bt.start_date?.slice(0, 10)} → {bt.end_date?.slice(0, 10)}</td>
                       <td className="px-3 py-2">
+                        {(bt.status === 'running' || bt.status === 'queued' || bt.status === 'pending') && (bt.progress ?? 0) > 0 ? (
+                          <div className="flex items-center gap-2">
+                            <div className="w-16 h-1.5 rounded-full bg-border overflow-hidden">
+                              <div className="h-full bg-accent rounded-full transition-all duration-500" style={{ width: `${bt.progress ?? 0}%` }} />
+                            </div>
+                            <span className="text-[9px] font-mono text-accent">{bt.progress}%</span>
+                          </div>
+                        ) : (
                         <span className={`text-[9px] font-bold tracking-wider px-2 py-0.5 rounded ${
                           bt.status === 'completed' ? 'bg-green-500/10 text-green-400' :
                           bt.status === 'failed' ? 'bg-red-500/10 text-red-400' :
@@ -783,6 +1030,23 @@ export function BacktestsPage() {
                         }`}>
                           {bt.status?.toUpperCase()}
                         </span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-[10px] font-mono text-text-dim">
+                        {(() => {
+                          const s = bt.started_at ? new Date(bt.started_at).getTime() : 0;
+                          if (!s) return '-';
+                          const e = bt.status === 'completed' || bt.status === 'failed'
+                            ? (bt.updated_at ? new Date(bt.updated_at).getTime() : Date.now())
+                            : Date.now();
+                          const sec = Math.max(0, Math.floor((e - s) / 1000));
+                          const min = Math.floor(sec / 60);
+                          const rs = sec % 60;
+                          return min > 0 ? `${min}m ${String(rs).padStart(2, '0')}s` : `${rs}s`;
+                        })()}
+                      </td>
+                      <td className="px-3 py-2 text-[10px] font-mono text-text-dim">
+                        {(m?.total_trades as number) ?? '-'}
                       </td>
                       <td className={`px-3 py-2 text-[10px] font-mono ${ret != null && ret >= 0 ? 'text-green-400' : 'text-red-400'}`}>
                         {ret != null ? `${ret >= 0 ? '+' : ''}${ret.toFixed(2)}%` : '-'}

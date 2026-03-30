@@ -21,7 +21,7 @@ def test_backtest_engine_returns_metrics(monkeypatch) -> None:
         index=index,
     )
 
-    monkeypatch.setattr('app.services.market.news_provider.MarketProvider.get_historical_candles', lambda *args, **kwargs: frame)
+    monkeypatch.setattr('app.services.backtest.engine.BacktestEngine._fetch_backtest_candles', lambda *args, **kwargs: frame)
 
     engine = BacktestEngine()
     result = engine.run('EURUSD', 'D1', '2025-01-01', '2025-06-30', strategy='ema_rsi')
@@ -34,9 +34,9 @@ def test_backtest_engine_returns_metrics(monkeypatch) -> None:
     assert len(result.equity_curve) > 0
 
 
-def test_backtest_engine_supports_multi_agent_strategy() -> None:
-    assert BacktestEngine.normalize_strategy('agents') == 'multi_agent'
-    assert BacktestEngine.normalize_strategy('multi-agent') == 'multi_agent'
-    assert BacktestEngine.normalize_strategy('multi_agent') == 'multi_agent'
-    # Still reject unknown strategies
+def test_backtest_engine_strategy_normalization() -> None:
+    assert BacktestEngine.normalize_strategy('ema_rsi') == 'ema_rsi'
+    assert BacktestEngine.normalize_strategy('ema-rsi') == 'ema_rsi'
+    assert BacktestEngine.normalize_strategy('default') == 'ema_rsi'
+    # Reject unknown strategies
     assert BacktestEngine.normalize_strategy('unknown_xyz') is None

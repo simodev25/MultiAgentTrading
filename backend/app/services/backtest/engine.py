@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 from typing import Any
 
@@ -23,18 +23,20 @@ class BacktestResult:
     metrics: dict[str, Any]
     equity_curve: list[dict[str, Any]]
     trades: list[dict[str, Any]]
+    agent_validations: list[dict[str, Any]] = None
+
+    def __post_init__(self):
+        if self.agent_validations is None:
+            self.agent_validations = []
 
 
 class BacktestEngine:
-    SUPPORTED_STRATEGIES = {'ema_rsi', 'multi_agent'}
+    SUPPORTED_STRATEGIES = {'ema_rsi'}
     STRATEGY_ALIASES = {
         'ema-rsi': 'ema_rsi',
         'legacy_ema_rsi': 'ema_rsi',
         'legacy-ema-rsi': 'ema_rsi',
         'default': 'ema_rsi',
-        'multi-agent': 'multi_agent',
-        'agent': 'multi_agent',
-        'agents': 'multi_agent',
     }
 
     PERIODS_PER_YEAR = {
@@ -57,6 +59,56 @@ class BacktestEngine:
         if value in cls.SUPPORTED_STRATEGIES:
             return value
         return cls.STRATEGY_ALIASES.get(value)
+
+    def _fetch_backtest_candles(self, pair: str, timeframe: str, start_date: str, end_date: str,
+                               run_id: int | None = None) -> pd.DataFrame:
+        """Fetch candles from Redis cache (pre-fetched by backend) or MetaAPI REST fallback."""
+        import json as _json
+        import redis
+
+        # Try Redis cache first (pre-fetched by the API route in the backend process)
+        cache_key = f'backtest:candles:{run_id}' if run_id else None
+        if cache_key:
+            try:
+                r = redis.Redis.from_url(self.settings.redis_url, decode_responses=True)
+                cached = r.get(cache_key)
+                if cached:
+                    candles = _json.loads(cached)
+                    r.delete(cache_key)
+                    if candles:
+                        logger.info('backtest_source=redis_cache candles=%d pair=%s', len(candles), pair)
+                        frame = pd.DataFrame([
+                            {'Open': c['open'], 'High': c['high'], 'Low': c['low'],
+                             'Close': c['close'], 'Volume': c.get('volume', 0)}
+                            for c in candles
+                        ], index=pd.DatetimeIndex([c['time'] for c in candles]))
+                        return frame.sort_index()
+            except Exception as exc:
+                logger.warning('backtest_redis_cache_miss: %s', str(exc)[:80])
+
+        # Fallback: try MetaAPI REST directly
+        import asyncio
+        from app.services.trading.metaapi_client import MetaApiClient
+
+        async def _fetch() -> list[dict[str, Any]]:
+            client = MetaApiClient()
+            return await client.get_historical_candles_range(
+                pair=pair, timeframe=timeframe,
+                start_date=start_date, end_date=end_date,
+            )
+
+        candles = asyncio.run(_fetch())
+        if not candles:
+            logger.warning('backtest_metaapi returned 0 candles pair=%s tf=%s', pair, timeframe)
+            return pd.DataFrame()
+
+        logger.info('backtest_source=metaapi_rest candles=%d pair=%s', len(candles), pair)
+        frame = pd.DataFrame([
+            {'Open': c['open'], 'High': c['high'], 'Low': c['low'],
+             'Close': c['close'], 'Volume': c.get('volume', 0)}
+            for c in candles
+        ], index=pd.DatetimeIndex([c['time'] for c in candles]))
+        return frame.sort_index()
 
     def _prepare_indicator_frame(self, frame: pd.DataFrame) -> pd.DataFrame:
         prepared = frame.copy().dropna()
@@ -158,68 +210,149 @@ class BacktestEngine:
 
         return trades
 
-    def _signal_series_multi_agent(
-        self, frame: pd.DataFrame, pair: str, timeframe: str,
-        llm_enabled: bool = False, agent_config: dict | None = None,
-    ) -> pd.Series:
-        """Generate signals using the same MCP tools as the live agents.
+    def _agent_validate_signals(
+        self, frame: pd.DataFrame, raw_signals: pd.Series, pair: str, timeframe: str,
+        db: Session | None = None, agent_config: dict | None = None,
+        run_id: int | None = None,
+    ) -> tuple[pd.Series, list[dict]]:
+        """Validate strategy entry signals through the real multi-agent pipeline.
 
-        Each bar is scored using technical_scoring (deterministic).
-        If llm_enabled, the full AgentScope pipeline is called every N bars.
+        Each time a new entry is detected, the full AgentScope pipeline runs
+        (same agents as live analysis). If the agents disagree, the entry is rejected.
+        Returns (validated_signals, agent_validations_detail).
         """
-        from app.services.mcp.trading_server import (
-            technical_scoring, contradiction_detector, decision_gating,
+        import asyncio
+        from app.services.agentscope.registry import AgentScopeRegistry
+        from app.services.market.news_provider import MarketProvider
+        from app.services.prompts.registry import PromptTemplateService
+
+        if db is None:
+            logger.warning('agent_validate_signals: no DB session, skipping agent validation')
+            return raw_signals
+
+        registry = AgentScopeRegistry(
+            prompt_service=PromptTemplateService(),
+            market_provider=MarketProvider(),
         )
-        from app.services.agentscope.constants import DECISION_MODES
 
-        agent_config = agent_config or {}
-        signals = np.zeros(len(frame), dtype='int64')
+        # Collect all entries that need validation
+        entries: list[tuple[int, int]] = []  # (bar_index, signal)
+        prev_signal = 0
+        for i in range(len(frame)):
+            current_signal = int(raw_signals.iloc[i])
+            if current_signal != 0 and current_signal != prev_signal:
+                entries.append((i, current_signal))
+            prev_signal = current_signal
 
-        for i in range(50, len(frame)):  # Skip first 50 for indicator warmup
-            row = frame.iloc[i]
-            ema_fast = float(row['ema_fast'])
-            ema_slow = float(row['ema_slow'])
+        if not entries:
+            return raw_signals, []
 
-            scoring = technical_scoring(
-                trend='up' if ema_fast > ema_slow else 'down' if ema_fast < ema_slow else 'neutral',
-                rsi=float(row['rsi']),
-                macd_diff=float(ema_fast - ema_slow),
-                atr=float(row['atr']),
-                ema_fast_above_slow=ema_fast > ema_slow,
-                change_pct=float(row.get('change_pct', 0)),
-            )
+        # Limit number of entries to validate
+        max_entries = int((agent_config or {}).get('max_entries', 0) or len(entries))
+        if max_entries < len(entries):
+            logger.info('agent_validate_signals: limiting entries from %d to %d', len(entries), max_entries)
+            entries = entries[:max_entries]
 
-            score = scoring.get('score', 0)
-            signal = scoring.get('signal', 'neutral')
-            confidence = scoring.get('confidence', 0)
+        logger.info('agent_validate_signals: %d entries to validate via agent pipeline', len(entries))
 
-            # Apply contradiction detector
-            trend = 'up' if ema_fast > ema_slow else 'down'
-            momentum = 'bullish' if float(row['rsi']) > 50 else 'bearish'
-            contradiction = contradiction_detector(
-                macd_diff=float(ema_fast - ema_slow),
-                atr=float(row['atr']),
-                trend=trend,
-                momentum=momentum,
-            )
-            score -= contradiction.get('penalty', 0)
-            confidence *= contradiction.get('confidence_multiplier', 1.0)
+        # Run all validations inside a single event loop
+        total_entries = len(entries)
+        async def _validate_all() -> dict[int, dict]:
+            results = {}
+            for entry_idx, (bar_idx, signal) in enumerate(entries):
+                row = frame.iloc[bar_idx]
+                side = 'BUY' if signal == 1 else 'SELL'
 
-            # Apply decision gating
-            gating = decision_gating(
-                combined_score=score,
-                confidence=confidence,
-                aligned_sources=1 if abs(score) > 0.15 else 0,
-                mode='balanced',
-            )
+                closes = frame['Close'].iloc[max(0, bar_idx - 200):bar_idx + 1].tolist()
+                opens = frame['Open'].iloc[max(0, bar_idx - 200):bar_idx + 1].tolist()
+                highs = frame['High'].iloc[max(0, bar_idx - 200):bar_idx + 1].tolist()
+                lows = frame['Low'].iloc[max(0, bar_idx - 200):bar_idx + 1].tolist()
+                volumes = frame['Volume'].iloc[max(0, bar_idx - 200):bar_idx + 1].tolist()
 
-            if gating.get('execution_allowed'):
-                if signal == 'bullish' and score > 0:
-                    signals[i] = 1
-                elif signal == 'bearish' and score < 0:
-                    signals[i] = -1
+                market_data = {
+                    "ohlc": {
+                        "opens": opens, "highs": highs, "lows": lows,
+                        "closes": closes, "volumes": volumes,
+                    },
+                    "snapshot": {
+                        "pair": pair, "timeframe": timeframe,
+                        "last_price": float(row['Close']),
+                        "degraded": False, "market_data_source": "backtest",
+                    },
+                    "news": {},
+                }
 
-        return pd.Series(signals, index=frame.index, dtype='int64')
+                logger.info('agent_validate bar=%d/%d entry=%s price=%.5f', bar_idx, len(frame), side, float(row['Close']))
+
+                try:
+                    result = await registry.validate_entry(
+                        db=db, pair=pair, timeframe=timeframe,
+                        market_data=market_data, agent_config=agent_config,
+                    )
+                    results[bar_idx] = result
+                except Exception as exc:
+                    logger.warning('agent_validate failed bar=%d: %s', bar_idx, str(exc)[:100])
+                    results[bar_idx] = {"decision": "KEEP", "error": str(exc)}
+
+                # Update progress: 40% → 90% range for agent validation
+                pct = 40 + int(50 * (entry_idx + 1) / total_entries)
+                self._update_progress(db, run_id, pct)
+
+            return results
+
+        validation_results = asyncio.run(_validate_all())
+
+        # Apply results and collect details
+        validated = raw_signals.copy()
+        entries_rejected = 0
+        agent_validations: list[dict] = []
+
+        for bar_idx, signal in entries:
+            result = validation_results.get(bar_idx, {})
+            agent_decision = result.get('decision', 'KEEP')
+            side = 'BUY' if signal == 1 else 'SELL'
+            ts = frame.index[bar_idx]
+            price = float(frame['Close'].iloc[bar_idx])
+
+            status = 'confirmed'
+            if agent_decision == 'KEEP':
+                status = 'error_fallback'
+            elif agent_decision == 'HOLD':
+                validated.iloc[bar_idx] = 0
+                entries_rejected += 1
+                status = 'rejected'
+            elif (signal == 1 and agent_decision == 'SELL') or (signal == -1 and agent_decision == 'BUY'):
+                validated.iloc[bar_idx] = 0
+                entries_rejected += 1
+                status = 'rejected'
+
+            agent_validations.append({
+                'bar': bar_idx,
+                'time': ts.isoformat() if hasattr(ts, 'isoformat') else str(ts),
+                'price': round(price, 6),
+                'strategy_signal': side,
+                'agent_decision': agent_decision,
+                'status': status,
+                'confidence': result.get('confidence', 0),
+                'agents_used': result.get('agents_used', []),
+                'agent_details': result.get('agent_details', {}),
+            })
+
+            logger.info('agent_%s entry=%s bar=%d decision=%s conf=%.2f', status, side, bar_idx, agent_decision, result.get('confidence', 0))
+
+        logger.info('agent_validation_summary entries=%d rejected=%d kept=%d', len(entries), entries_rejected, len(entries) - entries_rejected)
+        return validated, agent_validations
+
+    def _update_progress(self, db: Session | None, run_id: int | None, progress: int) -> None:
+        """Update backtest run progress in DB (0-100)."""
+        if db is None or run_id is None:
+            return
+        try:
+            from app.db.models.backtest_run import BacktestRun
+            db.query(BacktestRun).filter(BacktestRun.id == run_id).update({'progress': progress})
+            db.commit()
+        except Exception:
+            pass
 
     def run(
         self,
@@ -231,6 +364,7 @@ class BacktestEngine:
         db: Session | None = None,
         llm_enabled: bool = False,
         agent_config: dict | None = None,
+        run_id: int | None = None,
     ) -> BacktestResult:
         normalized_strategy = self.normalize_strategy(strategy)
         if not normalized_strategy:
@@ -243,21 +377,50 @@ class BacktestEngine:
             normalized_strategy,
         )
 
-        frame = self.market_provider.get_historical_candles(pair, timeframe, start_date=start_date, end_date=end_date)
-        if frame.empty or len(frame) < 80:
-            raise ValueError('Insufficient historical candles for backtesting')
+        # Add warmup buffer before start_date for indicator calculation (EMA-50 needs ~50 bars)
+        tf_upper = timeframe.upper()
+        tf_delta_map = {
+            'M1': timedelta(minutes=1), 'M5': timedelta(minutes=5),
+            'M15': timedelta(minutes=15), 'M30': timedelta(minutes=30),
+            'H1': timedelta(hours=1), 'H4': timedelta(hours=4),
+            'D1': timedelta(days=1), 'W1': timedelta(weeks=1),
+            'MN': timedelta(days=30),
+        }
+        warmup_bars = 60
+        tf_delta = tf_delta_map.get(tf_upper, timedelta(hours=1))
+        warmup_start = (datetime.fromisoformat(start_date) - tf_delta * warmup_bars).isoformat()
 
-        frame = self._prepare_indicator_frame(frame)
-        if frame.empty or len(frame) < 80:
-            raise ValueError('Insufficient indicator-ready candles for backtesting')
-
-        if normalized_strategy == 'multi_agent':
-            signal_series = self._signal_series_multi_agent(
-                frame, pair, timeframe, llm_enabled=llm_enabled, agent_config=agent_config,
+        # ── Phase 1: Fetch data (0→10%)
+        self._update_progress(db, run_id, 5)
+        frame = self._fetch_backtest_candles(pair, timeframe, warmup_start, end_date, run_id=run_id)
+        logger.info('backtest_frame rows=%d empty=%s', len(frame) if not frame.empty else 0, frame.empty)
+        if frame.empty or len(frame) < 30:
+            raise ValueError(
+                f'Insufficient historical candles for backtesting (got {len(frame) if not frame.empty else 0}). '
+                f'Try a longer date range or check that the instrument is available.'
             )
-        else:
-            signal_series = self._signal_series_ema_rsi(frame)
+        self._update_progress(db, run_id, 10)
 
+        # ── Phase 2: Indicators (10→20%)
+        frame = self._prepare_indicator_frame(frame)
+        if frame.empty or len(frame) < 30:
+            raise ValueError('Insufficient indicator-ready candles for backtesting')
+        self._update_progress(db, run_id, 20)
+
+        # ── Phase 3: Strategy signals (20→40%)
+        signal_series = self._signal_series_ema_rsi(frame)
+        self._update_progress(db, run_id, 40)
+
+        # ── Phase 4: Agent validation (40→90%) — only if llm_enabled
+        agent_validations: list[dict] = []
+        if llm_enabled:
+            signal_series, agent_validations = self._agent_validate_signals(
+                frame, signal_series, pair, timeframe, db=db, agent_config=agent_config,
+                run_id=run_id,
+            )
+        self._update_progress(db, run_id, 90)
+
+        # ── Phase 5: Metrics (90→100%)
         frame['signal'] = signal_series
         frame['position'] = signal_series.shift(1).fillna(0)
         frame['ret'] = frame['Close'].pct_change().fillna(0) * frame['position']
@@ -285,9 +448,9 @@ class BacktestEngine:
 
         metrics = {
             'strategy': normalized_strategy,
-            'workflow': [normalized_strategy],
-            'workflow_source': f'BacktestEngine.{normalized_strategy}',
-            'execution_mode': 'multi_agent' if normalized_strategy == 'multi_agent' else 'strategy-internal',
+            'workflow': [normalized_strategy] + (['agent_validation'] if llm_enabled else []),
+            'workflow_source': f'BacktestEngine.{normalized_strategy}' + ('+agents' if llm_enabled else ''),
+            'execution_mode': 'strategy+agents' if llm_enabled else 'strategy-only',
             'llm_enabled': llm_enabled,
             'total_trades': len(trades),
             'total_return_pct': round(float((frame['equity'].iloc[-1] - 1) * 100), 4),
@@ -318,4 +481,5 @@ class BacktestEngine:
             metrics.get('trades'),
         )
 
-        return BacktestResult(metrics=metrics, equity_curve=equity_curve, trades=trades)
+        self._update_progress(db, run_id, 100)
+        return BacktestResult(metrics=metrics, equity_curve=equity_curve, trades=trades, agent_validations=agent_validations)

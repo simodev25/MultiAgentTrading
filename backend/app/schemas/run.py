@@ -34,11 +34,13 @@ class RunOut(BaseModel):
     timeframe: str
     mode: str
     status: str
+    progress: int = 0
     decision: dict[str, Any]
     trace: dict[str, Any]
     error: str | None
     created_by_id: int
     created_at: datetime
+    started_at: datetime | None = None
     updated_at: datetime
 
     model_config = {'from_attributes': True}

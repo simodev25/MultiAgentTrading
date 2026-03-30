@@ -10,7 +10,7 @@ class BacktestCreateRequest(BaseModel):
     end_date: date
     strategy: str = 'ema_rsi'
     llm_enabled: bool = False
-    agent_config: dict[str, bool] | None = None
+    agent_config: dict[str, bool | int] | None = None
 
 
 class BacktestTradeOut(BaseModel):
@@ -34,12 +34,17 @@ class BacktestRunOut(BaseModel):
     start_date: date
     end_date: date
     strategy: str
+    llm_enabled: bool = False
+    progress: int = 0
     status: str
     metrics: dict
     equity_curve: list
+    agent_validations: list = []
     error: str | None
     created_by_id: int
     created_at: datetime
+    started_at: datetime | None = None
+    updated_at: datetime | None = None
 
     model_config = {'from_attributes': True}
 

@@ -2440,3 +2440,100 @@ class MetaApiClient:
             'endpoint': (last_result or {}).get('endpoint'),
             'raw': (last_result or {}).get('raw'),
         }
+
+    # ── Backtest historical range (REST API — no SDK connection needed) ──
+    async def get_historical_candles_range(
+        self,
+        *,
+        pair: str,
+        timeframe: str,
+        start_date: str,
+        end_date: str,
+        account_id: str | None = None,
+        region: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Paginate MetaAPI REST API to fetch all candles between start_date and end_date."""
+        from datetime import datetime as _dt, timezone as _tz
+        from urllib.parse import quote
+
+        resolved_account_id = self._resolve_account_id(account_id)
+        if not resolved_account_id or not self._resolve_token():
+            return []
+
+        symbol = self._resolve_trade_symbol(pair)
+        symbol_candidates = self._trade_symbol_candidates(symbol)
+        normalized_tf = self._normalize_market_timeframe(timeframe)
+        start_dt = _dt.fromisoformat(start_date).replace(tzinfo=_tz.utc) if 'T' in start_date or len(start_date) > 10 else _dt.fromisoformat(f'{start_date}T00:00:00+00:00')
+        end_dt = _dt.fromisoformat(end_date).replace(tzinfo=_tz.utc) if 'T' in end_date or len(end_date) > 10 else _dt.fromisoformat(f'{end_date}T23:59:59+00:00')
+
+        market_base_url = self.settings.metaapi_market_base_url.rstrip('/')
+        headers = self._auth_headers()
+        all_candles: list[dict[str, Any]] = []
+        page_limit = 1000
+        max_pages = 50
+
+        try:
+            async with httpx.AsyncClient(timeout=max(float(self.settings.metaapi_rest_timeout_seconds), 10.0)) as client:
+                # Find a working symbol
+                working_symbol: str | None = None
+                for candidate in symbol_candidates:
+                    symbol_encoded = quote(candidate, safe='')
+                    url = (
+                        f'{market_base_url}/users/current/accounts/{resolved_account_id}'
+                        f'/historical-market-data/symbols/{symbol_encoded}'
+                        f'/timeframes/{normalized_tf}/candles'
+                    )
+                    resp = await client.get(url, headers=headers, params={
+                        'startTime': start_dt.strftime('%Y-%m-%dT%H:%M:%S.000Z'),
+                        'limit': 10,
+                    })
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if isinstance(data, list) and len(data) > 0:
+                            working_symbol = candidate
+                            break
+
+                if not working_symbol:
+                    logger.warning('backtest_metaapi_rest no working symbol for %s candidates=%s', pair, symbol_candidates)
+                    return []
+
+                # Paginate
+                symbol_encoded = quote(working_symbol, safe='')
+                url = (
+                    f'{market_base_url}/users/current/accounts/{resolved_account_id}'
+                    f'/historical-market-data/symbols/{symbol_encoded}'
+                    f'/timeframes/{normalized_tf}/candles'
+                )
+                cursor = start_dt
+                for _ in range(max_pages):
+                    if cursor >= end_dt:
+                        break
+                    resp = await client.get(url, headers=headers, params={
+                        'startTime': cursor.strftime('%Y-%m-%dT%H:%M:%S.000Z'),
+                        'limit': page_limit,
+                    })
+                    if resp.status_code != 200:
+                        logger.warning('backtest_metaapi_rest error status=%d', resp.status_code)
+                        break
+                    raw = resp.json()
+                    if not isinstance(raw, list) or not raw:
+                        break
+                    for c in raw:
+                        norm = self._normalize_market_candle(c)
+                        if norm is None:
+                            continue
+                        candle_dt = self._to_utc_datetime(norm['time'])
+                        if candle_dt and candle_dt <= end_dt:
+                            all_candles.append(norm)
+                    last_time = self._to_utc_datetime(raw[-1].get('time'))
+                    if last_time is None or last_time <= cursor:
+                        break
+                    cursor = last_time
+                    if len(raw) < page_limit:
+                        break
+
+            logger.info('backtest_metaapi_rest_done pair=%s symbol=%s tf=%s candles=%d', pair, working_symbol, timeframe, len(all_candles))
+            return all_candles
+        except Exception:
+            logger.exception('backtest_metaapi_rest_error pair=%s tf=%s', pair, timeframe)
+            return []
