@@ -318,5 +318,6 @@ export function useOpenOrdersMarketChart(
     marketLoading,
     chartCountdownLabel,
     chartNextRefreshAtLabel,
+    wsStreamConnected,
   };
 }

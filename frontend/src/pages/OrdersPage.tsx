@@ -8,6 +8,7 @@ import { useOpenOrdersMarketChart } from '../hooks/useOpenOrdersMarketChart';
 import { usePlatformOrders } from '../hooks/usePlatformOrders';
 import { DEFAULT_TIMEFRAMES } from '../constants/markets';
 import { ExpansionPanel } from '../components/ExpansionPanel';
+import { TrendingUp, Wifi, WifiOff } from 'lucide-react';
 
 
 const OpenOrdersChart = lazy(() =>
@@ -174,6 +175,7 @@ export function OrdersPage() {
     marketLoading,
     chartCountdownLabel,
     chartNextRefreshAtLabel,
+    wsStreamConnected,
   } = useOpenOrdersMarketChart(token, accountRef, orders, openPositions, openOrders);
 
   const dealsTotalPages = Math.max(1, Math.ceil(deals.length / DEALS_PER_PAGE));
@@ -494,24 +496,30 @@ export function OrdersPage() {
       </div>
 
       <section className="hw-surface overflow-hidden" id="orders-chart">
-            {/* ── Chart header bar ── */}
-            <div className="flex items-center justify-between px-5 py-3 border-b border-border">
-              <div className="flex items-center gap-3">
-                <span className="text-sm font-bold tracking-wide text-text" data-testid="open-orders-chart-context">
-                  {chartSelection.displaySymbol ?? 'OPEN_ORDERS'}
-                </span>
-                <span className="terminal-tag">LIVE_FEED</span>
-                <span className="text-[10px] font-mono text-text-muted">
-                  Sources: <code>{openPositionsProvider || '-'}</code> | <code>{openOrdersProvider || '-'}</code>
-                </span>
-              </div>
-              <div className="flex items-center gap-4">
-                <div className="flex items-center gap-1.5 text-[10px] font-mono" data-testid="open-orders-chart-timer">
-                  <span className="text-text-muted">Timer ({chartSelection.timeframe ?? '-'}):</span>
-                  <code className="text-accent">{chartCountdownLabel}</code>
-                  <span className="text-text-muted ml-2">MAJ:</span>
-                  <code className="text-accent">{chartNextRefreshAtLabel}</code>
-                </div>
+            {/* ── Chart header — unified LIVE_CHART style ── */}
+            <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border">
+              <TrendingUp className="w-3.5 h-3.5 text-accent" />
+              <span className="text-[11px] font-bold tracking-[0.12em] text-accent uppercase">LIVE_CHART</span>
+              <span className="text-[10px] text-text-dim">|</span>
+              <span className="text-[11px] font-medium text-text" data-testid="open-orders-chart-context">
+                {chartSelection.displaySymbol ?? 'EURUSD'}
+              </span>
+              <span className="text-[10px] text-text-dim">|</span>
+              <span className="text-[10px] text-text-dim">{chartSelection.timeframe ?? 'H1'}</span>
+              <span className="text-[10px] text-text-dim">|</span>
+              <span className="text-[10px] font-mono text-green-400">
+                {openPositions[0]?.currentPrice?.toFixed(5) ?? '-'}
+              </span>
+              {wsStreamConnected ? (
+                <Wifi className="w-3 h-3 text-green-400" title="Live stream connected" />
+              ) : (
+                <WifiOff className="w-3 h-3 text-text-dim" title="Stream disconnected" />
+              )}
+              <div className="ml-auto flex items-center gap-3 text-[10px] font-mono" data-testid="open-orders-chart-timer">
+                <span className="text-text-dim">Timer ({chartSelection.timeframe ?? '-'}):</span>
+                <code className="text-accent">{chartCountdownLabel}</code>
+                <span className="text-text-dim">|</span>
+                <code className="text-accent">{chartNextRefreshAtLabel}</code>
               </div>
             </div>
 
