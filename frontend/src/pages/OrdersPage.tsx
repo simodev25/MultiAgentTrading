@@ -8,7 +8,7 @@ import { useOpenOrdersMarketChart } from '../hooks/useOpenOrdersMarketChart';
 import { usePlatformOrders } from '../hooks/usePlatformOrders';
 import { DEFAULT_TIMEFRAMES } from '../constants/markets';
 import { ExpansionPanel } from '../components/ExpansionPanel';
-import { TrendingUp, Wifi, WifiOff } from 'lucide-react';
+import { Palette, TrendingUp, Wifi, WifiOff } from 'lucide-react';
 
 
 const OpenOrdersChart = lazy(() =>
@@ -184,6 +184,7 @@ export function OrdersPage() {
   const platformOrdersTotalPages = Math.max(1, Math.ceil(orders.length / PLATFORM_ORDERS_PER_PAGE));
   const platformOrdersPageStart = (platformOrdersPage - 1) * PLATFORM_ORDERS_PER_PAGE;
   const pagedPlatformOrders = orders.slice(platformOrdersPageStart, platformOrdersPageStart + PLATFORM_ORDERS_PER_PAGE);
+  const [chartColorScheme, setChartColorScheme] = useState<'classic' | 'pro'>('classic');
   const bootstrapLoading = ordersLoading || metaBootstrapLoading;
 
   const buyCount = useMemo(
@@ -479,6 +480,12 @@ export function OrdersPage() {
           <span>BUY: <strong className="text-success">{buyCount}</strong></span>
           <span>SELL: <strong className="text-danger">{sellCount}</strong></span>
           <span>Pending: <strong>{openOrders.length}</strong></span>
+          <span className="text-border">|</span>
+          <span className="text-[10px] font-mono">
+            PnL: <strong className={watchlist.totalPnl >= 0 ? 'text-success' : 'text-danger'}>
+              {watchlist.totalPnl >= 0 ? '+' : ''}{watchlist.totalPnl.toFixed(2)}
+            </strong>
+          </span>
         </div>
       </div>
 
@@ -510,6 +517,19 @@ export function OrdersPage() {
               <span className="text-[10px] font-mono text-green-400">
                 {marketCandles.length > 0 ? marketCandles[marketCandles.length - 1].close.toFixed(5) : '-'}
               </span>
+              {marketCandles.length >= 2 && (() => {
+                const last = marketCandles[marketCandles.length - 1].close;
+                const first = marketCandles[0].close;
+                const delta = ((last - first) / first) * 100;
+                return (
+                  <>
+                    <span className="text-[10px] text-text-dim">|</span>
+                    <span className={`text-[10px] font-mono ${delta >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                      {delta >= 0 ? '+' : ''}{delta.toFixed(2)}%
+                    </span>
+                  </>
+                );
+              })()}
               {wsStreamConnected ? (
                 <Wifi className="w-3 h-3 text-green-400" title="Live stream connected" />
               ) : (
@@ -543,6 +563,19 @@ export function OrdersPage() {
                     {!chartTimeframeOverride && <span className="text-[9px] text-text-muted">(auto: {chartSelection.autoTimeframe ?? '-'})</span>}
                   </div>
                   <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      title={`Switch to ${chartColorScheme === 'classic' ? 'pro' : 'classic'} color scheme`}
+                      onClick={() => setChartColorScheme((prev) => (prev === 'classic' ? 'pro' : 'classic'))}
+                      className={`px-2 py-1.5 rounded-md text-[11px] font-mono font-semibold border transition-all ${
+                        chartColorScheme === 'pro'
+                          ? 'border-accent text-accent bg-accent/10'
+                          : 'border-border text-text-muted bg-surface-alt hover:text-text hover:border-text-muted'
+                      }`}
+                    >
+                      <Palette className="w-3.5 h-3.5" />
+                    </button>
+                    <span className="text-border">|</span>
                     <span className="micro-label">TIME_SCALE</span>
                     <div className="flex items-center gap-1" role="group" aria-label="Chart timeframe">
                       {DEFAULT_TIMEFRAMES.map((item) => (
@@ -584,6 +617,7 @@ export function OrdersPage() {
                         selectedTicket={selectedChartTicket}
                         selectedSymbol={chartSelection.symbol}
                         displaySymbol={chartSelection.displaySymbol}
+                        colorScheme={chartColorScheme}
                       />
                     </Suspense>
                   )}
@@ -595,13 +629,25 @@ export function OrdersPage() {
       {watchlist.rows.length > 0 && (
         <div className="hw-surface px-5 py-2 flex items-center gap-6 overflow-x-auto">
           <span className="micro-label shrink-0">WATCHLIST</span>
-          {watchlist.rows.map((row) => (
-            <div key={row.symbol} className="flex items-center gap-3 text-[10px] font-mono shrink-0">
-              <span className="text-text font-medium">{row.symbol}</span>
-              <span className="text-text-muted">{row.last > 0 ? row.last.toFixed(5) : '-'}</span>
-              <strong className={row.pnl >= 0 ? 'text-success' : 'text-danger'}>{formatSigned(row.pnl)}</strong>
-            </div>
-          ))}
+          {watchlist.rows.map((row) => {
+            const closes = marketCandles.slice(-20).map(c => c.close);
+            const min = Math.min(...closes);
+            const max = Math.max(...closes);
+            const range = max - min || 1;
+            const points = closes.map((c, i) => `${(i / (closes.length - 1)) * 48},${20 - ((c - min) / range) * 18}`).join(' ');
+            const isUp = closes.length >= 2 && closes[closes.length - 1] >= closes[0];
+
+            return (
+              <div key={row.symbol} className="flex items-center gap-2 text-[10px] font-mono shrink-0">
+                <span className="text-text font-medium">{row.symbol}</span>
+                <svg width="50" height="20" className="shrink-0">
+                  <polyline fill="none" stroke={isUp ? '#22c55e' : '#ef4444'} strokeWidth="1.5" points={points} />
+                </svg>
+                <span className="text-text-muted">{row.last > 0 ? row.last.toFixed(5) : '-'}</span>
+                <strong className={row.pnl >= 0 ? 'text-success' : 'text-danger'}>{formatSigned(row.pnl)}</strong>
+              </div>
+            );
+          })}
           <div className="flex items-center gap-3 text-[10px] font-mono shrink-0 ml-auto border-l border-border pl-4">
             <span className="text-text font-semibold">Total</span>
             <span className="text-text-muted">{watchlist.totalOrders} orders</span>
