@@ -1078,15 +1078,34 @@ class AgentScopeRegistry:
                 name: str, msg: Msg,
                 trader_out: dict | None = None, risk_out: dict | None = None,
             ) -> Msg:
-                """Call agent via LLM (with structured output) or deterministic."""
+                """Call agent via LLM (with retry on 5xx) or deterministic."""
                 if name in agents:
                     schema = AGENT_STRUCTURED_MODELS.get(name)
-                    if schema:
-                        result = await agents[name](msg, structured_model=schema)
-                    else:
-                        result = await agents[name](msg)
-                    agent_tool_invocations[name] = await _extract_tool_invocations(agents[name])
-                    return result
+                    last_err: Exception | None = None
+                    for attempt in range(3):
+                        try:
+                            if schema:
+                                result = await agents[name](msg, structured_model=schema)
+                            else:
+                                result = await agents[name](msg)
+                            agent_tool_invocations[name] = await _extract_tool_invocations(agents[name])
+                            return result
+                        except Exception as exc:
+                            last_err = exc
+                            err_str = str(exc)
+                            if any(code in err_str for code in ("500", "502", "503", "Internal Server Error")):
+                                wait = (attempt + 1) * 3
+                                logger.warning("Agent %s got 5xx, retry in %ds (%d/3): %s", name, wait, attempt + 1, err_str[:100])
+                                await asyncio.sleep(wait)
+                                continue
+                            raise
+                    # All retries exhausted — deterministic fallback
+                    logger.warning("Agent %s failed after 3 retries, deterministic fallback: %s", name, str(last_err)[:100])
+                    return await self._run_deterministic(
+                        name, toolkits.get(name), msg,
+                        ohlc=ohlc, snapshot=snapshot, pair=pair, timeframe=timeframe,
+                        risk_percent=risk_percent, news=market_data.get("news", {}),
+                    )
                 return await self._run_deterministic(
                     name, toolkits.get(name), msg,
                     ohlc=ohlc, snapshot=snapshot, pair=pair, timeframe=timeframe,
