@@ -127,6 +127,175 @@ function TradeRow({ trade, idx }: { trade: { side: string; entry_price: number; 
 
 const TRADES_PER_PAGE = 10;
 
+// ── Drawdown Chart ──
+function DrawdownChart({ data }: { data: number[] }) {
+  if (data.length < 2) return null;
+
+  // Compute drawdown series
+  let peak = data[0];
+  const drawdowns = data.map(v => {
+    if (v > peak) peak = v;
+    return ((v - peak) / peak) * 100;
+  });
+
+  const minDD = Math.min(...drawdowns);
+  const range = Math.abs(minDD) || 1;
+  const w = 800;
+  const h = 120;
+  const pad = 10;
+
+  const points = drawdowns.map((dd, i) =>
+    `${pad + (i / (drawdowns.length - 1)) * (w - 2 * pad)},${pad + ((-dd) / range) * (h - 2 * pad)}`
+  ).join(' ');
+  const areaPoints = `${pad},${pad} ` + points + ` ${w - pad},${pad}`;
+
+  return (
+    <div className="hw-surface p-0 overflow-hidden">
+      <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border">
+        <TrendingDown className="w-3.5 h-3.5 text-red-400" />
+        <span className="text-[11px] font-bold tracking-[0.12em] text-red-400 uppercase">DRAWDOWN_CHART</span>
+        <span className="text-[10px] text-text-dim ml-auto">Max: {minDD.toFixed(2)}%</span>
+      </div>
+      <div className="p-4">
+        <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ height: 130 }}>
+          <defs>
+            <linearGradient id="ddGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#ef4444" stopOpacity="0.01" />
+              <stop offset="100%" stopColor="#ef4444" stopOpacity="0.3" />
+            </linearGradient>
+          </defs>
+          {/* Zero line */}
+          <line x1={pad} y1={pad} x2={w - pad} y2={pad} stroke="#2a2e39" strokeWidth="1" strokeDasharray="4" />
+          <polygon points={areaPoints} fill="url(#ddGrad)" />
+          <polyline fill="none" stroke="#ef4444" strokeWidth="1.5" points={points} />
+          <text x={pad} y={h - 2} className="fill-text-dim" fontSize="9">0%</text>
+          <text x={w - pad} y={h - 2} className="fill-text-dim" fontSize="9" textAnchor="end">{minDD.toFixed(1)}%</text>
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+// ── Monthly Returns Heatmap ──
+function MonthlyReturnsHeatmap({ trades }: { trades: Array<{ entry_time: string; pnl_pct: number }> }) {
+  // Group trades by month
+  const monthlyReturns = new Map<string, number>();
+  for (const trade of trades) {
+    const month = trade.entry_time?.slice(0, 7); // YYYY-MM
+    if (!month) continue;
+    monthlyReturns.set(month, (monthlyReturns.get(month) || 0) + trade.pnl_pct);
+  }
+
+  const entries = Array.from(monthlyReturns.entries()).sort();
+  if (entries.length === 0) return null;
+
+  const maxAbs = Math.max(...entries.map(([, v]) => Math.abs(v)), 1);
+
+  return (
+    <div className="hw-surface p-0 overflow-hidden">
+      <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border">
+        <BarChart3 className="w-3.5 h-3.5 text-accent" />
+        <span className="text-[11px] font-bold tracking-[0.12em] text-accent uppercase">MONTHLY_RETURNS</span>
+      </div>
+      <div className="p-4 flex flex-wrap gap-2">
+        {entries.map(([month, ret]) => {
+          const intensity = Math.min(1, Math.abs(ret) / maxAbs);
+          const bg = ret >= 0
+            ? `rgba(34, 197, 94, ${0.1 + intensity * 0.5})`
+            : `rgba(239, 68, 68, ${0.1 + intensity * 0.5})`;
+          return (
+            <div
+              key={month}
+              className="flex flex-col items-center px-3 py-2 rounded-lg border border-border/30"
+              style={{ background: bg }}
+            >
+              <span className="text-[9px] text-text-dim">{month}</span>
+              <strong className={`text-[12px] font-mono ${ret >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                {ret >= 0 ? '+' : ''}{ret.toFixed(2)}%
+              </strong>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── P&L Distribution Histogram ──
+function PnlDistribution({ trades }: { trades: Array<{ pnl_pct: number }> }) {
+  if (trades.length < 3) return null;
+
+  // Create bins
+  const pnls = trades.map(t => t.pnl_pct);
+  const min = Math.min(...pnls);
+  const max = Math.max(...pnls);
+  const range = max - min || 1;
+  const binCount = Math.min(20, Math.max(8, Math.ceil(Math.sqrt(trades.length))));
+  const binSize = range / binCount;
+
+  const bins: { center: number; count: number; isPositive: boolean }[] = [];
+  for (let i = 0; i < binCount; i++) {
+    const lo = min + i * binSize;
+    const hi = lo + binSize;
+    const center = (lo + hi) / 2;
+    const count = pnls.filter(p => p >= lo && (i === binCount - 1 ? p <= hi : p < hi)).length;
+    bins.push({ center, count, isPositive: center >= 0 });
+  }
+
+  const maxCount = Math.max(...bins.map(b => b.count), 1);
+  const w = 800;
+  const h = 150;
+  const pad = 30;
+  const barW = (w - 2 * pad) / binCount - 2;
+
+  return (
+    <div className="hw-surface p-0 overflow-hidden">
+      <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border">
+        <Activity className="w-3.5 h-3.5 text-accent" />
+        <span className="text-[11px] font-bold tracking-[0.12em] text-accent uppercase">P&L_DISTRIBUTION</span>
+        <span className="text-[10px] text-text-dim ml-auto">
+          Avg: {(pnls.reduce((a, b) => a + b, 0) / pnls.length).toFixed(3)}% | Median: {pnls.sort((a, b) => a - b)[Math.floor(pnls.length / 2)]?.toFixed(3)}%
+        </span>
+      </div>
+      <div className="p-4">
+        <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ height: 160 }}>
+          {/* Zero line */}
+          {bins.some(b => b.center < 0) && bins.some(b => b.center >= 0) && (() => {
+            const zeroIdx = bins.findIndex(b => b.center >= 0);
+            const x = pad + (zeroIdx / binCount) * (w - 2 * pad);
+            return <line x1={x} y1={5} x2={x} y2={h - pad} stroke="#4a90d9" strokeWidth="1" strokeDasharray="3" />;
+          })()}
+          {/* Bars */}
+          {bins.map((bin, i) => {
+            const barH = (bin.count / maxCount) * (h - pad - 10);
+            const x = pad + (i / binCount) * (w - 2 * pad) + 1;
+            const y = h - pad - barH;
+            return (
+              <g key={i}>
+                <rect
+                  x={x} y={y} width={barW} height={barH}
+                  rx={2}
+                  fill={bin.isPositive ? 'rgba(34, 197, 94, 0.6)' : 'rgba(239, 68, 68, 0.6)'}
+                />
+                {bin.count > 0 && (
+                  <text x={x + barW / 2} y={y - 3} textAnchor="middle" className="fill-text-dim" fontSize="8">
+                    {bin.count}
+                  </text>
+                )}
+              </g>
+            );
+          })}
+          {/* X axis labels */}
+          <text x={pad} y={h - 5} className="fill-text-dim" fontSize="8">{min.toFixed(1)}%</text>
+          <text x={w - pad} y={h - 5} className="fill-text-dim" fontSize="8" textAnchor="end">{max.toFixed(1)}%</text>
+          <text x={w / 2} y={h - 5} className="fill-text-dim" fontSize="8" textAnchor="middle">P&L per trade</text>
+        </svg>
+      </div>
+    </div>
+  );
+}
+
+
 // ── Position Distribution donut ──
 function PositionDistribution({ trades }: { trades: Array<{ side: string; pnl_pct: number }> }) {
   const longs = trades.filter(t => t.side?.toUpperCase() === 'BUY');
@@ -548,10 +717,19 @@ export function BacktestsPage() {
             </div>
           )}
 
-          {/* Position distribution + trade history side by side */}
+          {/* Analytics charts */}
           {trades.length > 0 && (
             <>
-              {/* Position distribution donut */}
+              {/* Drawdown */}
+              {equityCurve.length > 0 && <DrawdownChart data={equityCurve} />}
+
+              {/* Monthly returns + P&L distribution side by side */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                <MonthlyReturnsHeatmap trades={trades} />
+                <PnlDistribution trades={trades} />
+              </div>
+
+              {/* Position distribution */}
               <PositionDistribution trades={trades} />
 
               {/* Trade history with pagination */}
