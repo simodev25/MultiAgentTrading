@@ -723,14 +723,12 @@ export function BacktestsPage() {
               {/* Drawdown */}
               {equityCurve.length > 0 && <DrawdownChart data={equityCurve} />}
 
-              {/* Monthly returns + P&L distribution side by side */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+              {/* Analytics grid: 3 panels in one row */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+                <PositionDistribution trades={trades} />
                 <MonthlyReturnsHeatmap trades={trades} />
                 <PnlDistribution trades={trades} />
               </div>
-
-              {/* Position distribution */}
-              <PositionDistribution trades={trades} />
 
               {/* Trade history with pagination */}
               <TradeHistoryTable trades={trades} />
