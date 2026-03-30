@@ -59,12 +59,12 @@ interface TradePoint {
 
 type ReportTab = 'summary' | 'profit' | 'direction' | 'symbols' | 'risks';
 
-const REPORT_TABS: Array<{ id: ReportTab; label: string }> = [
-  { id: 'summary', label: 'Summary' },
-  { id: 'profit', label: 'Profit & Loss' },
-  { id: 'direction', label: 'Long & Short' },
-  { id: 'symbols', label: 'Symbols' },
-  { id: 'risks', label: 'Risks' },
+const REPORT_TABS: Array<{ id: ReportTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
+  { id: 'summary', label: 'Summary', icon: BarChart3 },
+  { id: 'profit', label: 'Profit & Loss', icon: TrendingUp },
+  { id: 'direction', label: 'Long & Short', icon: Activity },
+  { id: 'symbols', label: 'Symbols', icon: Globe },
+  { id: 'risks', label: 'Risks', icon: ShieldCheck },
 ];
 
 const CHART_HEIGHT = 260;
@@ -519,21 +519,27 @@ export function RealTradesCharts({
   return (
     <div className="space-y-6">
       {/* ── Tab switcher ── */}
-      <div className="flex bg-[#0D0D0F] rounded p-0.5 border border-[#2A2B2F] w-fit" role="tablist" aria-label="MT5 report tabs">
-        {REPORT_TABS.map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            className={`px-3 py-1.5 text-[10px] font-bold rounded transition-all ${
-              activeTab === tab.id
-                ? 'bg-[#3B82F6] text-white'
-                : 'text-[#8E9299] hover:text-white'
-            }`}
-            onClick={() => setActiveTab(tab.id)}
-          >
-            {tab.label}
-          </button>
-        ))}
+      <div className="grid grid-cols-5 gap-2 border-b border-border pb-3" role="tablist" aria-label="MT5 report tabs">
+        {REPORT_TABS.map((tab) => {
+          const isActive = activeTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={isActive}
+              className={`flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-[11px] font-semibold tracking-wide transition-all ${
+                isActive
+                  ? 'bg-accent/15 text-accent border border-accent/30 shadow-[0_0_8px_rgba(59,130,246,0.15)]'
+                  : 'bg-surface-alt text-text-muted hover:text-text hover:bg-surface-alt/80 border border-border'
+              }`}
+              onClick={() => setActiveTab(tab.id)}
+            >
+              <tab.icon className={`w-3.5 h-3.5 shrink-0 ${isActive ? 'text-accent' : 'text-text-dim'}`} />
+              {tab.label}
+            </button>
+          );
+        })}
       </div>
 
       {/* ════════════════ SUMMARY ════════════════ */}

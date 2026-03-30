@@ -135,7 +135,7 @@ export function TerminalPage() {
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'hidden') return;
       void loadRuns();
-    }, 5000);
+    }, 3000);
 
     const onVisibilityChange = () => {
       if (document.visibilityState !== 'visible') return;

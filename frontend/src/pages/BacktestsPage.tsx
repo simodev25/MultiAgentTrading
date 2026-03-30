@@ -161,6 +161,12 @@ export function BacktestsPage() {
 
   useEffect(() => {
     void loadBacktests();
+    // Poll every 3s to update status (queued → running → completed)
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'hidden') return;
+      void loadBacktests();
+    }, 3000);
+    return () => window.clearInterval(interval);
   }, [token]);
 
   const onSubmit = async (e: FormEvent) => {
@@ -189,11 +195,21 @@ export function BacktestsPage() {
         agent_config: effectiveAgentConfig,
       })) as BacktestRun;
 
+      // Poll until completed or failed
+      const runId = result.id;
+      let detail: BacktestRun = result;
+      for (let attempt = 0; attempt < 120; attempt++) {
+        await new Promise(r => setTimeout(r, 2000));
+        detail = (await api.getBacktest(token, runId)) as BacktestRun;
+        if (detail.status === 'completed' || detail.status === 'failed') break;
+      }
+
       setProgress(100);
-      // Reload with detail
-      const detail = (await api.getBacktest(token, result.id)) as BacktestRun;
       setSelectedRun(detail);
       await loadBacktests();
+      if (detail.status === 'failed') {
+        setError(detail.error || 'Backtest failed');
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Backtest failed');
     } finally {
@@ -433,6 +449,7 @@ export function BacktestsPage() {
                   <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Asset</th>
                   <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">TF</th>
                   <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Strategy</th>
+                  <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Agents</th>
                   <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Period</th>
                   <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Status</th>
                   <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Return</th>
@@ -449,6 +466,13 @@ export function BacktestsPage() {
                       <td className="px-3 py-2 text-[10px] font-medium text-text">{bt.pair}</td>
                       <td className="px-3 py-2 text-[10px] text-text-dim">{bt.timeframe}</td>
                       <td className="px-3 py-2 text-[10px] text-text-dim">{bt.strategy}</td>
+                      <td className="px-3 py-2">
+                        <span className={`text-[9px] font-bold tracking-wider px-2 py-0.5 rounded ${
+                          m?.llm_enabled ? 'bg-green-500/10 text-green-400' : 'bg-border/30 text-text-dim'
+                        }`}>
+                          {m?.llm_enabled ? 'ON' : 'OFF'}
+                        </span>
+                      </td>
                       <td className="px-3 py-2 text-[10px] text-text-dim">{bt.start_date?.slice(0, 10)} → {bt.end_date?.slice(0, 10)}</td>
                       <td className="px-3 py-2">
                         <span className={`text-[9px] font-bold tracking-wider px-2 py-0.5 rounded ${
