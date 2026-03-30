@@ -9,6 +9,8 @@ class BacktestCreateRequest(BaseModel):
     start_date: date
     end_date: date
     strategy: str = 'ema_rsi'
+    llm_enabled: bool = False
+    agent_config: dict[str, bool] | None = None
 
 
 class BacktestTradeOut(BaseModel):

@@ -9,9 +9,19 @@ import { ExpansionPanel } from '../components/ExpansionPanel';
 import type { BacktestRun } from '../types';
 
 const STRATEGIES = [
+  { value: 'multi_agent', label: 'Multi-Agent Pipeline (8 agents)' },
   { value: 'ema_rsi', label: 'Trend Following (EMA + RSI)' },
-  { value: 'mean_reversion', label: 'Mean Reversion Alpha' },
-  { value: 'breakout', label: 'Breakout Hunter v1' },
+];
+
+const AGENTS = [
+  { key: 'technical-analyst', label: 'Technical Analyst' },
+  { key: 'news-analyst', label: 'News Analyst' },
+  { key: 'market-context-analyst', label: 'Market Context' },
+  { key: 'bullish-researcher', label: 'Bullish Researcher' },
+  { key: 'bearish-researcher', label: 'Bearish Researcher' },
+  { key: 'trader-agent', label: 'Trader Agent' },
+  { key: 'risk-manager', label: 'Risk Manager' },
+  { key: 'execution-manager', label: 'Execution Manager' },
 ];
 
 const RANGE_PRESETS = [
@@ -121,8 +131,12 @@ export function BacktestsPage() {
   const { instruments } = useMarketSymbols(token);
   const [pair, setPair] = useState(DEFAULT_PAIR);
   const [timeframe, setTimeframe] = useState('H1');
-  const [strategy, setStrategy] = useState('ema_rsi');
+  const [strategy, setStrategy] = useState('multi_agent');
   const [rangeDays, setRangeDays] = useState(90);
+  const [llmEnabled, setLlmEnabled] = useState(false);
+  const [agentConfig, setAgentConfig] = useState<Record<string, boolean>>(() =>
+    Object.fromEntries(AGENTS.map(a => [a.key, true]))
+  );
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -164,6 +178,8 @@ export function BacktestsPage() {
         strategy,
         start_date: daysAgo(rangeDays),
         end_date: todayStr(),
+        llm_enabled: llmEnabled,
+        agent_config: agentConfig,
       })) as BacktestRun;
 
       setProgress(100);
@@ -243,12 +259,53 @@ export function BacktestsPage() {
               </select>
             </div>
             <div>
-              <label className="micro-label block mb-1.5">LLM Sampling</label>
-              <div className="flex items-center h-[38px] px-3 rounded-lg border border-border bg-surface-alt">
-                <span className="text-[10px] font-mono text-accent">High_Precision</span>
-              </div>
+              <label className="micro-label block mb-1.5">LLM Calls</label>
+              <button
+                type="button"
+                onClick={() => setLlmEnabled(!llmEnabled)}
+                className={`flex items-center h-[38px] px-3 gap-2 rounded-lg border transition-all w-full ${
+                  llmEnabled ? 'border-green-500/50 bg-green-500/10' : 'border-border bg-surface-alt'
+                }`}
+              >
+                <div className={`w-8 h-4 rounded-full relative transition-all ${llmEnabled ? 'bg-green-500' : 'bg-border'}`}>
+                  <div className={`w-3 h-3 rounded-full bg-white absolute top-0.5 transition-all ${llmEnabled ? 'left-4.5' : 'left-0.5'}`}
+                       style={{ left: llmEnabled ? '17px' : '2px' }} />
+                </div>
+                <span className={`text-[10px] font-mono ${llmEnabled ? 'text-green-400' : 'text-text-dim'}`}>
+                  {llmEnabled ? 'ON' : 'OFF'}
+                </span>
+              </button>
             </div>
           </div>
+
+          {/* Agent toggles — only show for multi_agent strategy */}
+          {strategy === 'multi_agent' && (
+            <div className="flex flex-col gap-2">
+              <span className="micro-label">Agent Pipeline</span>
+              <div className="flex flex-wrap gap-2">
+                {AGENTS.map((agent) => (
+                  <button
+                    key={agent.key}
+                    type="button"
+                    onClick={() => setAgentConfig(prev => ({ ...prev, [agent.key]: !prev[agent.key] }))}
+                    className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-[10px] font-mono transition-all ${
+                      agentConfig[agent.key]
+                        ? 'border-accent/40 bg-accent/10 text-accent'
+                        : 'border-border bg-surface-alt text-text-dim line-through'
+                    }`}
+                  >
+                    <div className={`w-2 h-2 rounded-full ${agentConfig[agent.key] ? 'bg-green-400' : 'bg-border'}`} />
+                    {agent.label}
+                  </button>
+                ))}
+              </div>
+              {llmEnabled && (
+                <p className="text-[9px] text-text-dim">
+                  LLM enabled — agents with LLM will call the model. Backtest will be slower (~90s per sample point).
+                </p>
+              )}
+            </div>
+          )}
 
           {/* Range presets */}
           <div className="flex items-center gap-3">

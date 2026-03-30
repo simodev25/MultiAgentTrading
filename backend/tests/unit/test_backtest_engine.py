@@ -34,6 +34,9 @@ def test_backtest_engine_returns_metrics(monkeypatch) -> None:
     assert len(result.equity_curve) > 0
 
 
-def test_backtest_engine_rejects_removed_agents_strategy() -> None:
-    assert BacktestEngine.normalize_strategy('agents') is None
-    assert BacktestEngine.normalize_strategy('multi-agent') is None
+def test_backtest_engine_supports_multi_agent_strategy() -> None:
+    assert BacktestEngine.normalize_strategy('agents') == 'multi_agent'
+    assert BacktestEngine.normalize_strategy('multi-agent') == 'multi_agent'
+    assert BacktestEngine.normalize_strategy('multi_agent') == 'multi_agent'
+    # Still reject unknown strategies
+    assert BacktestEngine.normalize_strategy('unknown_xyz') is None

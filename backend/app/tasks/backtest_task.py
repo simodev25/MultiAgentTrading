@@ -16,7 +16,7 @@ settings = get_settings()
     soft_time_limit=settings.celery_backtest_soft_time_limit_seconds,
     time_limit=settings.celery_backtest_time_limit_seconds,
 )
-def execute(run_id: int) -> None:
+def execute(run_id: int, llm_enabled: bool = False, agent_config: dict | None = None) -> None:
     db = SessionLocal()
     try:
         run = db.get(BacktestRun, run_id)
@@ -42,6 +42,8 @@ def execute(run_id: int) -> None:
             run.end_date.isoformat(),
             strategy=normalized_strategy,
             db=db,
+            llm_enabled=llm_enabled,
+            agent_config=agent_config,
         )
 
         run.status = 'completed'

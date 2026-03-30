@@ -74,7 +74,12 @@ def create_backtest(
 
     if async_execution:
         try:
-            execute_backtest_task.apply_async(args=[run.id], queue=settings.celery_backtest_queue, ignore_result=True)
+            execute_backtest_task.apply_async(
+                args=[run.id],
+                kwargs={'llm_enabled': payload.llm_enabled, 'agent_config': payload.agent_config},
+                queue=settings.celery_backtest_queue,
+                ignore_result=True,
+            )
             run.status = 'queued'
             db.commit()
             db.refresh(run)
@@ -100,6 +105,8 @@ def create_backtest(
             payload.start_date.isoformat(),
             payload.end_date.isoformat(),
             strategy=normalized_strategy,
+            llm_enabled=payload.llm_enabled,
+            agent_config=payload.agent_config,
             db=db,
         )
         run.status = 'completed'

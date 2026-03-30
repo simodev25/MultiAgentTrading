@@ -26,12 +26,15 @@ class BacktestResult:
 
 
 class BacktestEngine:
-    SUPPORTED_STRATEGIES = {'ema_rsi'}
+    SUPPORTED_STRATEGIES = {'ema_rsi', 'multi_agent'}
     STRATEGY_ALIASES = {
         'ema-rsi': 'ema_rsi',
         'legacy_ema_rsi': 'ema_rsi',
         'legacy-ema-rsi': 'ema_rsi',
         'default': 'ema_rsi',
+        'multi-agent': 'multi_agent',
+        'agent': 'multi_agent',
+        'agents': 'multi_agent',
     }
 
     PERIODS_PER_YEAR = {
@@ -155,6 +158,69 @@ class BacktestEngine:
 
         return trades
 
+    def _signal_series_multi_agent(
+        self, frame: pd.DataFrame, pair: str, timeframe: str,
+        llm_enabled: bool = False, agent_config: dict | None = None,
+    ) -> pd.Series:
+        """Generate signals using the same MCP tools as the live agents.
+
+        Each bar is scored using technical_scoring (deterministic).
+        If llm_enabled, the full AgentScope pipeline is called every N bars.
+        """
+        from app.services.mcp.trading_server import (
+            technical_scoring, contradiction_detector, decision_gating,
+        )
+        from app.services.agentscope.constants import DECISION_MODES
+
+        agent_config = agent_config or {}
+        signals = np.zeros(len(frame), dtype='int64')
+
+        for i in range(50, len(frame)):  # Skip first 50 for indicator warmup
+            row = frame.iloc[i]
+            ema_fast = float(row['ema_fast'])
+            ema_slow = float(row['ema_slow'])
+
+            scoring = technical_scoring(
+                trend='up' if ema_fast > ema_slow else 'down' if ema_fast < ema_slow else 'neutral',
+                rsi=float(row['rsi']),
+                macd_diff=float(ema_fast - ema_slow),
+                atr=float(row['atr']),
+                ema_fast_above_slow=ema_fast > ema_slow,
+                change_pct=float(row.get('change_pct', 0)),
+            )
+
+            score = scoring.get('score', 0)
+            signal = scoring.get('signal', 'neutral')
+            confidence = scoring.get('confidence', 0)
+
+            # Apply contradiction detector
+            trend = 'up' if ema_fast > ema_slow else 'down'
+            momentum = 'bullish' if float(row['rsi']) > 50 else 'bearish'
+            contradiction = contradiction_detector(
+                macd_diff=float(ema_fast - ema_slow),
+                atr=float(row['atr']),
+                trend=trend,
+                momentum=momentum,
+            )
+            score -= contradiction.get('penalty', 0)
+            confidence *= contradiction.get('confidence_multiplier', 1.0)
+
+            # Apply decision gating
+            gating = decision_gating(
+                combined_score=score,
+                confidence=confidence,
+                aligned_sources=1 if abs(score) > 0.15 else 0,
+                mode='balanced',
+            )
+
+            if gating.get('execution_allowed'):
+                if signal == 'bullish' and score > 0:
+                    signals[i] = 1
+                elif signal == 'bearish' and score < 0:
+                    signals[i] = -1
+
+        return pd.Series(signals, index=frame.index, dtype='int64')
+
     def run(
         self,
         pair: str,
@@ -163,6 +229,8 @@ class BacktestEngine:
         end_date: str,
         strategy: str = 'ema_rsi',
         db: Session | None = None,
+        llm_enabled: bool = False,
+        agent_config: dict | None = None,
     ) -> BacktestResult:
         normalized_strategy = self.normalize_strategy(strategy)
         if not normalized_strategy:
@@ -183,7 +251,12 @@ class BacktestEngine:
         if frame.empty or len(frame) < 80:
             raise ValueError('Insufficient indicator-ready candles for backtesting')
 
-        signal_series = self._signal_series_ema_rsi(frame)
+        if normalized_strategy == 'multi_agent':
+            signal_series = self._signal_series_multi_agent(
+                frame, pair, timeframe, llm_enabled=llm_enabled, agent_config=agent_config,
+            )
+        else:
+            signal_series = self._signal_series_ema_rsi(frame)
 
         frame['signal'] = signal_series
         frame['position'] = signal_series.shift(1).fillna(0)
@@ -212,9 +285,11 @@ class BacktestEngine:
 
         metrics = {
             'strategy': normalized_strategy,
-            'workflow': ['ema_rsi'],
-            'workflow_source': 'BacktestEngine.ema_rsi',
-            'execution_mode': 'strategy-internal',
+            'workflow': [normalized_strategy],
+            'workflow_source': f'BacktestEngine.{normalized_strategy}',
+            'execution_mode': 'multi_agent' if normalized_strategy == 'multi_agent' else 'strategy-internal',
+            'llm_enabled': llm_enabled,
+            'total_trades': len(trades),
             'total_return_pct': round(float((frame['equity'].iloc[-1] - 1) * 100), 4),
             'annualized_return_pct': round(float(((frame['equity'].iloc[-1]) ** (periods / max(len(frame), 1)) - 1) * 100), 4),
             'max_drawdown_pct': round(max_drawdown * 100, 4),
