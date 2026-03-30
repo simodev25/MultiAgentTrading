@@ -54,6 +54,7 @@ export function useOpenOrdersMarketChart(
   const [marketLoading, setMarketLoading] = useState(false);
   const [marketRefreshTick, setMarketRefreshTick] = useState(0);
   const [chartClockMs, setChartClockMs] = useState(() => Date.now());
+  const [wsStreamConnected, setWsStreamConnected] = useState(false);
 
   const lastAutoRefreshBoundaryRef = useRef<number | null>(null);
   const lastMarketQueryKeyRef = useRef<string | null>(null);
@@ -140,7 +141,10 @@ export function useOpenOrdersMarketChart(
       }
       if (currentBoundary > lastAutoRefreshBoundaryRef.current) {
         lastAutoRefreshBoundaryRef.current = currentBoundary;
-        setMarketRefreshTick((prev) => prev + 1);
+        // Skip polling refresh when WebSocket streaming is active
+        if (!wsStreamConnected) {
+          setMarketRefreshTick((prev) => prev + 1);
+        }
       }
     }, 1000);
 
@@ -238,6 +242,10 @@ export function useOpenOrdersMarketChart(
       if (cancelled) return;
       ws = new WebSocket(wsMarketPricesUrl(symbol, token));
 
+      ws.onopen = () => {
+        if (!cancelled) setWsStreamConnected(true);
+      };
+
       ws.onmessage = (event: MessageEvent<string>) => {
         let msg: Record<string, unknown>;
         try {
@@ -283,6 +291,7 @@ export function useOpenOrdersMarketChart(
       };
 
       ws.onclose = () => {
+        setWsStreamConnected(false);
         if (!cancelled) scheduleReconnect();
       };
     };
@@ -291,6 +300,7 @@ export function useOpenOrdersMarketChart(
 
     return () => {
       cancelled = true;
+      setWsStreamConnected(false);
       if (reconnectTimer != null) window.clearTimeout(reconnectTimer);
       if (ws && ws.readyState < WebSocket.CLOSING) ws.close();
     };
