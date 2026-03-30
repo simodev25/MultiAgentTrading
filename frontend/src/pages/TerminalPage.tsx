@@ -14,6 +14,7 @@ import {
   BarChart3,
 } from 'lucide-react';
 import { ExpansionPanel } from '../components/ExpansionPanel';
+import { TradingViewChart } from '../components/TradingViewChart';
 import type { ExecutionMode, MetaApiAccount, Run } from '../types';
 
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'pending']);
@@ -272,6 +273,9 @@ export function TerminalPage() {
         </form>
         {error && <p className="alert mt-3">{error}</p>}
       </ExpansionPanel>
+
+      {/* ── TradingView Chart ────────────────────────────── */}
+      <TradingViewChart symbol={pair} timeframe={timeframe} />
 
       {/* ── Runs history ─────────────────────────────────── */}
       <ExpansionPanel title="EXECUTION_HISTORY" icon={BarChart3}>
