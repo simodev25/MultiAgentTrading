@@ -52,10 +52,11 @@ function formatDuration(ms: number): string {
 }
 
 function runElapsed(run: Run, nowMs: number): string {
-  const started = parseApiDateMs(run.created_at);
+  const started = parseApiDateMs(run.started_at ?? '');
+  if (!Number.isFinite(started)) return '-';
   const finished = parseApiDateMs(run.updated_at);
   const end = ACTIVE_STATUSES.has(run.status) ? nowMs : finished;
-  if (!Number.isFinite(started) || !Number.isFinite(end) || end < started) return '-';
+  if (!Number.isFinite(end) || end < started) return '-';
   return formatDuration(end - started);
 }
 
@@ -135,7 +136,7 @@ export function TerminalPage() {
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'hidden') return;
       void loadRuns();
-    }, 5000);
+    }, 3000);
 
     const onVisibilityChange = () => {
       if (document.visibilityState !== 'visible') return;
@@ -305,7 +306,16 @@ export function TerminalPage() {
                   <td>{run.timeframe}</td>
                   <td>{run.mode}</td>
                   <td>
-                    <span className={`badge ${run.status}`}>{run.status}</span>
+                    {(run.status === 'running' || run.status === 'queued' || run.status === 'pending') && (run.progress ?? 0) > 0 ? (
+                      <div className="flex items-center gap-2">
+                        <div className="w-16 h-1.5 rounded-full bg-surface-alt overflow-hidden">
+                          <div className="h-full bg-accent rounded-full transition-all duration-500" style={{ width: `${run.progress ?? 0}%` }} />
+                        </div>
+                        <span className="text-[9px] font-mono text-accent">{run.progress}%</span>
+                      </div>
+                    ) : (
+                      <span className={`badge ${run.status}`}>{run.status}</span>
+                    )}
                   </td>
                   <td className="text-text-muted">{formatExecutionDate(run.created_at)}</td>
                   <td className="font-mono">{runElapsed(run, nowMs)}</td>

@@ -28,7 +28,7 @@ class Settings(BaseSettings):
         alias='CORS_ORIGINS',
     )
 
-    database_url: str = Field(default='sqlite:///./forex.db', alias='DATABASE_URL')
+    database_url: str = Field(default='sqlite:///./trading.db', alias='DATABASE_URL')
     db_pool_size: int = Field(default=12, alias='DB_POOL_SIZE')
     db_max_overflow: int = Field(default=24, alias='DB_MAX_OVERFLOW')
     db_pool_timeout_seconds: int = Field(default=30, alias='DB_POOL_TIMEOUT_SECONDS')
@@ -87,9 +87,9 @@ class Settings(BaseSettings):
     metaapi_use_sdk_for_market_data: bool = Field(default=False, alias='METAAPI_USE_SDK_FOR_MARKET_DATA')
     metaapi_cache_enabled: bool = Field(default=True, alias='METAAPI_CACHE_ENABLED')
     metaapi_cache_connect_timeout_seconds: float = Field(default=0.25, alias='METAAPI_CACHE_CONNECT_TIMEOUT_SECONDS')
-    metaapi_sdk_connect_timeout_seconds: float = Field(default=6.0, alias='METAAPI_SDK_CONNECT_TIMEOUT_SECONDS')
-    metaapi_sdk_sync_timeout_seconds: float = Field(default=6.0, alias='METAAPI_SDK_SYNC_TIMEOUT_SECONDS')
-    metaapi_sdk_request_timeout_seconds: float = Field(default=8.0, alias='METAAPI_SDK_REQUEST_TIMEOUT_SECONDS')
+    metaapi_sdk_connect_timeout_seconds: float = Field(default=30.0, alias='METAAPI_SDK_CONNECT_TIMEOUT_SECONDS')
+    metaapi_sdk_sync_timeout_seconds: float = Field(default=30.0, alias='METAAPI_SDK_SYNC_TIMEOUT_SECONDS')
+    metaapi_sdk_request_timeout_seconds: float = Field(default=30.0, alias='METAAPI_SDK_REQUEST_TIMEOUT_SECONDS')
     metaapi_rest_timeout_seconds: float = Field(default=30.0, alias='METAAPI_REST_TIMEOUT_SECONDS')
     metaapi_sdk_circuit_breaker_seconds: float = Field(default=20.0, alias='METAAPI_SDK_CIRCUIT_BREAKER_SECONDS')
     metaapi_account_info_cache_ttl_seconds: int = Field(default=5, alias='METAAPI_ACCOUNT_INFO_CACHE_TTL_SECONDS')

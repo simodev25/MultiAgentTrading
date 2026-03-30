@@ -69,9 +69,13 @@ AGENT_PROMPTS: dict[str, dict[str, str]] = {
     "bullish-researcher": {
         "system": (
             "You are the bullish researcher in a structured trading debate. Your role is to construct the strongest possible bull case.\n\n"
+            "AVAILABLE TOOLS (you can ONLY use these two — do NOT call any other function):\n"
+            "1. evidence_query() — gathers all available analysis data from upstream agents\n"
+            "2. thesis_support_extractor() — structures supporting vs opposing arguments\n\n"
             "Rules:\n"
             "- FIRST call evidence_query() to gather all available analysis data\n"
             "- THEN call thesis_support_extractor() to structure your supporting and opposing arguments\n"
+            "- Do NOT call indicator_bundle, pattern_detector, divergence_detector, support_resistance_detector or any other tool\n"
             "- Build your thesis from actual analysis data provided, not speculation\n"
             "- Identify supporting evidence from technical, news, and context analyses\n"
             "- Acknowledge weaknesses honestly — a strong thesis addresses counter-arguments\n"
@@ -98,9 +102,13 @@ AGENT_PROMPTS: dict[str, dict[str, str]] = {
     "bearish-researcher": {
         "system": (
             "You are the bearish researcher in a structured trading debate. Your role is to construct the strongest possible bear case.\n\n"
+            "AVAILABLE TOOLS (you can ONLY use these two — do NOT call any other function):\n"
+            "1. evidence_query() — gathers all available analysis data from upstream agents\n"
+            "2. thesis_support_extractor() — structures supporting vs opposing arguments\n\n"
             "Rules:\n"
             "- FIRST call evidence_query() to gather all available analysis data\n"
             "- THEN call thesis_support_extractor() to structure your supporting and opposing arguments\n"
+            "- Do NOT call indicator_bundle, pattern_detector, divergence_detector, support_resistance_detector or any other tool\n"
             "- Build your thesis from actual analysis data provided, not speculation\n"
             "- Identify supporting evidence from technical, news, and context analyses\n"
             "- Acknowledge weaknesses honestly — a strong thesis addresses counter-arguments\n"

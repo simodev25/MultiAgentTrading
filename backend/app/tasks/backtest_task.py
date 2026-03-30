@@ -16,7 +16,7 @@ settings = get_settings()
     soft_time_limit=settings.celery_backtest_soft_time_limit_seconds,
     time_limit=settings.celery_backtest_time_limit_seconds,
 )
-def execute(run_id: int) -> None:
+def execute(run_id: int, llm_enabled: bool = False, agent_config: dict | None = None) -> None:
     db = SessionLocal()
     try:
         run = db.get(BacktestRun, run_id)
@@ -25,7 +25,9 @@ def execute(run_id: int) -> None:
         if run.status in {'completed', 'failed'}:
             return
 
+        from datetime import datetime, timezone
         run.status = 'running'
+        run.started_at = datetime.now(timezone.utc)
         run.error = None
         db.commit()
         db.refresh(run)
@@ -42,11 +44,17 @@ def execute(run_id: int) -> None:
             run.end_date.isoformat(),
             strategy=normalized_strategy,
             db=db,
+            llm_enabled=llm_enabled,
+            agent_config=agent_config,
+            run_id=run.id,
         )
 
+        from datetime import datetime, timezone as tz
         run.status = 'completed'
+        run.updated_at = datetime.now(tz.utc)
         run.metrics = result.metrics
         run.equity_curve = result.equity_curve
+        run.agent_validations = result.agent_validations or []
         db.query(BacktestTrade).filter(BacktestTrade.run_id == run.id).delete()
         for trade in result.trades:
             db.add(
@@ -67,8 +75,10 @@ def execute(run_id: int) -> None:
         db.rollback()
         run = db.get(BacktestRun, run_id)
         if run is not None:
+            from datetime import datetime, timezone as tz
             run.status = 'failed'
             run.error = str(exc)
+            run.updated_at = datetime.now(tz.utc)
             db.commit()
     finally:
         db.close()

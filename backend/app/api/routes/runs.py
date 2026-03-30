@@ -32,11 +32,13 @@ def _serialize_run(
         'timeframe': run.timeframe,
         'mode': run.mode,
         'status': run.status,
+        'progress': run.progress,
         'decision': run.decision if isinstance(run.decision, dict) else {},
         'trace': trace,
         'error': run.error,
         'created_by_id': run.created_by_id,
         'created_at': run.created_at,
+        'started_at': run.started_at,
         'updated_at': run.updated_at,
     }
     if include_steps:

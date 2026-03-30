@@ -2,15 +2,15 @@ services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_USER: forex
-      POSTGRES_PASSWORD: forex
-      POSTGRES_DB: forex_platform
+      POSTGRES_USER: trading
+      POSTGRES_PASSWORD: trading
+      POSTGRES_DB: trading_platform
     ports:
       - '5432:5432'
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U forex -d forex_platform']
+      test: ['CMD-SHELL', 'pg_isready -U trading -d trading_platform']
       interval: 10s
       timeout: 5s
       retries: 5
@@ -37,7 +37,7 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      DATABASE_URL: postgresql+psycopg2://forex:forex@postgres:5432/forex_platform
+      DATABASE_URL: postgresql+psycopg2://trading:trading@postgres:5432/trading_platform
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
       CELERY_IGNORE_RESULT: 'true'
@@ -67,7 +67,7 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      DATABASE_URL: postgresql+psycopg2://forex:forex@postgres:5432/forex_platform
+      DATABASE_URL: postgresql+psycopg2://trading:trading@postgres:5432/trading_platform
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
       CELERY_IGNORE_RESULT: 'true'

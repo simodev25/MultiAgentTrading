@@ -1,4 +1,5 @@
 import asyncio
+import json as _json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -30,7 +31,7 @@ def list_backtests(
 
 
 @router.post('', response_model=BacktestRunOut)
-def create_backtest(
+async def create_backtest(
     payload: BacktestCreateRequest,
     async_execution: bool = Query(default=True),
     db: Session = Depends(get_db),
@@ -63,6 +64,7 @@ def create_backtest(
         start_date=payload.start_date,
         end_date=payload.end_date,
         strategy=normalized_strategy,
+        llm_enabled=payload.llm_enabled,
         status='pending',
         metrics={},
         equity_curve=[],
@@ -74,7 +76,30 @@ def create_backtest(
 
     if async_execution:
         try:
-            execute_backtest_task.apply_async(args=[run.id], queue=settings.celery_backtest_queue, ignore_result=True)
+            # Pre-fetch candles in background (non-blocking) and cache in Redis
+            async def _prefetch_candles(run_id: int) -> None:
+                try:
+                    from app.services.trading.metaapi_client import MetaApiClient
+                    import json as _json, redis as _redis
+                    metaapi = MetaApiClient()
+                    result = await metaapi.get_market_candles(pair=pair, timeframe=timeframe, limit=300)
+                    candles = result.get('candles', []) if isinstance(result, dict) else []
+                    if candles:
+                        r = _redis.Redis.from_url(settings.redis_url, decode_responses=True)
+                        r.setex(f'backtest:candles:{run_id}', 600, _json.dumps(candles))
+                        logger.info('backtest_prefetch_cached run_id=%s candles=%d', run_id, len(candles))
+                except Exception:
+                    logger.warning('backtest_prefetch_failed run_id=%s', run_id, exc_info=True)
+
+            # Fire and forget — don't block the POST response
+            asyncio.ensure_future(_prefetch_candles(run.id))
+
+            execute_backtest_task.apply_async(
+                args=[run.id],
+                kwargs={'llm_enabled': payload.llm_enabled, 'agent_config': payload.agent_config},
+                queue=settings.celery_backtest_queue,
+                ignore_result=True,
+            )
             run.status = 'queued'
             db.commit()
             db.refresh(run)
@@ -100,11 +125,15 @@ def create_backtest(
             payload.start_date.isoformat(),
             payload.end_date.isoformat(),
             strategy=normalized_strategy,
+            llm_enabled=payload.llm_enabled,
+            agent_config=payload.agent_config,
             db=db,
+            run_id=run.id,
         )
         run.status = 'completed'
         run.metrics = result.metrics
         run.equity_curve = result.equity_curve
+        run.agent_validations = result.agent_validations or []
         db.query(BacktestTrade).filter(BacktestTrade.run_id == run.id).delete()
         for trade in result.trades:
             db.add(

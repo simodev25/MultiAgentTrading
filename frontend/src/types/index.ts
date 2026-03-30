@@ -14,11 +14,13 @@ export interface Run {
   timeframe: string;
   mode: ExecutionMode;
   status: string;
+  progress?: number;
   decision: Record<string, unknown>;
   trace: Record<string, unknown>;
   error?: string | null;
   created_by_id: number;
   created_at: string;
+  started_at: string | null;
   updated_at: string;
 }
 
@@ -272,6 +274,25 @@ export interface PromptTemplate {
   updated_at: string;
 }
 
+export interface AgentValidationDetail {
+  bar: number;
+  time: string;
+  price: number;
+  strategy_signal: string;
+  agent_decision: string;
+  status: 'confirmed' | 'rejected' | 'error_fallback';
+  confidence: number;
+  agents_used: string[];
+  agent_details: Record<string, {
+    summary?: string;
+    signal?: string;
+    score?: number | null;
+    confidence?: number | null;
+    winning_side?: string;
+    reason?: string;
+  }>;
+}
+
 export interface BacktestRun {
   id: number;
   pair: string;
@@ -279,12 +300,18 @@ export interface BacktestRun {
   start_date: string;
   end_date: string;
   strategy: string;
+  llm_enabled?: boolean;
+  progress?: number;
   status: string;
   metrics: Record<string, unknown>;
   equity_curve: Array<{ ts: string; equity: number }>;
+  agent_validations?: AgentValidationDetail[];
   error?: string | null;
   created_by_id: number;
   created_at: string;
+  started_at?: string | null;
+  updated_at?: string | null;
+  trades?: Array<{ side: string; entry_price: number; exit_price: number; pnl_pct: number; entry_time: string; exit_time: string; outcome: string }>;
 }
 
 export interface LlmSummary {

@@ -20,7 +20,7 @@ import type {
 
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed']);
 const WS_RECONNECT_DELAY_MS = 3000;
-const FALLBACK_POLL_MS = 15000;
+const FALLBACK_POLL_MS = 3000;
 
 function asPrettyJson(value: unknown): string {
   try {
@@ -388,6 +388,72 @@ const AGENT_ICON_MAP: Record<string, { icon: LucideIcon; color: string }> = {
 };
 const DEFAULT_AGENT_ICON = { icon: Bot, color: '#5A5E6E' };
 
+const PIPELINE_AGENTS = [
+  'technical-analyst', 'news-analyst', 'market-context-analyst',
+  'bullish-researcher', 'bearish-researcher',
+  'trader-agent', 'risk-manager', 'execution-manager',
+];
+
+function PipelineProgress({ steps, status, progress }: { steps: AgentStep[]; status: string; progress?: number }) {
+  const completedAgents = new Set(steps.map(s => s.agent_name));
+  const isActive = !TERMINAL_RUN_STATUSES.has(status);
+
+  // Determine which agent is currently running (first non-completed in pipeline order)
+  const currentAgent = isActive ? PIPELINE_AGENTS.find(name => !completedAgents.has(name)) ?? null : null;
+
+  return (
+    <div className="mb-4">
+      {/* Progress bar */}
+      {isActive && (
+        <div className="flex items-center gap-3 mb-3">
+          <div className="flex-1 h-1.5 rounded-full bg-surface-alt overflow-hidden">
+            <div
+              className="h-full bg-accent rounded-full transition-all duration-700"
+              style={{ width: `${progress ?? Math.round((completedAgents.size / PIPELINE_AGENTS.length) * 100)}%` }}
+            />
+          </div>
+          <span className="text-[9px] font-mono text-accent shrink-0">
+            {progress ?? Math.round((completedAgents.size / PIPELINE_AGENTS.length) * 100)}%
+          </span>
+        </div>
+      )}
+
+      {/* Agent pipeline steps */}
+      <div className="flex items-center gap-1.5 flex-wrap">
+        {PIPELINE_AGENTS.map((name) => {
+          const { icon: Icon, color } = AGENT_ICON_MAP[name] ?? DEFAULT_AGENT_ICON;
+          const isDone = completedAgents.has(name);
+          const isRunning = name === currentAgent;
+          const step = steps.find(s => s.agent_name === name);
+          const isFailed = step?.status === 'error';
+
+          return (
+            <div
+              key={name}
+              className={`flex items-center gap-1.5 px-2 py-1 rounded-md border text-[9px] font-mono transition-all ${
+                isDone
+                  ? isFailed
+                    ? 'border-red-500/40 bg-red-500/10 text-red-400'
+                    : 'border-green-500/30 bg-green-500/5 text-green-400'
+                  : isRunning
+                    ? 'border-accent/50 bg-accent/10 text-accent animate-pulse'
+                    : 'border-border/30 bg-surface-alt/30 text-text-dim'
+              }`}
+              title={name}
+            >
+              <Icon className="w-3 h-3" style={{ color: isDone || isRunning ? color : undefined }} />
+              <span className="hidden md:inline">{name.split('-')[0]}</span>
+              {isDone && !isFailed && <Check className="w-2.5 h-2.5 text-green-400" />}
+              {isFailed && <span className="text-red-400">!</span>}
+              {isRunning && <Radio className="w-2.5 h-2.5 text-accent" />}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function AgentStepPanel({ step, jsonText }: { step: AgentStep; jsonText: string }) {
   const [open, setOpen] = useState(false);
   const { icon: Icon, color } = AGENT_ICON_MAP[step.agent_name] ?? DEFAULT_AGENT_ICON;
@@ -663,7 +729,7 @@ export function RunDetailPage() {
     connect();
 
     const interval = window.setInterval(() => {
-      if (socketConnected) return;
+      if (document.visibilityState === 'hidden') return;
       if (runStatusRef.current && TERMINAL_RUN_STATUSES.has(runStatusRef.current)) return;
       void load();
     }, FALLBACK_POLL_MS);
@@ -777,7 +843,14 @@ export function RunDetailPage() {
         <div className="flex items-center gap-2 mb-3">
           <span className="micro-label">Status:</span>
           <span className={`badge ${run.status}`}>{run.status}</span>
+          {run.progress != null && run.progress > 0 && run.progress < 100 && !TERMINAL_RUN_STATUSES.has(run.status) && (
+            <span className="text-[9px] font-mono text-accent">{run.progress}%</span>
+          )}
         </div>
+
+        {/* Pipeline progress — shows agent-by-agent status */}
+        <PipelineProgress steps={run.steps} status={run.status} progress={run.progress} />
+
         <div className="flex items-center justify-between mb-2">
           <span className="text-[10px] font-semibold tracking-[0.12em] text-text-muted uppercase">FINAL_DECISION</span>
           <CopyButton text={asPrettyJson(run.decision)} />

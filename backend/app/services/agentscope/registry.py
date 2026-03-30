@@ -405,9 +405,9 @@ class AgentScopeRegistry:
         from app.services.market.instrument import normalize_instrument
         try:
             instr = normalize_instrument(pair)
-            asset_class = instr.asset_class.value if instr else "forex"
+            asset_class = instr.asset_class.value if instr else "unknown"
         except Exception:
-            asset_class = "forex"
+            asset_class = "unknown"
 
         # Snapshot block
         snapshot_lines = [f"- {k}: {v}" for k, v in snapshot.items()
@@ -538,7 +538,7 @@ class AgentScopeRegistry:
                 error=error,
             )
             db.add(step)
-            db.flush()
+            db.commit()
         except Exception as exc:
             logger.warning("Failed to record step for %s: %s", agent_name, exc)
 
@@ -982,7 +982,7 @@ class AgentScopeRegistry:
         if tool_id == "position_size_calculator":
             td = (trader_out or {}).get("metadata", {})
             return {
-                "asset_class": "forex",
+                "asset_class": "unknown",
                 "entry_price": td.get("entry", snapshot.get("last_price", 0)),
                 "stop_loss": td.get("stop_loss", 0),
                 "risk_percent": risk_percent,
@@ -994,14 +994,14 @@ class AgentScopeRegistry:
             }
         if tool_id == "news_search":
             news = news or {}
-            return {"items": news.get("news", []), "symbol": pair, "asset_class": "forex"}
+            return {"items": news.get("news", []), "symbol": pair, "asset_class": "unknown"}
         if tool_id == "macro_event_feed":
             news = news or {}
             return {"items": news.get("macro_events", []), "currency_filter": pair[:3] if pair else ""}
         if tool_id == "sentiment_parser":
             news = news or {}
             headlines = [n.get("title", "") for n in news.get("news", []) if n.get("title")]
-            return {"headlines": headlines, "asset_class": "forex"}
+            return {"headlines": headlines, "asset_class": "unknown"}
         if tool_id == "symbol_relevance_filter":
             news = news or {}
             return {"news_items": news.get("news", []), "macro_items": news.get("macro_events", []), "symbol": pair}
@@ -1013,7 +1013,20 @@ class AgentScopeRegistry:
                       metaapi_account_ref: str | None = None):
         start_time = time.time()
 
+        def _set_progress(pct: int) -> None:
+            try:
+                run.progress = pct
+                db.commit()
+            except Exception:
+                pass
+
         try:
+            run.status = "running"
+            run.started_at = datetime.now(timezone.utc)
+            run.progress = 0
+            db.commit()
+            db.refresh(run)
+
             from app.services.llm.model_selector import AgentModelSelector
             model_selector = AgentModelSelector()
 
@@ -1078,15 +1091,30 @@ class AgentScopeRegistry:
                 name: str, msg: Msg,
                 trader_out: dict | None = None, risk_out: dict | None = None,
             ) -> Msg:
-                """Call agent via LLM (with structured output) or deterministic."""
+                """Call agent via LLM (with retry on 5xx) or deterministic."""
                 if name in agents:
                     schema = AGENT_STRUCTURED_MODELS.get(name)
-                    if schema:
-                        result = await agents[name](msg, structured_model=schema)
-                    else:
-                        result = await agents[name](msg)
-                    agent_tool_invocations[name] = await _extract_tool_invocations(agents[name])
-                    return result
+                    last_err: Exception | None = None
+                    for attempt in range(3):
+                        try:
+                            if schema:
+                                result = await agents[name](msg, structured_model=schema)
+                            else:
+                                result = await agents[name](msg)
+                            agent_tool_invocations[name] = await _extract_tool_invocations(agents[name])
+                            return result
+                        except Exception as exc:
+                            last_err = exc
+                            err_str = str(exc)
+                            if any(code in err_str for code in ("500", "502", "503", "Internal Server Error")):
+                                wait = (attempt + 1) * 3
+                                logger.warning("Agent %s got 5xx, retry in %ds (%d/3): %s", name, wait, attempt + 1, err_str[:100])
+                                await asyncio.sleep(wait)
+                                continue
+                            raise
+                    # All retries exhausted — propagate the error
+                    logger.error("Agent %s failed after 3 retries: %s", name, str(last_err)[:200])
+                    raise last_err  # type: ignore[misc]
                 return await self._run_deterministic(
                     name, toolkits.get(name), msg,
                     ohlc=ohlc, snapshot=snapshot, pair=pair, timeframe=timeframe,
@@ -1096,6 +1124,7 @@ class AgentScopeRegistry:
                 )
 
             # ── Phase 1: Parallel analysts ──
+            _set_progress(10)
             logger.info("Phase 1: Running 3 analysts in parallel for %s/%s", pair, timeframe)
             t0 = time.time()
             analyst_names = ["technical-analyst", "news-analyst", "market-context-analyst"]
@@ -1165,6 +1194,7 @@ class AgentScopeRegistry:
                     )
 
             # ── Phase 2+3: Researchers + Debate ──
+            _set_progress(35)
             logger.info("Phase 2+3: Running debate for %s/%s", pair, timeframe)
             t0 = time.time()
 
@@ -1228,6 +1258,7 @@ class AgentScopeRegistry:
                     d, elapsed_ms=debate_ms / 2)
 
             # ── Phase 4: Sequential decision ──
+            _set_progress(65)
             logger.info("Phase 4: Trader -> Risk -> Execution for %s/%s", pair, timeframe)
 
             # Update vars for Phase 4 agents
@@ -1248,7 +1279,9 @@ class AgentScopeRegistry:
             _trader_out: dict | None = None
             _risk_out: dict | None = None
             _trader_decision_is_hold = False
+            _phase4_progress = {"trader-agent": 70, "risk-manager": 80, "execution-manager": 90}
             for name in ["trader-agent", "risk-manager", "execution-manager"]:
+                _set_progress(_phase4_progress.get(name, 65))
                 t0 = time.time()
 
                 # Skip LLM for risk-manager and execution-manager when trader decided HOLD
@@ -1307,6 +1340,7 @@ class AgentScopeRegistry:
 
             # ── Build decision in frontend-compatible format ──
             elapsed = time.time() - start_time
+            _set_progress(100)
             logger.info("Pipeline completed for %s/%s in %.1fs", pair, timeframe, elapsed)
 
             trader_out = analysis_outputs.get("trader-agent", {})
@@ -1396,3 +1430,169 @@ class AgentScopeRegistry:
             raise
 
         return run
+
+    async def validate_entry(
+        self,
+        db,
+        pair: str,
+        timeframe: str,
+        market_data: dict,
+        agent_config: dict | None = None,
+    ) -> dict:
+        """Run the full agent pipeline on market data and return the decision.
+
+        This is a lightweight version of execute() for backtest validation.
+        No run/step records are created. Returns {"decision": "BUY"|"SELL"|"HOLD", ...}.
+        """
+        agent_config = agent_config or {}
+
+        try:
+            from app.services.llm.model_selector import AgentModelSelector
+            model_selector = AgentModelSelector()
+
+            provider, model_name, base_url, api_key = self._resolve_provider_config(db)
+            model = build_model(provider, model_name, base_url, api_key)
+            chat_fmt = build_formatter(provider, multi_agent=False, base_url=base_url)
+            debate_fmt = build_formatter(provider, multi_agent=True, base_url=base_url)
+
+            context_msg = self._build_context_msg(pair, timeframe, market_data)
+            ohlc = market_data.get("ohlc", {})
+            snapshot = market_data.get("snapshot", {})
+
+            # Determine which agents are enabled
+            llm_enabled: dict[str, bool] = {}
+            for name in ALL_AGENT_FACTORIES:
+                # Agent config from UI takes precedence, otherwise check DB
+                if name in agent_config:
+                    llm_enabled[name] = bool(agent_config[name])
+                else:
+                    llm_enabled[name] = model_selector.is_enabled(db, name)
+
+            base_vars = self._build_prompt_variables(pair, timeframe, snapshot, market_data.get("news", {}))
+
+            # Build toolkits and agents for enabled agents only
+            toolkits = {}
+            agents: dict[str, Any] = {}
+            for name, factory in ALL_AGENT_FACTORIES.items():
+                if not llm_enabled.get(name, False):
+                    continue
+                agent_skills = model_selector.resolve_skills(db, name)
+                toolkits[name] = await build_toolkit(
+                    name, ohlc=ohlc, news=market_data.get("news", {}),
+                    skills=agent_skills,
+                )
+                is_debate = name in ("bullish-researcher", "bearish-researcher", "trader-agent")
+                agents[name] = factory(
+                    model=model,
+                    formatter=debate_fmt if is_debate else chat_fmt,
+                    toolkit=toolkits[name],
+                    sys_prompt=self._get_sys_prompt(name, db, base_vars),
+                )
+
+            analysis_outputs: dict[str, dict] = {}
+
+            async def _call(name: str, msg: Msg, **kwargs) -> Msg:
+                if name in agents:
+                    schema = AGENT_STRUCTURED_MODELS.get(name)
+                    try:
+                        if schema:
+                            return await agents[name](msg, structured_model=schema)
+                        return await agents[name](msg)
+                    except Exception as exc:
+                        logger.warning("validate_entry agent %s failed: %s", name, str(exc)[:100])
+                        raise
+                # Not enabled → deterministic
+                return await self._run_deterministic(
+                    name, toolkits.get(name), msg,
+                    ohlc=ohlc, snapshot=snapshot, pair=pair, timeframe=timeframe,
+                    risk_percent=1.0, analysis_outputs=analysis_outputs,
+                    news=market_data.get("news", {}),
+                )
+
+            # ── Phase 1: Parallel analysts ──
+            active_analysts = [n for n in ["technical-analyst", "news-analyst", "market-context-analyst"]
+                               if llm_enabled.get(n, False)]
+            if active_analysts:
+                results = await asyncio.gather(*[_call(n, context_msg) for n in active_analysts])
+                for n, r in zip(active_analysts, results):
+                    analysis_outputs[n] = _msg_to_dict(r)
+
+            # ── Phase 2-3: Debate (if researchers enabled) ──
+            debate_result = None
+            bullish_on = llm_enabled.get("bullish-researcher", False)
+            bearish_on = llm_enabled.get("bearish-researcher", False)
+            trader_on = llm_enabled.get("trader-agent", False)
+            if bullish_on and bearish_on and trader_on:
+                try:
+                    _, _, debate_result = await run_debate(
+                        bullish=agents["bullish-researcher"],
+                        bearish=agents["bearish-researcher"],
+                        moderator=agents["trader-agent"],
+                        context_msg=context_msg,
+                        config=DebateConfig(max_rounds=2),
+                    )
+                except Exception as exc:
+                    logger.warning("validate_entry debate failed: %s", str(exc)[:100])
+                    debate_result = DebateResult(
+                        finished=False, winning_side="neutral",
+                        confidence=0.0, reason="debate failed",
+                    )
+            else:
+                debate_result = DebateResult(
+                    finished=False, winning_side="neutral",
+                    confidence=0.0, reason="debate skipped (not all agents enabled)",
+                )
+
+            # ── Phase 4: Trader decision ──
+            trader_decision = "HOLD"
+            if llm_enabled.get("trader-agent", False):
+                try:
+                    trader_msg = await _call("trader-agent", context_msg)
+                    trader_data = _msg_to_dict(trader_msg)
+                    meta = trader_data.get("metadata", {})
+                    trader_decision = meta.get("decision", "HOLD")
+                    analysis_outputs["trader-agent"] = trader_data
+                except Exception:
+                    trader_decision = "HOLD"
+
+            # Combine debate + trader for final decision
+            signal = "neutral"
+            if debate_result:
+                signal = debate_result.winning_side or "neutral"
+
+            final_decision = trader_decision
+            if final_decision == "HOLD" and signal == "bullish":
+                final_decision = "BUY"
+            elif final_decision == "HOLD" and signal == "bearish":
+                final_decision = "SELL"
+
+            # Build per-agent detail summaries
+            agent_details: dict[str, dict] = {}
+            for name, output in analysis_outputs.items():
+                meta = output.get("metadata", {})
+                agent_details[name] = {
+                    "summary": meta.get("summary", output.get("text", "")[:300]),
+                    "signal": meta.get("signal", meta.get("decision", "")),
+                    "score": meta.get("score", meta.get("combined_score", None)),
+                    "confidence": meta.get("confidence", None),
+                }
+
+            if debate_result:
+                agent_details["debate"] = {
+                    "winning_side": debate_result.winning_side,
+                    "confidence": debate_result.confidence,
+                    "reason": debate_result.reason,
+                    "finished": debate_result.finished,
+                }
+
+            return {
+                "decision": final_decision,
+                "signal": signal,
+                "confidence": debate_result.confidence if debate_result else 0.0,
+                "agents_used": [n for n, v in llm_enabled.items() if v],
+                "agent_details": agent_details,
+            }
+
+        except Exception as exc:
+            logger.exception("validate_entry failed pair=%s: %s", pair, exc)
+            return {"decision": "HOLD", "signal": "neutral", "confidence": 0.0, "error": str(exc)}

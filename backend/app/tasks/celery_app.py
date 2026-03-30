@@ -13,7 +13,7 @@ if settings.celery_ignore_result:
     os.environ.pop('CELERY_RESULT_BACKEND', None)
 
 celery_app = Celery(
-    'forex_platform',
+    'trading_platform',
     broker=settings.celery_broker_url,
     backend=backend_url,
     include=['app.tasks.run_analysis_task', 'app.tasks.backtest_task'],

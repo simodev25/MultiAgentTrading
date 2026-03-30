@@ -66,7 +66,7 @@ def test_prompt_registry_render_appends_agent_skills() -> None:
         rendered = service.render(
             db=db,
             agent_name='news-analyst',
-            fallback_system='You are a forex news analyst.',
+            fallback_system='You are a news analyst.',
             fallback_user='Pair: {pair}',
             variables={'pair': 'EURUSD'},
         )
@@ -89,7 +89,7 @@ def test_prompt_registry_render_marks_missing_variables() -> None:
         rendered = service.render(
             db=db,
             agent_name='technical-analyst',
-            fallback_system='You are a forex technical analyst.',
+            fallback_system='You are a technical analyst.',
             fallback_user='Pair: {pair}\nTrend: {trend}',
             variables={'pair': 'EURUSD'},
         )

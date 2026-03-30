@@ -40,8 +40,8 @@ def _acquire_startup_lock() -> tuple[int, bool]:
     Returns (fd, already_initialized) where already_initialized means another
     worker has already finished bootstrap in this container lifecycle.
     """
-    lock_path = '/tmp/forex_startup.lock'
-    done_path = '/tmp/forex_startup.done'
+    lock_path = '/tmp/trading_startup.lock'
+    done_path = '/tmp/trading_startup.done'
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
     fcntl.flock(fd, fcntl.LOCK_EX)
     return fd, os.path.exists(done_path)
@@ -49,7 +49,7 @@ def _acquire_startup_lock() -> tuple[int, bool]:
 
 def _release_startup_lock(fd: int, mark_done: bool) -> None:
     if mark_done:
-        done_path = '/tmp/forex_startup.done'
+        done_path = '/tmp/trading_startup.done'
         with open(done_path, 'w', encoding='utf-8') as marker:
             marker.write('ok\n')
     fcntl.flock(fd, fcntl.LOCK_UN)

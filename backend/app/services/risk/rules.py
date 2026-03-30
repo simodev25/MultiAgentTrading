@@ -33,6 +33,15 @@ class RiskAssessment:
 # ---------------------------------------------------------------------------
 
 _CONTRACT_SPECS: dict[str, dict[str, Any]] = {
+    'unknown': {
+        'default_pip_size': 0.01,
+        'jpy_pip_size': 0.01,
+        'pip_value_per_lot': 1.0,
+        'contract_size': 1,
+        'min_volume': 0.01,
+        'max_volume': 100.0,
+        'volume_step': 0.01,
+    },
     'forex': {
         'default_pip_size': 0.0001,
         'jpy_pip_size': 0.01,
@@ -176,7 +185,7 @@ class RiskEngine:
     @classmethod
     def _volume_limits(cls, pair: str | None, asset_class: str | None = None) -> tuple[float, float]:
         ac = cls._resolve_asset_class(pair, asset_class)
-        spec = _CONTRACT_SPECS.get(ac, _CONTRACT_SPECS.get('forex', {}))
+        spec = _CONTRACT_SPECS.get(ac, _CONTRACT_SPECS['unknown'])
         return float(spec.get('min_volume', 0.01)), float(spec.get('max_volume', 10.0))
 
     @staticmethod
@@ -283,7 +292,7 @@ class RiskEngine:
         that specs are never duplicated.
         """
         ac = self._resolve_asset_class(pair, asset_class)
-        spec = _CONTRACT_SPECS.get(ac, _CONTRACT_SPECS.get('forex', {}))
+        spec = _CONTRACT_SPECS.get(ac, _CONTRACT_SPECS['unknown'])
         stop_distance = abs(entry_price - stop_loss)
 
         if stop_distance <= 0:

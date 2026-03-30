@@ -1205,7 +1205,7 @@ def news_evidence_scoring(
 def news_validation(
     news_output: dict | None = None,
     pair: str = "",
-    asset_class: str = "forex",
+    asset_class: str = "unknown",
 ) -> dict:
     """Validate and correct news analysis output."""
     news_output = news_output or {}
