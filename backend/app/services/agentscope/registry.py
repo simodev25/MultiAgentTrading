@@ -1099,13 +1099,9 @@ class AgentScopeRegistry:
                                 await asyncio.sleep(wait)
                                 continue
                             raise
-                    # All retries exhausted — deterministic fallback
-                    logger.warning("Agent %s failed after 3 retries, deterministic fallback: %s", name, str(last_err)[:100])
-                    return await self._run_deterministic(
-                        name, toolkits.get(name), msg,
-                        ohlc=ohlc, snapshot=snapshot, pair=pair, timeframe=timeframe,
-                        risk_percent=risk_percent, news=market_data.get("news", {}),
-                    )
+                    # All retries exhausted — propagate the error
+                    logger.error("Agent %s failed after 3 retries: %s", name, str(last_err)[:200])
+                    raise last_err  # type: ignore[misc]
                 return await self._run_deterministic(
                     name, toolkits.get(name), msg,
                     ohlc=ohlc, snapshot=snapshot, pair=pair, timeframe=timeframe,
