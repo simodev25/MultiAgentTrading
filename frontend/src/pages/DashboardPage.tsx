@@ -13,6 +13,7 @@ import {
   ChevronRight,
   BarChart3,
 } from 'lucide-react';
+import { ExpansionPanel } from '../components/ExpansionPanel';
 import type { ExecutionMode, MetaApiAccount, Run } from '../types';
 
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'pending']);
@@ -203,12 +204,25 @@ export function DashboardPage() {
 
   return (
     <div className="flex flex-col gap-5">
-      {/* ── Launch card ──────────────────────────────────── */}
-      <section className="hw-surface p-5">
-        <div className="section-header">
-          <span className="section-title">EXECUTE_ANALYSIS</span>
-          <Play className="section-icon" />
+      {/* ── KPIs (RUN_STATUS) ────────────────────────────── */}
+      <ExpansionPanel title="RUN_STATUS" icon={BarChart3}>
+        <div className="grid grid-cols-4 gap-4">
+          {[
+            { label: 'TOTAL', value: stats.total, color: 'text-text' },
+            { label: 'ACTIVE', value: stats.active, color: 'text-accent' },
+            { label: 'COMPLETED', value: stats.completed, color: 'text-success' },
+            { label: 'FAILED', value: stats.failed, color: 'text-danger' },
+          ].map((kpi) => (
+            <div key={kpi.label} className="hw-surface-alt p-4 text-center">
+              <span className="micro-label">{kpi.label}</span>
+              <div className={`text-2xl font-bold mt-2 ${kpi.color}`}>{kpi.value}</div>
+            </div>
+          ))}
         </div>
+      </ExpansionPanel>
+
+      {/* ── Launch card ──────────────────────────────────── */}
+      <ExpansionPanel title="EXECUTE_ANALYSIS" icon={Play}>
         <form onSubmit={onSubmit} className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 items-end">
           <div>
             <label className="micro-label block mb-1.5">Instrument</label>
@@ -257,35 +271,10 @@ export function DashboardPage() {
           </div>
         </form>
         {error && <p className="alert mt-3">{error}</p>}
-      </section>
-
-      {/* ── KPIs ─────────────────────────────────────────── */}
-      <section className="hw-surface p-5">
-        <div className="section-header">
-          <span className="section-title">RUN_STATUS</span>
-          <BarChart3 className="section-icon" />
-        </div>
-        <div className="grid grid-cols-4 gap-4">
-          {[
-            { label: 'TOTAL', value: stats.total, color: 'text-text' },
-            { label: 'ACTIVE', value: stats.active, color: 'text-accent' },
-            { label: 'COMPLETED', value: stats.completed, color: 'text-success' },
-            { label: 'FAILED', value: stats.failed, color: 'text-danger' },
-          ].map((kpi) => (
-            <div key={kpi.label} className="hw-surface-alt p-4 text-center">
-              <span className="micro-label">{kpi.label}</span>
-              <div className={`text-2xl font-bold mt-2 ${kpi.color}`}>{kpi.value}</div>
-            </div>
-          ))}
-        </div>
-      </section>
+      </ExpansionPanel>
 
       {/* ── Runs history ─────────────────────────────────── */}
-      <section className="hw-surface p-5">
-        <div className="section-header">
-          <span className="section-title">EXECUTION_HISTORY</span>
-          <BarChart3 className="section-icon" />
-        </div>
+      <ExpansionPanel title="EXECUTION_HISTORY" icon={BarChart3}>
         <div className="overflow-x-auto">
           <table>
             <thead>
@@ -355,6 +344,7 @@ export function DashboardPage() {
             </div>
           </div>
         )}
+        </div>)}
       </section>
     </div>
   );

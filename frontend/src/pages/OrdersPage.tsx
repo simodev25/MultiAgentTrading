@@ -7,6 +7,7 @@ import { useMetaTradingData } from '../hooks/useMetaTradingData';
 import { useOpenOrdersMarketChart } from '../hooks/useOpenOrdersMarketChart';
 import { usePlatformOrders } from '../hooks/usePlatformOrders';
 import { DEFAULT_TIMEFRAMES } from '../constants/markets';
+import { ExpansionPanel } from '../components/ExpansionPanel';
 
 
 const OpenOrdersChart = lazy(() =>
@@ -488,8 +489,7 @@ export function OrdersPage() {
         </form>
       </section>
 
-      <section className="hw-surface p-5" id="orders-summary">
-        <div className="section-header"><span className="section-title">TRADE_ANALYTICS</span></div>
+      <ExpansionPanel title="TRADE_ANALYTICS" id="orders-summary">
         <div className="grid grid-cols-3 md:grid-cols-5 gap-3">
           {tradingSummaryCards.map((card) => (
             <article key={card.label} className="hw-surface-alt p-3 text-center">
@@ -501,7 +501,7 @@ export function OrdersPage() {
             </article>
           ))}
         </div>
-      </section>
+      </ExpansionPanel>
 
       <section className="grid grid-cols-[200px_1fr] gap-5">
         <aside className="hw-surface p-4">
@@ -651,8 +651,7 @@ export function OrdersPage() {
             )}
           </section>
 
-          <section className="hw-surface p-5" id="orders-metaapi">
-            <div className="section-header"><span className="section-title">REAL_TRADES // MT5_METAAPI</span></div>
+          <ExpansionPanel title="REAL_TRADES // MT5_METAAPI" id="orders-metaapi">
             {metaFeatureDisabled ? (
               <>
                 <p className="model-source">
@@ -717,10 +716,9 @@ export function OrdersPage() {
                 </Suspense>
               </>
             )}
-          </section>
+          </ExpansionPanel>
 
-          <section className="hw-surface p-5" id="orders-platform">
-            <div className="section-header"><span className="section-title">PLATFORM_ORDERS</span></div>
+          <ExpansionPanel title="PLATFORM_ORDERS" id="orders-platform">
             <Suspense fallback={<TableSkeleton columns={11} rows={5} />}>
               <PlatformOrdersTable
                 bootstrapLoading={bootstrapLoading}
@@ -733,7 +731,7 @@ export function OrdersPage() {
                 onNextPage={() => setPlatformOrdersPage((prev) => Math.min(platformOrdersTotalPages, prev + 1))}
               />
             </Suspense>
-          </section>
+          </ExpansionPanel>
         </div>
 
       </section>

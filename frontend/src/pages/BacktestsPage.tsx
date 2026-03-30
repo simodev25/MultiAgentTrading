@@ -6,6 +6,7 @@ import { DEFAULT_PAIR, DEFAULT_TIMEFRAMES } from '../constants/markets';
 import { useAuth } from '../hooks/useAuth';
 import { useMarketSymbols } from '../hooks/useMarketSymbols';
 import { FlaskConical, Play } from 'lucide-react';
+import { ExpansionPanel } from '../components/ExpansionPanel';
 import type { BacktestRun } from '../types';
 
 const STRATEGIES = [
@@ -115,11 +116,7 @@ export function BacktestsPage() {
   return (
     <div className="flex flex-col gap-5">
       {/* Launch form */}
-      <section className="hw-surface p-5">
-        <div className="section-header">
-          <span className="section-title">BACKTEST_ENGINE</span>
-          <FlaskConical className="section-icon" />
-        </div>
+      <ExpansionPanel title="BACKTEST_ENGINE" icon={FlaskConical}>
         <form className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 items-end" onSubmit={createBacktest}>
           <div>
             <label className="micro-label block mb-1.5">Instrument</label>
@@ -166,13 +163,10 @@ export function BacktestsPage() {
           </div>
         )}
         {error && <p className="alert mt-3">{error}</p>}
-      </section>
+      </ExpansionPanel>
 
       {/* Backtest history */}
-      <section className="hw-surface p-5">
-        <div className="section-header">
-          <span className="section-title">BACKTEST_HISTORY</span>
-        </div>
+      <ExpansionPanel title="BACKTEST_HISTORY">
         <div className="overflow-x-auto">
           <table>
             <thead>
@@ -208,15 +202,12 @@ export function BacktestsPage() {
             </tbody>
           </table>
         </div>
-      </section>
+      </ExpansionPanel>
 
       {/* Detail */}
-      <section className="hw-surface p-5">
-        <div className="section-header">
-          <span className="section-title">BACKTEST_DETAIL</span>
-        </div>
+      <ExpansionPanel title="BACKTEST_DETAIL" defaultOpen={false}>
         <pre className="json-view">{JSON.stringify(selected, null, 2)}</pre>
-      </section>
+      </ExpansionPanel>
     </div>
   );
 }
