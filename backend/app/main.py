@@ -352,7 +352,7 @@ async def market_prices_socket(websocket: WebSocket) -> None:
         return
     await websocket.accept()
 
-    symbol_filter = (websocket.query_params.get('symbol') or '').strip() or None
+    symbol_filter = (websocket.query_params.get('symbol') or '').strip().lower() or None
     manager = PriceStreamManager.get_instance()
 
     # Lazily connect the manager if not yet connected
@@ -366,13 +366,19 @@ async def market_prices_socket(websocket: WebSocket) -> None:
     try:
         # Send latest cached price immediately if available
         if symbol_filter:
+            # Try exact match and common variants
             cached = manager.get_latest_price(symbol_filter)
+            if not cached:
+                for variant in [symbol_filter.upper(), symbol_filter.replace('.pro', '.PRO'), symbol_filter + '.pro']:
+                    cached = manager.get_latest_price(variant)
+                    if cached:
+                        break
             if cached:
                 await websocket.send_json(cached)
 
         while True:
             data = await queue.get()
-            if symbol_filter and data.get('symbol') != symbol_filter:
+            if symbol_filter and (data.get('symbol') or '').lower() != symbol_filter:
                 continue
             await websocket.send_json(data)
     except WebSocketDisconnect:
