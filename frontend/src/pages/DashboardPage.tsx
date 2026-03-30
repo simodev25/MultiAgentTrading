@@ -8,17 +8,12 @@ import { useAuth } from '../hooks/useAuth';
 import { useMarketSymbols } from '../hooks/useMarketSymbols';
 import {
   Play,
-  Clock,
   Zap,
-  Pause,
-  Trash2,
   ChevronLeft,
   ChevronRight,
-  CalendarClock,
   BarChart3,
-  Bot,
 } from 'lucide-react';
-import type { ExecutionMode, MetaApiAccount, RegenerateSchedulesResult, RiskProfile, Run, ScheduledRun } from '../types';
+import type { ExecutionMode, MetaApiAccount, Run } from '../types';
 
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'pending']);
 const EXECUTION_DATE_FORMATTER = new Intl.DateTimeFormat('fr-FR', {
@@ -30,22 +25,7 @@ const EXECUTION_DATE_FORMATTER = new Intl.DateTimeFormat('fr-FR', {
   second: '2-digit',
   hour12: false,
 });
-const CRON_PRESET_BY_TIMEFRAME: Record<string, string> = {
-  M5: '*/5 * * * *',
-  M15: '*/15 * * * *',
-  H1: '0 * * * *',
-  H4: '0 */4 * * *',
-  D1: '0 0 * * *',
-};
-const TIMEFRAME_HINT_BY_CODE: Record<string, string> = {
-  M5: 'Fast scalp',
-  M15: 'Intraday',
-  H1: 'Session',
-  H4: 'Swing',
-  D1: 'Trend',
-};
 const RUNS_PAGE_SIZE = 10;
-const SCHEDULES_POLL_EVERY_N_TICKS = 3;
 
 function parseApiDateMs(value: string): number {
   const raw = String(value ?? '').trim();
@@ -83,11 +63,6 @@ function formatExecutionDate(value: string): string {
   return EXECUTION_DATE_FORMATTER.format(new Date(ts));
 }
 
-function formatNullableDate(value?: string | null): string {
-  if (!value) return '-';
-  return formatExecutionDate(value);
-}
-
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' ? (value as Record<string, unknown>) : null;
 }
@@ -109,41 +84,18 @@ export function DashboardPage() {
   const { token } = useAuth();
   const { instruments } = useMarketSymbols(token);
   const [runs, setRuns] = useState<Run[]>([]);
-  const [schedules, setSchedules] = useState<ScheduledRun[]>([]);
   const [accounts, setAccounts] = useState<MetaApiAccount[]>([]);
   const [pair, setPair] = useState(DEFAULT_PAIR);
   const [timeframe, setTimeframe] = useState('H1');
   const [mode, setMode] = useState<ExecutionMode>('simulation');
   const [riskPercent, setRiskPercent] = useState(1);
   const [metaapiAccountRef, setMetaapiAccountRef] = useState<number | null>(null);
-  const [scheduleName, setScheduleName] = useState(DEFAULT_PAIR);
-  const [scheduleNameTouched, setScheduleNameTouched] = useState(false);
-  const [schedulePair, setSchedulePair] = useState(DEFAULT_PAIR);
-  const [scheduleTimeframe, setScheduleTimeframe] = useState('H1');
-  const [scheduleMode, setScheduleMode] = useState<ExecutionMode>('simulation');
-  const [scheduleRiskPercent, setScheduleRiskPercent] = useState(1);
-  const [scheduleMetaapiAccountRef, setScheduleMetaapiAccountRef] = useState<number | null>(null);
-  const [scheduleCronExpression, setScheduleCronExpression] = useState(CRON_PRESET_BY_TIMEFRAME.H1);
-  const [scheduleCronTouched, setScheduleCronTouched] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [scheduleLoading, setScheduleLoading] = useState(false);
-  const [scheduleActionId, setScheduleActionId] = useState<number | null>(null);
-  const [autoTargetCount, setAutoTargetCount] = useState(5);
-  const [autoRiskProfile, setAutoRiskProfile] = useState<RiskProfile>('balanced');
-  const [autoTimeframes, setAutoTimeframes] = useState<string[]>(['H1', 'H4', 'D1']);
-  const [autoUseLlm, setAutoUseLlm] = useState(true);
-  const [autoGenerating, setAutoGenerating] = useState(false);
-  const [autoGenerationSummary, setAutoGenerationSummary] = useState<string | null>(null);
-  const [autoLlmReport, setAutoLlmReport] = useState<Record<string, unknown> | null>(null);
-  const [showLlmReport, setShowLlmReport] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(Date.now());
   const [runsPage, setRunsPage] = useState(1);
   const [initialRunsLoaded, setInitialRunsLoaded] = useState(false);
-  const [initialSchedulesLoaded, setInitialSchedulesLoaded] = useState(false);
   const runsLoadingRef = useRef(false);
-  const schedulesLoadingRef = useRef(false);
-  const schedulesPollTickRef = useRef(0);
 
   const loadRuns = useCallback(async () => {
     if (!token || runsLoadingRef.current) return;
@@ -159,28 +111,8 @@ export function DashboardPage() {
     }
   }, [token]);
 
-  const loadSchedules = useCallback(async (force = true) => {
-    if (!token || schedulesLoadingRef.current) return;
-    if (!force) {
-      schedulesPollTickRef.current = (schedulesPollTickRef.current + 1) % SCHEDULES_POLL_EVERY_N_TICKS;
-      if (schedulesPollTickRef.current !== 0) return;
-    }
-    schedulesLoadingRef.current = true;
-    try {
-      const data = (await api.listSchedules(token)) as ScheduledRun[];
-      setSchedules(data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load schedules');
-    } finally {
-      schedulesLoadingRef.current = false;
-      setInitialSchedulesLoaded(true);
-    }
-  }, [token]);
-
   useEffect(() => {
     void loadRuns();
-    void loadSchedules(true);
-    schedulesPollTickRef.current = 0;
     if (token) {
       void api
         .listMetaApiAccounts(token)
@@ -201,13 +133,11 @@ export function DashboardPage() {
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'hidden') return;
       void loadRuns();
-      void loadSchedules(false);
     }, 5000);
 
     const onVisibilityChange = () => {
       if (document.visibilityState !== 'visible') return;
       void loadRuns();
-      void loadSchedules(true);
     };
     document.addEventListener('visibilitychange', onVisibilityChange);
 
@@ -215,7 +145,7 @@ export function DashboardPage() {
       window.clearInterval(interval);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [loadRuns, loadSchedules, token]);
+  }, [loadRuns, token]);
 
   useEffect(() => {
     const ticker = setInterval(() => setNowMs(Date.now()), 1000);
@@ -227,36 +157,13 @@ export function DashboardPage() {
     if (!instruments.includes(pair)) {
       setPair(instruments[0]);
     }
-    if (!instruments.includes(schedulePair)) {
-      setSchedulePair(instruments[0]);
-    }
-  }, [instruments, pair, schedulePair]);
-
-  useEffect(() => {
-    if (!scheduleNameTouched) {
-      setScheduleName(schedulePair);
-    }
-  }, [schedulePair, scheduleNameTouched]);
-
-  useEffect(() => {
-    if (!scheduleCronTouched) {
-      setScheduleCronExpression(CRON_PRESET_BY_TIMEFRAME[scheduleTimeframe] ?? '0 * * * *');
-    }
-  }, [scheduleTimeframe, scheduleCronTouched]);
+  }, [instruments, pair]);
 
   const runsTotalPages = Math.max(1, Math.ceil(runs.length / RUNS_PAGE_SIZE));
 
   useEffect(() => {
     setRunsPage((currentPage) => Math.min(currentPage, runsTotalPages));
   }, [runsTotalPages]);
-
-  const toggleTf = (list: string[], timeframe: string) => {
-    if (list.includes(timeframe)) {
-      const next = list.filter((item) => item !== timeframe);
-      return next.length > 0 ? next : list;
-    }
-    return [...list, timeframe];
-  };
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -276,112 +183,6 @@ export function DashboardPage() {
       setError(err instanceof Error ? err.message : 'Cannot create run');
     } finally {
       setLoading(false);
-    }
-  };
-
-  const onSubmitSchedule = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!token) return;
-    setScheduleLoading(true);
-    setError(null);
-    try {
-      await api.createSchedule(token, {
-        name: scheduleName,
-        pair: schedulePair,
-        timeframe: scheduleTimeframe,
-        mode: scheduleMode,
-        risk_percent: scheduleRiskPercent,
-        cron_expression: scheduleCronExpression,
-        is_active: true,
-        metaapi_account_ref: scheduleMetaapiAccountRef,
-      });
-      setScheduleNameTouched(false);
-      setScheduleName(schedulePair);
-      setScheduleCronTouched(false);
-      setScheduleCronExpression(CRON_PRESET_BY_TIMEFRAME[scheduleTimeframe] ?? '0 * * * *');
-      await loadSchedules();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Cannot create schedule');
-    } finally {
-      setScheduleLoading(false);
-    }
-  };
-
-  const toggleSchedule = async (schedule: ScheduledRun) => {
-    if (!token) return;
-    setScheduleActionId(schedule.id);
-    setError(null);
-    try {
-      await api.updateSchedule(token, schedule.id, { is_active: !schedule.is_active });
-      await loadSchedules();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Cannot update schedule');
-    } finally {
-      setScheduleActionId(null);
-    }
-  };
-
-  const runScheduleNow = async (schedule: ScheduledRun) => {
-    if (!token) return;
-    setScheduleActionId(schedule.id);
-    setError(null);
-    try {
-      await api.runScheduleNow(token, schedule.id);
-      await Promise.all([loadRuns(), loadSchedules()]);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Cannot trigger schedule');
-    } finally {
-      setScheduleActionId(null);
-    }
-  };
-
-  const deleteSchedule = async (schedule: ScheduledRun) => {
-    if (!token) return;
-    setScheduleActionId(schedule.id);
-    setError(null);
-    try {
-      await api.deleteSchedule(token, schedule.id);
-      await loadSchedules();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Cannot delete schedule');
-    } finally {
-      setScheduleActionId(null);
-    }
-  };
-
-  const applySmartCronPreset = () => {
-    setScheduleCronTouched(false);
-    setScheduleCronExpression(CRON_PRESET_BY_TIMEFRAME[scheduleTimeframe] ?? '0 * * * *');
-  };
-
-  const regenerateActiveSchedules = async () => {
-    if (!token) return;
-    setAutoGenerating(true);
-    setError(null);
-    setAutoGenerationSummary(null);
-    setAutoLlmReport(null);
-    setShowLlmReport(false);
-    try {
-      const payload = (await api.regenerateActiveSchedules(token, {
-        target_count: autoTargetCount,
-        mode: scheduleMode,
-        risk_profile: autoRiskProfile,
-        allowed_timeframes: autoTimeframes,
-        use_llm: autoUseLlm,
-        deactivate_existing: true,
-        metaapi_account_ref: scheduleMetaapiAccountRef,
-      })) as RegenerateSchedulesResult;
-      setSchedules(payload.active_schedules);
-      setAutoGenerationSummary(
-        `Source=${payload.source} | Replaced=${payload.replaced_count} | Created=${payload.created_count}` +
-        `${payload.llm_note ? ` | Note=${payload.llm_note}` : ''}`,
-      );
-      const llmUsed = Boolean(payload.llm_report && (payload.llm_report as Record<string, unknown>).used === true);
-      setAutoLlmReport(llmUsed ? (payload.llm_report as Record<string, unknown>) : null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Cannot regenerate active schedules');
-    } finally {
-      setAutoGenerating(false);
     }
   };
 
@@ -476,240 +277,6 @@ export function DashboardPage() {
               <div className={`text-2xl font-bold mt-2 ${kpi.color}`}>{kpi.value}</div>
             </div>
           ))}
-        </div>
-      </section>
-
-      {/* ── Automation card ──────────────────────────────── */}
-      <section className="hw-surface p-5">
-        <div className="section-header">
-          <span className="section-title">CRON_SCHEDULER</span>
-          <CalendarClock className="section-icon" />
-        </div>
-        <form onSubmit={onSubmitSchedule} className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 items-end">
-          <div>
-            <label className="micro-label block mb-1.5">Name</label>
-            <input
-              value={scheduleName}
-              onChange={(e) => { setScheduleNameTouched(true); setScheduleName(e.target.value); }}
-              placeholder={schedulePair}
-              required
-            />
-          </div>
-          <div>
-            <label className="micro-label block mb-1.5">Instrument</label>
-            <select value={schedulePair} onChange={(e) => setSchedulePair(e.target.value)}>
-              {instruments.map((item) => (
-                <option key={item}>{item}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="micro-label block mb-1.5">Timeframe</label>
-            <select value={scheduleTimeframe} onChange={(e) => setScheduleTimeframe(e.target.value)}>
-              {DEFAULT_TIMEFRAMES.map((item) => (
-                <option key={item}>{item}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="micro-label block mb-1.5">Mode</label>
-            <select value={scheduleMode} onChange={(e) => setScheduleMode(e.target.value as ExecutionMode)}>
-              <option value="simulation">Simulation</option>
-              <option value="paper">Paper</option>
-              <option value="live">Live</option>
-            </select>
-          </div>
-          <div>
-            <label className="micro-label block mb-1.5">Risk %</label>
-            <input
-              type="number"
-              min={0.1}
-              max={5}
-              step={0.1}
-              value={scheduleRiskPercent}
-              onChange={(e) => setScheduleRiskPercent(Number(e.target.value))}
-            />
-          </div>
-          <div>
-            <label className="micro-label block mb-1.5">MetaApi account</label>
-            <select
-              value={scheduleMetaapiAccountRef ?? ''}
-              onChange={(e) => setScheduleMetaapiAccountRef(e.target.value ? Number(e.target.value) : null)}
-            >
-              <option value="">Default</option>
-              {accounts.map((account) => (
-                <option key={account.id} value={account.id}>
-                  {account.label} ({account.region}){account.is_default ? ' [default]' : ''}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="micro-label block mb-1.5">Cron</label>
-            <div className="flex gap-2">
-              <input
-                value={scheduleCronExpression}
-                onChange={(e) => { setScheduleCronTouched(true); setScheduleCronExpression(e.target.value); }}
-                placeholder="*/15 * * * *"
-                required
-                className="flex-1"
-              />
-              <button type="button" className="btn-ghost shrink-0" onClick={applySmartCronPreset}>Preset</button>
-            </div>
-          </div>
-          <div>
-            <button className="btn-primary w-full" disabled={scheduleLoading}>
-              {scheduleLoading ? <ButtonSpinner /> : <CalendarClock className="w-3.5 h-3.5" />}
-              {scheduleLoading ? 'Creating plan' : 'Create plan'}
-            </button>
-          </div>
-        </form>
-        <p className="model-source mt-2">
-          Cron example: <code>*/5 * * * *</code>, <code>0 * * * *</code>, <code>0 8-20 * * 1-5</code>.
-        </p>
-
-        {/* Auto generation */}
-        <div className="mt-5 pt-4 border-t border-border">
-          <div className="flex items-center gap-2 mb-3">
-            <Bot className="w-3.5 h-3.5 text-text-dim" />
-            <span className="text-[10px] font-semibold tracking-[0.12em] text-text-muted uppercase">AUTO_GENERATE</span>
-          </div>
-          <form
-            className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 items-end"
-            onSubmit={(e) => { e.preventDefault(); void regenerateActiveSchedules(); }}
-          >
-            <div>
-              <label className="micro-label block mb-1.5">Nb plans</label>
-              <input type="number" min={1} max={20} value={autoTargetCount} onChange={(e) => setAutoTargetCount(Number(e.target.value))} />
-            </div>
-            <div>
-              <label className="micro-label block mb-1.5">Risk profile</label>
-              <select value={autoRiskProfile} onChange={(e) => setAutoRiskProfile(e.target.value as RiskProfile)}>
-                <option value="conservative">Conservative</option>
-                <option value="balanced">Balanced</option>
-                <option value="aggressive">Aggressive</option>
-              </select>
-            </div>
-            <div className="col-span-2">
-              <label className="micro-label block mb-1.5">Allowed TFs <span className="text-text-dim">({autoTimeframes.length} active)</span></label>
-              <div className="flex flex-wrap gap-1.5">
-                {DEFAULT_TIMEFRAMES.map((item) => {
-                  const isActive = autoTimeframes.includes(item);
-                  return (
-                    <label
-                      key={item}
-                      className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border text-[10px] font-mono cursor-pointer transition-all ${
-                        isActive
-                          ? 'border-accent/30 bg-accent/10 text-accent'
-                          : 'border-border bg-surface-alt text-text-muted'
-                      }`}
-                    >
-                      <span className="font-semibold">{item}</span>
-                      <span className="text-[8px] text-text-dim">{TIMEFRAME_HINT_BY_CODE[item] ?? ''}</span>
-                      <input
-                        className="ui-switch ml-1"
-                        type="checkbox"
-                        checked={isActive}
-                        onChange={() => setAutoTimeframes((prev) => toggleTf(prev, item))}
-                      />
-                    </label>
-                  );
-                })}
-              </div>
-            </div>
-            <div>
-              <label className="micro-label block mb-1.5">Use LLM</label>
-              <select value={autoUseLlm ? 'yes' : 'no'} onChange={(e) => setAutoUseLlm(e.target.value === 'yes')}>
-                <option value="yes">Yes</option>
-                <option value="no">No (fallback)</option>
-              </select>
-            </div>
-            <div>
-              <button className="btn-primary w-full" disabled={autoGenerating}>
-                {autoGenerating ? <ButtonSpinner /> : <Bot className="w-3.5 h-3.5" />}
-                {autoGenerating ? 'Generating' : 'Auto-generate'}
-              </button>
-            </div>
-          </form>
-          {autoGenerationSummary && <p className="model-source mt-2">{autoGenerationSummary}</p>}
-          {autoLlmReport && (
-            <div className="mt-2">
-              <button type="button" className="btn-ghost" onClick={() => setShowLlmReport((prev) => !prev)}>
-                {showLlmReport ? 'Hide LLM report' : 'Show LLM report'}
-              </button>
-            </div>
-          )}
-          {showLlmReport && autoLlmReport && (
-            <div className="mt-3 hw-surface-alt p-4">
-              <h5 className="micro-label mb-2">LLM Report - Plan Generation</h5>
-              <pre className="json-view">{JSON.stringify(autoLlmReport, null, 2)}</pre>
-            </div>
-          )}
-        </div>
-      </section>
-
-      {/* ── Schedules table ──────────────────────────────── */}
-      <section className="hw-surface p-5">
-        <div className="section-header">
-          <span className="section-title">ACTIVE_SCHEDULES</span>
-          <Clock className="section-icon" />
-        </div>
-        <div className="overflow-x-auto">
-          <table>
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Name</th>
-                <th>Instrument</th>
-                <th>TF</th>
-                <th>Mode</th>
-                <th>Risk</th>
-                <th>Cron</th>
-                <th>Next run</th>
-                <th>Last run</th>
-                <th>Status</th>
-                <th>Error</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {!initialSchedulesLoaded && schedules.length === 0 && (
-                <TableSkeletonRows prefix="schedules" columns={12} rows={3} />
-              )}
-              {schedules.map((schedule) => (
-                <tr key={schedule.id}>
-                  <td className="font-mono text-text-muted">{schedule.id}</td>
-                  <td>{schedule.name}</td>
-                  <td className="font-semibold">{schedule.pair}</td>
-                  <td>{schedule.timeframe}</td>
-                  <td>{schedule.mode}</td>
-                  <td>{schedule.risk_percent}</td>
-                  <td><code>{schedule.cron_expression}</code></td>
-                  <td className="text-text-muted">{formatNullableDate(schedule.next_run_at)}</td>
-                  <td className="text-text-muted">{formatNullableDate(schedule.last_run_at)}</td>
-                  <td>
-                    <span className={`badge ${schedule.is_active ? 'ok' : 'blocked'}`}>
-                      {schedule.is_active ? 'active' : 'paused'}
-                    </span>
-                  </td>
-                  <td className="text-danger text-[10px]">{schedule.last_error ?? '-'}</td>
-                  <td>
-                    <div className="flex gap-1">
-                      <button className="btn-primary btn-small" disabled={scheduleActionId === schedule.id} onClick={() => void runScheduleNow(schedule)}>
-                        <Play className="w-3 h-3" /> Run
-                      </button>
-                      <button className="btn-warning btn-small" disabled={scheduleActionId === schedule.id} onClick={() => void toggleSchedule(schedule)}>
-                        <Pause className="w-3 h-3" /> {schedule.is_active ? 'Pause' : 'On'}
-                      </button>
-                      <button className="btn-danger btn-small" disabled={scheduleActionId === schedule.id} onClick={() => void deleteSchedule(schedule)}>
-                        <Trash2 className="w-3 h-3" />
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
         </div>
       </section>
 

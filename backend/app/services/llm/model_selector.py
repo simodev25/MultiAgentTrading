@@ -21,8 +21,6 @@ DEFAULT_AGENT_LLM_ENABLED: dict[str, bool] = {
     'agentic-runtime-planner': True,
     'risk-manager': False,
     'execution-manager': False,
-    'schedule-planner-agent': True,
-    'order-guardian': False,
 }
 
 SUPPORTED_LLM_PROVIDERS = {'ollama', 'openai', 'mistral'}
@@ -31,7 +29,6 @@ MAX_AGENT_SKILLS_PER_AGENT = 12
 MAX_AGENT_SKILL_LENGTH = 500
 SUPPORTED_DECISION_MODES = {'conservative', 'balanced', 'permissive'}
 DEFAULT_DECISION_MODE = 'balanced'
-DEFAULT_MEMORY_CONTEXT_ENABLED = False
 LEGACY_AGENT_ALIASES: dict[str, str] = {
     'macro-analyst': 'market-context-analyst',
     'sentiment-agent': 'market-context-analyst',
@@ -145,12 +142,6 @@ AGENT_TOOL_DEFINITIONS: dict[str, dict[str, Any]] = {
         'enabled_by_default': True,
         'reference_origin': 'mcp_trading_server.position_size_calculator',
     },
-    'memory_query': {
-        'label': 'Memory Query',
-        'description': "Agentic memory access: search, feedback, statistics per agent via MCP.",
-        'enabled_by_default': True,
-        'reference_origin': 'mcp_trading_server.memory_query',
-    },
 }
 DEFAULT_AGENT_ALLOWED_TOOLS: dict[str, tuple[str, ...]] = {
     'technical-analyst': (
@@ -177,19 +168,16 @@ DEFAULT_AGENT_ALLOWED_TOOLS: dict[str, tuple[str, ...]] = {
         'evidence_query',
         'thesis_support_extractor',
         'scenario_validation',
-        'memory_query',
     ),
     'bearish-researcher': (
         'evidence_query',
         'thesis_support_extractor',
         'scenario_validation',
-        'memory_query',
     ),
     'trader-agent': (
         'evidence_query',
         'scenario_validation',
         'position_size_calculator',
-        'memory_query',
     ),
     'risk-manager': (
         'scenario_validation',
@@ -198,10 +186,6 @@ DEFAULT_AGENT_ALLOWED_TOOLS: dict[str, tuple[str, ...]] = {
     'execution-manager': (
         'scenario_validation',
         'position_size_calculator',
-    ),
-    'schedule-planner-agent': (),
-    'order-guardian': (
-        'memory_query',
     ),
     'agentic-runtime-planner': (),
 }
@@ -549,10 +533,3 @@ class AgentModelSelector:
         fallback = normalize_decision_mode(getattr(self.settings, 'decision_mode', DEFAULT_DECISION_MODE))
         settings = self._load_llm_settings(db)
         return normalize_decision_mode(settings.get('decision_mode'), fallback=fallback)
-
-    def resolve_memory_context_enabled(self, db: Session | None) -> bool:
-        settings = self._load_llm_settings(db)
-        return _normalize_bool_setting(
-            settings.get('memory_context_enabled'),
-            fallback=DEFAULT_MEMORY_CONTEXT_ENABLED,
-        )

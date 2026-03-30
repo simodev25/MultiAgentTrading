@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: postgres:16
     environment:
       POSTGRES_USER: forex
       POSTGRES_PASSWORD: forex
@@ -30,13 +30,6 @@ services:
     ports:
       - '5672:5672'
       - '15672:15672'
-
-  qdrant:
-    image: qdrant/qdrant:v1.13.2
-    ports:
-      - '6333:6333'
-    volumes:
-      - qdrant_data:/qdrant/storage
 
   backend:
     build:
@@ -86,29 +79,10 @@ services:
       - '${PROMETHEUS_WORKER_PORT:-9101}'
     command: >
       sh -c "mkdir -p /tmp/prometheus-worker && rm -rf /tmp/prometheus-worker/* &&
-      celery -A app.tasks.celery_app.celery_app worker --loglevel=info -Q $${CELERY_WORKER_QUEUES:-analysis,scheduler,backtests}
+      celery -A app.tasks.celery_app.celery_app worker --loglevel=info -Q $${CELERY_WORKER_QUEUES:-analysis,backtests}
       --concurrency=$${CELERY_WORKER_CONCURRENCY:-2}
       --prefetch-multiplier=$${CELERY_WORKER_PREFETCH_MULTIPLIER:-1}
       --max-tasks-per-child=$${CELERY_WORKER_MAX_TASKS_PER_CHILD:-100}"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_started
-
-  beat:
-    build:
-      context: ./backend
-    env_file:
-      - ./backend/.env
-    environment:
-      DATABASE_URL: postgresql+psycopg2://forex:forex@postgres:5432/forex_platform
-      REDIS_URL: redis://redis:6379/0
-      CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
-      CELERY_IGNORE_RESULT: 'true'
-    command: celery -A app.tasks.celery_app.celery_app beat --loglevel=info
     depends_on:
       postgres:
         condition: service_healthy
@@ -154,4 +128,3 @@ services:
 
 volumes:
   postgres_data:
-  qdrant_data:

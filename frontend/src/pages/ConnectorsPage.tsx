@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api/client';
-import { CRYPTO_PAIRS, DEFAULT_PAIR, DEFAULT_TIMEFRAMES, FOREX_PAIRS, TRADEABLE_PAIRS } from '../constants/markets';
+import { CRYPTO_PAIRS, FOREX_PAIRS, TRADEABLE_PAIRS } from '../constants/markets';
 import { useAuth } from '../hooks/useAuth';
 import type {
   ConnectorConfig,
@@ -21,9 +21,8 @@ const ORCHESTRATION_AGENTS = [
   'trader-agent',
   'risk-manager',
   'execution-manager',
-  'schedule-planner-agent',
 ];
-const MODEL_EDIT_AGENTS = [...ORCHESTRATION_AGENTS, 'order-guardian'];
+const MODEL_EDIT_AGENTS = [...ORCHESTRATION_AGENTS];
 const NON_SWITCHABLE_LLM_AGENTS = new Set<string>();
 const PROMPT_EDITABLE_AGENTS = MODEL_EDIT_AGENTS.filter((agentName) => !NON_SWITCHABLE_LLM_AGENTS.has(agentName));
 const SWITCHABLE_LLM_AGENTS = new Set(MODEL_EDIT_AGENTS.filter((agentName) => !NON_SWITCHABLE_LLM_AGENTS.has(agentName)));
@@ -37,8 +36,6 @@ const DEFAULT_AGENT_LLM_ENABLED: Record<string, boolean> = {
   'trader-agent': false,
   'risk-manager': false,
   'execution-manager': false,
-  'schedule-planner-agent': true,
-  'order-guardian': false,
 };
 const AGENT_PROMPT_FALLBACKS: Record<string, { system: string; user: string }> = {
   'technical-analyst': {
@@ -50,7 +47,7 @@ const AGENT_PROMPT_FALLBACKS: Record<string, { system: string; user: string }> =
     user: (
       'Instrument: {pair}\nAsset class: {asset_class}\nDisplay symbol: {display_symbol}\nTimeframe: {timeframe}\n'
       + 'Instrument type: {instrument_type}\nPrimary asset: {primary_asset}\nSecondary asset: {secondary_asset}\n'
-      + 'FX base asset: {base_asset}\nFX quote asset: {quote_asset}\nRelevant memories:\n{memory_context}\n'
+      + 'FX base asset: {base_asset}\nFX quote asset: {quote_asset}\n'
       + 'Retained news and catalysts:\n{headlines}'
     ),
   },
@@ -64,11 +61,11 @@ const AGENT_PROMPT_FALLBACKS: Record<string, { system: string; user: string }> =
   },
   'bullish-researcher': {
     system: "You are a multi-asset bullish market researcher. Use only the provided signals and never invent external data.",
-    user: 'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nSignals: {signals_json}\nMemory:\n{memory_context}',
+    user: 'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nSignals: {signals_json}',
   },
   'bearish-researcher': {
     system: "You are a multi-asset bearish market researcher. Use only the provided signals and never invent external data.",
-    user: 'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nSignals: {signals_json}\nMemory:\n{memory_context}',
+    user: 'Instrument: {pair}\nAsset class: {asset_class}\nTimeframe: {timeframe}\nSignals: {signals_json}',
   },
   'trader-agent': {
     system: "You are a multi-asset trading assistant. Summarize the final execution note without inventing signals.",
@@ -90,23 +87,6 @@ const AGENT_PROMPT_FALLBACKS: Record<string, { system: string; user: string }> =
       + 'Risk accepted: {risk_accepted}\nSuggested volume: {suggested_volume}\n'
       + 'Stop loss: {stop_loss}\nTake profit: {take_profit}\n'
       + 'Expected return: BUY, SELL or HOLD followed by concise justification.'
-    ),
-  },
-  'order-guardian': {
-    system: 'You are Order Guardian MT5.',
-    user: (
-      'Account: {account_label}\nGuardian timeframe: {timeframe}\nMode: {mode}\n'
-      + 'Cycle summary: {summary_json}\nActions: {actions_json}\n'
-      + 'Produce a short report: critical points, major executions, and follow-up priorities.'
-    ),
-  },
-  'schedule-planner-agent': {
-    system: 'You are an agent dedicated to intelligent automation of multi-asset cron plans.',
-    user: (
-      'Build a scheduling plan.\n'
-      + 'Constraints: target_count plans, allowed instruments/timeframes, requested mode, bounded risk_percent, coherent cron.\n'
-      + 'Return: strict JSON with keys plans and note.\n'
-      + 'Context JSON:\n{context_json}'
     ),
   },
 };
@@ -362,7 +342,6 @@ export function ConnectorsPage() {
   const [prompts, setPrompts] = useState<PromptTemplate[]>([]);
   const [summary, setSummary] = useState<LlmSummary | null>(null);
   const [modelsUsage, setModelsUsage] = useState<LlmModelUsage[]>([]);
-  const [memoryResults, setMemoryResults] = useState<Array<Record<string, unknown>>>([]);
 
   const [testResult, setTestResult] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -371,7 +350,6 @@ export function ConnectorsPage() {
   const [defaultLlmModel, setDefaultLlmModel] = useState('llama3.1');
   const [llmProvider, setLlmProvider] = useState<LlmProvider>('ollama');
   const [decisionMode, setDecisionMode] = useState<DecisionMode>('conservative');
-  const [memoryContextEnabled, setMemoryContextEnabled] = useState(false);
   const [agentModels, setAgentModels] = useState<Record<string, string>>(
     Object.fromEntries(MODEL_EDIT_AGENTS.map((agent) => [agent, ''])),
   );
@@ -403,9 +381,6 @@ export function ConnectorsPage() {
   const [promptSaving, setPromptSaving] = useState(false);
   const [skillsSaving, setSkillsSaving] = useState(false);
 
-  const [memoryPair, setMemoryPair] = useState(DEFAULT_PAIR);
-  const [memoryTimeframe, setMemoryTimeframe] = useState('H1');
-  const [memoryQuery, setMemoryQuery] = useState('recent bullish context');
   const [marketSymbols, setMarketSymbols] = useState<MarketSymbolsConfig>({
     forex_pairs: FOREX_PAIRS,
     crypto_pairs: CRYPTO_PAIRS,
@@ -434,7 +409,6 @@ export function ConnectorsPage() {
     const provider = normalizeLlmProvider(settings.provider);
     const resolvedDecisionMode = normalizeDecisionMode(settings.decision_mode);
     const configuredDefault = typeof settings.default_model === 'string' ? settings.default_model.trim() : '';
-    const resolvedMemoryContextEnabled = normalizeBooleanSetting(settings.memory_context_enabled, false);
     const rawMap = settings.agent_models && typeof settings.agent_models === 'object'
       ? (settings.agent_models as Record<string, unknown>)
       : {};
@@ -532,7 +506,6 @@ export function ConnectorsPage() {
 
     setLlmProvider(provider);
     setDecisionMode(resolvedDecisionMode);
-    setMemoryContextEnabled(resolvedMemoryContextEnabled);
     setDefaultLlmModel(configuredDefault || defaultModelForProvider(provider));
     setAgentModels(next);
     setAgentSkills(nextSkills);
@@ -689,11 +662,6 @@ export function ConnectorsPage() {
     return map;
   }, [prompts]);
 
-  const memoryPairOptions = useMemo(() => {
-    const list = Array.isArray(marketSymbols.tradeable_pairs) ? marketSymbols.tradeable_pairs : [];
-    return list.length > 0 ? list : TRADEABLE_PAIRS;
-  }, [marketSymbols.tradeable_pairs]);
-
   useEffect(() => {
     const active = activePromptByAgent.get(promptAgent);
     const fallback = AGENT_PROMPT_FALLBACKS[promptAgent] ?? {
@@ -708,13 +676,6 @@ export function ConnectorsPage() {
     if (PROMPT_EDITABLE_AGENTS.includes(promptAgent)) return;
     setPromptAgent(PROMPT_EDITABLE_AGENTS[0] ?? 'news-analyst');
   }, [promptAgent]);
-
-  useEffect(() => {
-    if (memoryPairOptions.length === 0) return;
-    if (!memoryPairOptions.includes(memoryPair)) {
-      setMemoryPair(memoryPairOptions[0]);
-    }
-  }, [memoryPairOptions, memoryPair]);
 
   const toggleConnector = async (connector: ConnectorConfig) => {
     if (!token) return;
@@ -799,7 +760,6 @@ export function ConnectorsPage() {
           agent_llm_enabled: cleanedEnabled,
           agent_skills: cleanedSkills,
           agent_tools: cleanedAgentTools,
-          memory_context_enabled: memoryContextEnabled,
         },
       });
       await loadAll();
@@ -829,7 +789,6 @@ export function ConnectorsPage() {
         settings: {
           ...existingSettings,
           decision_mode: decisionMode,
-          memory_context_enabled: memoryContextEnabled,
         },
       });
       await loadAll();
@@ -988,9 +947,6 @@ export function ConnectorsPage() {
         source: typeof payload.source === 'string' ? payload.source : 'config',
       });
       setSymbolGroupsInput(toEditableGroups(resolvedGroups));
-      if (resolvedTradeable.length > 0 && !resolvedTradeable.includes(memoryPair)) {
-        setMemoryPair(resolvedTradeable[0]);
-      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Cannot save market symbols');
     } finally {
@@ -1103,22 +1059,6 @@ export function ConnectorsPage() {
       setError(err instanceof Error ? err.message : 'Cannot save cache settings');
     } finally {
       setSavingCache(false);
-    }
-  };
-
-  const searchMemory = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!token) return;
-    try {
-      const result = (await api.searchMemory(token, {
-        pair: memoryPair,
-        timeframe: memoryTimeframe,
-        query: memoryQuery,
-        limit: 10,
-      })) as { results: Array<Record<string, unknown>> };
-      setMemoryResults(result.results);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Memory search failed');
     }
   };
 
@@ -1560,24 +1500,12 @@ export function ConnectorsPage() {
                     ))}
                   </select>
                 </label>
-                <label>
-                  Use `memory_context` in prompts
-                  <input
-                    className="ui-switch"
-                    type="checkbox"
-                    checked={memoryContextEnabled}
-                    onChange={(e) => setMemoryContextEnabled(e.target.checked)}
-                  />
-                </label>
                 <div>
                   {DECISION_MODE_OPTIONS.map((option) => (
                     <p key={option.value} className="model-source">
                       <strong>{option.label}:</strong> {option.description}
                     </p>
                   ))}
-                  <p className="model-source">
-                    When disabled, agents no longer receive the `memory_context` (default: disabled).
-                  </p>
                 </div>
                 <button className="btn-primary" disabled={decisionModeSaving}>
                   {decisionModeSaving ? 'Saving...' : 'Save decision mode'}
@@ -1825,33 +1753,6 @@ export function ConnectorsPage() {
               </form>
             </section>
 
-            <section className="hw-surface-alt p-4">
-              <div className="section-header"><span className="section-title">LONG_TERM_MEMORY</span></div>
-              <form className="grid grid-cols-2 md:grid-cols-4 gap-3 items-end" onSubmit={searchMemory}>
-                <label>
-                  Instrument
-                  <select value={memoryPair} onChange={(e) => setMemoryPair(e.target.value)}>
-                    {memoryPairOptions.map((item) => (
-                      <option key={item}>{item}</option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Timeframe
-                  <select value={memoryTimeframe} onChange={(e) => setMemoryTimeframe(e.target.value)}>
-                    {DEFAULT_TIMEFRAMES.map((item) => (
-                      <option key={item}>{item}</option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Query
-                  <input value={memoryQuery} onChange={(e) => setMemoryQuery(e.target.value)} />
-                </label>
-                <button className="btn-primary">Search</button>
-              </form>
-              <pre>{JSON.stringify(memoryResults, null, 2)}</pre>
-            </section>
           </div>
         )}
       </section>

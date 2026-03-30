@@ -173,8 +173,6 @@ class PromptTemplateService:
             return LANGUAGE_DIRECTIVE_RISK
         if agent_name == 'execution-manager':
             return LANGUAGE_DIRECTIVE_EXECUTION
-        if agent_name == 'schedule-planner-agent':
-            return LANGUAGE_DIRECTIVE_JSON
         if agent_name == 'agentic-runtime-planner':
             return LANGUAGE_DIRECTIVE_JSON
         if agent_name in {

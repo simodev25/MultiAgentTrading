@@ -3,8 +3,8 @@
 Provides an async-safe context that carries ``correlation_id`` (ties all
 events in a single user-facing request) and ``causation_id`` (ties an
 event to its direct parent).  These IDs are injected into log records and
-trace payloads so that any run, agent step, tool call, or memory
-operation can be correlated back to its root trigger.
+trace payloads so that any run, agent step, or tool call can be
+correlated back to its root trigger.
 
 Uses ``contextvars`` instead of ``threading.local`` so that each async
 task gets its own isolated trace state — safe for concurrent ``await``

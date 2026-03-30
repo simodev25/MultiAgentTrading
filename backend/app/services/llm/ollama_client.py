@@ -189,7 +189,56 @@ class OllamaCloudClient:
         user_prompt: str,
         messages: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        return normalize_messages(system_prompt, user_prompt, messages)
+        normalized = normalize_messages(system_prompt, user_prompt, messages)
+        def _sanitize_tool_calls(raw_calls: Any) -> list[dict[str, Any]]:
+            if not isinstance(raw_calls, list):
+                return []
+            sanitized: list[dict[str, Any]] = []
+            for index, raw_call in enumerate(raw_calls):
+                if not isinstance(raw_call, dict):
+                    continue
+                function = raw_call.get('function')
+                if isinstance(function, dict):
+                    name = str(function.get('name') or '').strip()
+                    raw_arguments = function.get('arguments')
+                else:
+                    name = str(raw_call.get('name') or '').strip()
+                    raw_arguments = raw_call.get('arguments')
+                if not name:
+                    continue
+                call_id = str(raw_call.get('id') or f'call_{index}').strip() or f'call_{index}'
+                sanitized.append(
+                    {
+                        'id': call_id,
+                        'type': 'function',
+                        'function': {
+                            'name': name,
+                            # Ollama is stricter than OpenAI-compatible providers:
+                            # keep arguments as a dict and drop malformed JSON strings.
+                            'arguments': safe_parse_tool_arguments(raw_arguments),
+                        },
+                    }
+                )
+            return sanitized
+
+        # Ollama /api/chat rejects assistant tool-call messages when
+        # `content` is null. Keep provider-specific coercion here while
+        # shared normalization remains OpenAI-compatible.
+        for item in normalized:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get('role') or '').strip().lower() != 'assistant':
+                continue
+            if not isinstance(item.get('tool_calls'), list):
+                continue
+            if item.get('content') is None:
+                item['content'] = ''
+            sanitized_calls = _sanitize_tool_calls(item.get('tool_calls'))
+            if sanitized_calls:
+                item['tool_calls'] = sanitized_calls
+            else:
+                item.pop('tool_calls', None)
+        return normalized
 
     def _build_chat_payload(
         self,
@@ -429,8 +478,84 @@ class OllamaCloudClient:
             }
         except Exception as exc:  # pragma: no cover
             status_code: int | None = None
+            response_body_excerpt: str | None = None
             if isinstance(exc, httpx.HTTPStatusError):
                 status_code = exc.response.status_code
+                try:
+                    response_body_excerpt = (exc.response.text or '').strip()[:1000] or None
+                except Exception:
+                    response_body_excerpt = None
+
+            malformed_tool_args_error = bool(
+                status_code == 400
+                and response_body_excerpt
+                and "can't find closing '}' symbol" in response_body_excerpt.lower()
+            )
+
+            # Ollama Cloud occasionally fails to parse model-generated tool
+            # arguments and returns HTTP 400. Retry once without tool
+            # injection to preserve continuity instead of hard-degrading.
+            if malformed_tool_args_error and isinstance(tools, list) and tools:
+                try:
+                    logger.warning(
+                        'ollama malformed tool-call arguments; retrying without tools model=%s',
+                        selected_model,
+                    )
+                    fallback_data = self._call_remote(
+                        url,
+                        self._build_chat_payload(
+                            selected_model,
+                            system_prompt,
+                            user_prompt,
+                            messages=messages,
+                            tools=None,
+                            tool_choice=None,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                        ),
+                        headers,
+                        timeout_seconds=request_timeout_seconds,
+                    )
+                    text, prompt_tokens, completion_tokens = self._extract_usage(fallback_data)
+                    tool_calls = self._extract_tool_calls(fallback_data)
+                    cost_usd = self._estimate_cost_usd(prompt_tokens, completion_tokens)
+                    latency = time.perf_counter() - started
+
+                    llm_calls_total.labels(provider=provider, status='success').inc()
+                    llm_prompt_tokens_total.labels(provider=provider, model=selected_model).inc(prompt_tokens)
+                    llm_completion_tokens_total.labels(provider=provider, model=selected_model).inc(completion_tokens)
+                    llm_cost_usd_total.labels(provider=provider, model=selected_model).inc(cost_usd)
+                    llm_latency_seconds.labels(provider=provider, model=selected_model, status='success').observe(latency)
+
+                    self._persist_log(
+                        provider=provider,
+                        model=selected_model,
+                        status='success',
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        cost_usd=cost_usd,
+                        latency_ms=latency * 1000,
+                    )
+                    return {
+                        'provider': provider,
+                        'text': text,
+                        'tool_calls': tool_calls,
+                        'raw': fallback_data,
+                        'degraded': False,
+                        'prompt_tokens': prompt_tokens,
+                        'completion_tokens': completion_tokens,
+                        'cost_usd': round(cost_usd, 8),
+                        'latency_ms': round(latency * 1000, 3),
+                        'tool_injection_fallback': 'disabled_after_malformed_arguments',
+                    }
+                except Exception as fallback_exc:
+                    exc = fallback_exc
+                    if isinstance(fallback_exc, httpx.HTTPStatusError):
+                        status_code = fallback_exc.response.status_code
+                        try:
+                            response_body_excerpt = (fallback_exc.response.text or '').strip()[:1000] or None
+                        except Exception:
+                            response_body_excerpt = None
 
             # If a model override is invalid on Ollama Cloud (404), retry once with env default model.
             fallback_model = (self.settings.ollama_model or '').strip()
@@ -513,6 +638,13 @@ class OllamaCloudClient:
                 logger.error('ollama_chat_auth_error model=%s status=%s', selected_model, status_code)
                 message = f'Ollama authentication failed (HTTP {status_code}). Check OLLAMA_API_KEY.'
             else:
+                if status_code is not None:
+                    logger.error(
+                        'ollama_chat_http_error model=%s status=%s response=%s',
+                        selected_model,
+                        status_code,
+                        response_body_excerpt or '<empty>',
+                    )
                 logger.exception('ollama_chat_call_error model=%s', selected_model)
                 message = f'Ollama call failed after retries: {exc}'
             return {

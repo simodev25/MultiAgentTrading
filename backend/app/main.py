@@ -12,7 +12,6 @@ from jose import JWTError, jwt
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from prometheus_client import CONTENT_TYPE_LATEST
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.router import api_router
@@ -20,9 +19,6 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.core.security import Role, get_password_hash
 from app.db.base import Base
-from app.db.models.agent_runtime_event import AgentRuntimeEvent
-from app.db.models.agent_runtime_message import AgentRuntimeMessage
-from app.db.models.agent_runtime_session import AgentRuntimeSession
 from app.db.models.connector_config import ConnectorConfig
 from app.db.models.execution_order import ExecutionOrder
 from app.db.models.metaapi_account import MetaApiAccount
@@ -31,21 +27,10 @@ from app.db.models.user import User
 from app.db.session import SessionLocal, engine, get_db
 from app.observability.metrics import backend_http_request_duration_seconds, backend_http_requests_total
 from app.observability.prometheus import build_metrics_payload
-from app.services.agent_runtime.session_store import RuntimeSessionStore
 from app.services.prompts.registry import PromptTemplateService
 from app.services.llm.skill_bootstrap import bootstrap_agent_skills_into_settings
 
 logger = logging.getLogger(__name__)
-
-
-def _is_pgvector_extension_race(exc: Exception) -> bool:
-    """Return True when concurrent startup attempted to create the same extension."""
-    if isinstance(exc, IntegrityError):
-        pgcode = getattr(getattr(exc, 'orig', None), 'pgcode', None)
-        if pgcode in {'23505', '42710'}:
-            return True
-    message = str(exc).lower()
-    return 'pg_extension_name_index' in message and 'vector' in message
 
 
 def _acquire_startup_lock() -> tuple[int, bool]:
@@ -75,24 +60,6 @@ async def lifespan(_: FastAPI):
     configure_logging()
     lock_fd, already_initialized = _acquire_startup_lock()
     try:
-        if settings.enable_pgvector and engine.dialect.name == 'postgresql':
-            try:
-                with engine.begin() as conn:
-                    conn.execute(text('CREATE EXTENSION IF NOT EXISTS vector'))
-            except Exception as exc:
-                if _is_pgvector_extension_race(exc):
-                    logger.warning(
-                        'Concurrent pgvector extension initialization detected; continuing startup. error=%s',
-                        exc,
-                    )
-                else:
-                    logger.error(
-                        'ENABLE_PGVECTOR=true but pgvector extension is not available. '
-                        'Use a pgvector-enabled Postgres image or set ENABLE_PGVECTOR=false. error=%s',
-                        exc,
-                    )
-                    raise
-
         Base.metadata.create_all(bind=engine)
 
         db = SessionLocal()
@@ -106,10 +73,10 @@ async def lifespan(_: FastAPI):
                 )
                 db.add(admin)
 
-            for name in ['ollama', 'metaapi', 'yfinance', 'qdrant', 'order-guardian']:
+            for name in ['ollama', 'metaapi', 'yfinance']:
                 exists = db.query(ConnectorConfig).filter(ConnectorConfig.connector_name == name).first()
                 if not exists:
-                    enabled = name != 'order-guardian'
+                    enabled = True
                     connector_settings: dict = {}
                     if name == 'ollama':
                         connector_settings = {'provider': settings.llm_provider}
@@ -274,7 +241,6 @@ async def run_updates_socket(websocket: WebSocket, run_id: int) -> None:
     poll_interval = max(float(settings.ws_run_poll_seconds), 0.5)
     last_signature: tuple[str, str] | None = None
     last_event_id = 0
-    store = RuntimeSessionStore()
     try:
         while True:
             db: Session = SessionLocal()
@@ -300,9 +266,17 @@ async def run_updates_socket(websocket: WebSocket, run_id: int) -> None:
                         }
                     )
                     last_signature = signature
-                events = store.list_events(run, after_id=last_event_id)
-                if events:
-                    for event_payload in events:
+                # Extract events from run.trace directly
+                trace_payload = run.trace if isinstance(run.trace, dict) else {}
+                fallback_events, current_last_event_id = _extract_runtime_events(trace_payload)
+                if current_last_event_id > last_event_id:
+                    for event_payload in fallback_events:
+                        try:
+                            event_id = int(event_payload.get('id', 0) or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        if event_id <= last_event_id:
+                            continue
                         await websocket.send_json(
                             {
                                 'type': 'event',
@@ -311,27 +285,7 @@ async def run_updates_socket(websocket: WebSocket, run_id: int) -> None:
                                 'event': event_payload,
                             }
                         )
-                    last_event_id = max(int(events[-1].get('seq', 0) or 0), last_event_id)
-                elif last_event_id == 0:
-                    trace_payload = run.trace if isinstance(run.trace, dict) else {}
-                    fallback_events, current_last_event_id = _extract_runtime_events(trace_payload)
-                    if current_last_event_id > last_event_id:
-                        for event_payload in fallback_events:
-                            try:
-                                event_id = int(event_payload.get('id', 0) or 0)
-                            except (TypeError, ValueError):
-                                continue
-                            if event_id <= last_event_id:
-                                continue
-                            await websocket.send_json(
-                                {
-                                    'type': 'event',
-                                    'id': run.id,
-                                    'updated_at': updated_at,
-                                    'event': event_payload,
-                                }
-                            )
-                        last_event_id = current_last_event_id
+                    last_event_id = current_last_event_id
                 if run.status in {'completed', 'failed'}:
                     await websocket.close(code=1000)
                     return

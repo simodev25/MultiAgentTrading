@@ -5,7 +5,7 @@ import { LoadingSpinner, SectionSkeleton } from '../components/LoadingIndicators
 import { useAuth } from '../hooks/useAuth';
 import {
   Download, FileJson, Layers, Radio, Server, Info, ChevronDown, Copy, Check,
-  LineChart, Newspaper, Globe, TrendingUp, TrendingDown, Wallet, ShieldAlert, Zap, CalendarClock, Shield, Bot,
+  LineChart, Newspaper, Globe, TrendingUp, TrendingDown, Wallet, ShieldAlert, Zap, Bot,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import type {
@@ -385,8 +385,6 @@ const AGENT_ICON_MAP: Record<string, { icon: LucideIcon; color: string }> = {
   'trader-agent':           { icon: Wallet,        color: '#06B6D4' },
   'risk-manager':           { icon: ShieldAlert,   color: '#F97316' },
   'execution-manager':      { icon: Zap,           color: '#EAB308' },
-  'schedule-planner-agent': { icon: CalendarClock, color: '#A78BFA' },
-  'order-guardian':         { icon: Shield,        color: '#14B8A6' },
 };
 const DEFAULT_AGENT_ICON = { icon: Bot, color: '#5A5E6E' };
 

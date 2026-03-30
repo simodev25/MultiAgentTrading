@@ -259,51 +259,6 @@ export interface MetaApiAccount {
   updated_at: string;
 }
 
-export interface OrderGuardianStatus {
-  enabled: boolean;
-  timeframe: string;
-  risk_percent: number;
-  max_positions_per_cycle: number;
-  sl_tp_min_delta: number;
-  last_run_at?: string | null;
-  last_summary?: Record<string, unknown>;
-  updated_at?: string | null;
-}
-
-export interface OrderGuardianAction {
-  position_id: string;
-  symbol: string;
-  side: 'BUY' | 'SELL' | string;
-  decision: 'BUY' | 'SELL' | 'HOLD' | string;
-  action: 'HOLD' | 'UPDATE_SL_TP' | 'EXIT';
-  reason: string;
-  current_stop_loss?: number | null;
-  current_take_profit?: number | null;
-  suggested_stop_loss?: number | null;
-  suggested_take_profit?: number | null;
-  executed: boolean;
-  execution: Record<string, unknown>;
-  analysis: Record<string, unknown>;
-}
-
-export interface OrderGuardianEvaluation {
-  enabled: boolean;
-  dry_run: boolean;
-  timeframe: string;
-  account_ref?: number | null;
-  account_label?: string | null;
-  account_id?: string | null;
-  provider?: string | null;
-  analyzed_positions: number;
-  actions: OrderGuardianAction[];
-  actions_executed: number;
-  skipped_reason?: string | null;
-  llm_report?: string | null;
-  llm_degraded?: boolean;
-  llm_prompt_meta?: Record<string, unknown>;
-  generated_at: string;
-}
-
 export interface PromptTemplate {
   id: number;
   agent_name: string;
@@ -349,45 +304,3 @@ export interface LlmModelUsage {
   last_seen?: string | null;
 }
 
-export interface ScheduledRun {
-  id: number;
-  name: string;
-  pair: string;
-  timeframe: string;
-  mode: ExecutionMode;
-  risk_percent: number;
-  metaapi_account_ref?: number | null;
-  cron_expression: string;
-  is_active: boolean;
-  last_run_at?: string | null;
-  next_run_at?: string | null;
-  last_error?: string | null;
-  created_by_id: number;
-  created_at: string;
-  updated_at: string;
-}
-
-export type RiskProfile = 'conservative' | 'balanced' | 'aggressive';
-
-export interface GeneratedSchedulePlanItem {
-  name: string;
-  pair: string;
-  timeframe: string;
-  mode: ExecutionMode;
-  risk_percent: number;
-  cron_expression: string;
-  metaapi_account_ref?: number | null;
-  rationale?: string | null;
-}
-
-export interface RegenerateSchedulesResult {
-  source: string;
-  llm_degraded: boolean;
-  llm_note?: string | null;
-  llm_report?: Record<string, unknown> | null;
-  replaced_count: number;
-  created_count: number;
-  generated_plans: GeneratedSchedulePlanItem[];
-  active_schedules: ScheduledRun[];
-  analysis: Record<string, unknown>;
-}

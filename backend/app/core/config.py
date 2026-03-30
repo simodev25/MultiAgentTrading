@@ -38,33 +38,14 @@ class Settings(BaseSettings):
     celery_result_backend: str = Field(default='redis://redis:6379/1', alias='CELERY_RESULT_BACKEND')
     celery_ignore_result: bool = Field(default=True, alias='CELERY_IGNORE_RESULT')
     celery_analysis_queue: str = Field(default='analysis', alias='CELERY_ANALYSIS_QUEUE')
-    celery_scheduler_queue: str = Field(default='scheduler', alias='CELERY_SCHEDULER_QUEUE')
     celery_backtest_queue: str = Field(default='backtests', alias='CELERY_BACKTEST_QUEUE')
     celery_task_acks_late: bool = Field(default=True, alias='CELERY_TASK_ACKS_LATE')
     celery_task_reject_on_worker_lost: bool = Field(default=True, alias='CELERY_TASK_REJECT_ON_WORKER_LOST')
     celery_task_track_started: bool = Field(default=True, alias='CELERY_TASK_TRACK_STARTED')
     celery_analysis_soft_time_limit_seconds: int = Field(default=300, alias='CELERY_ANALYSIS_SOFT_TIME_LIMIT_SECONDS')
     celery_analysis_time_limit_seconds: int = Field(default=360, alias='CELERY_ANALYSIS_TIME_LIMIT_SECONDS')
-    celery_scheduler_soft_time_limit_seconds: int = Field(default=20, alias='CELERY_SCHEDULER_SOFT_TIME_LIMIT_SECONDS')
-    celery_scheduler_time_limit_seconds: int = Field(default=30, alias='CELERY_SCHEDULER_TIME_LIMIT_SECONDS')
     celery_backtest_soft_time_limit_seconds: int = Field(default=1200, alias='CELERY_BACKTEST_SOFT_TIME_LIMIT_SECONDS')
     celery_backtest_time_limit_seconds: int = Field(default=1500, alias='CELERY_BACKTEST_TIME_LIMIT_SECONDS')
-    qdrant_url: str = Field(default='http://qdrant:6333', alias='QDRANT_URL')
-    qdrant_api_key: str = Field(default='', alias='QDRANT_API_KEY')
-    qdrant_collection: str = Field(default='forex_long_term_memory', alias='QDRANT_COLLECTION')
-    memory_vector_size: int = Field(default=64, alias='MEMORY_VECTOR_SIZE')
-    enable_pgvector: bool = Field(default=False, alias='ENABLE_PGVECTOR')
-    memori_enabled: bool = Field(default=False, alias='MEMORI_ENABLED')
-    memori_process_id: str = Field(default='forex-orchestrator', alias='MEMORI_PROCESS_ID')
-    memori_entity_prefix: str = Field(default='fx', alias='MEMORI_ENTITY_PREFIX')
-    memori_recall_limit: int = Field(default=3, ge=1, le=20, alias='MEMORI_RECALL_LIMIT')
-    memori_recall_min_similarity: float = Field(
-        default=0.12,
-        ge=0.0,
-        le=1.0,
-        alias='MEMORI_RECALL_MIN_SIMILARITY',
-    )
-    memori_store_run_memories: bool = Field(default=True, alias='MEMORI_STORE_RUN_MEMORIES')
 
     ollama_base_url: str = Field(default='https://ollama.com', alias='OLLAMA_BASE_URL')
     ollama_api_key: str = Field(default='', alias='OLLAMA_API_KEY')
@@ -185,15 +166,13 @@ class Settings(BaseSettings):
     ws_allow_query_token: bool = Field(default=True, alias='WS_ALLOW_QUERY_TOKEN')
     ws_run_poll_seconds: float = Field(default=2.0, alias='WS_RUN_POLL_SECONDS')
     ws_trading_orders_poll_seconds: float = Field(default=2.0, alias='WS_TRADING_ORDERS_POLL_SECONDS')
-    agentic_runtime_max_turns: int = Field(default=24, ge=8, le=64, alias='AGENTIC_RUNTIME_MAX_TURNS')
-    agentic_runtime_event_limit: int = Field(default=200, ge=20, le=1000, alias='AGENTIC_RUNTIME_EVENT_LIMIT')
-    agentic_runtime_history_limit: int = Field(default=100, ge=20, le=1000, alias='AGENTIC_RUNTIME_HISTORY_LIMIT')
+    debate_max_rounds: int = Field(default=3, alias='DEBATE_MAX_ROUNDS')
+    debate_min_rounds: int = Field(default=1, alias='DEBATE_MIN_ROUNDS')
+    agentscope_max_iters: int = Field(default=3, alias='AGENTSCOPE_MAX_ITERS')
     log_agent_steps: bool = Field(default=True, alias='LOG_AGENT_STEPS')
     backtest_agent_log_every: int = Field(default=25, alias='BACKTEST_AGENT_LOG_EVERY')
     backtest_enable_llm: bool = Field(default=False, alias='BACKTEST_ENABLE_LLM')
     backtest_llm_every: int = Field(default=24, alias='BACKTEST_LLM_EVERY')
-    scheduler_enabled: bool = Field(default=True, alias='SCHEDULER_ENABLED')
-    scheduler_batch_size: int = Field(default=20, ge=1, le=500, alias='SCHEDULER_BATCH_SIZE')
     orchestrator_parallel_workers: int = Field(default=4, ge=1, le=16, alias='ORCHESTRATOR_PARALLEL_WORKERS')
     orchestrator_autonomy_enabled: bool = Field(default=True, alias='ORCHESTRATOR_AUTONOMY_ENABLED')
     orchestrator_autonomy_max_cycles: int = Field(default=3, ge=1, le=5, alias='ORCHESTRATOR_AUTONOMY_MAX_CYCLES')
@@ -209,20 +188,7 @@ class Settings(BaseSettings):
         le=1.0,
         alias='ORCHESTRATOR_AUTONOMY_ACCEPT_MIN_EVIDENCE',
     )
-    orchestrator_autonomy_memory_limit_step: int = Field(
-        default=2,
-        ge=1,
-        le=10,
-        alias='ORCHESTRATOR_AUTONOMY_MEMORY_LIMIT_STEP',
-    )
-    orchestrator_autonomy_memory_limit_max: int = Field(
-        default=12,
-        ge=5,
-        le=50,
-        alias='ORCHESTRATOR_AUTONOMY_MEMORY_LIMIT_MAX',
-    )
     orchestrator_autonomy_model_boost_enabled: bool = Field(default=True, alias='ORCHESTRATOR_AUTONOMY_MODEL_BOOST_ENABLED')
-    orchestrator_memory_search_limit: int = Field(default=5, ge=1, le=50, alias='ORCHESTRATOR_MEMORY_SEARCH_LIMIT')
     orchestrator_second_pass_enabled: bool = Field(default=True, alias='ORCHESTRATOR_SECOND_PASS_ENABLED')
     orchestrator_second_pass_max_attempts: int = Field(default=1, ge=0, le=3, alias='ORCHESTRATOR_SECOND_PASS_MAX_ATTEMPTS')
     orchestrator_second_pass_min_combined_score: float = Field(

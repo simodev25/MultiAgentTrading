@@ -10,9 +10,7 @@ from app.db.models.run import AnalysisRun
 from app.db.models.user import User
 from app.db.session import get_db
 from app.schemas.run import CreateRunRequest, RunDetailOut, RunOut
-from app.services.agent_runtime import run_with_selected_runtime
-from app.services.agent_runtime.constants import AGENTIC_V2_RUNTIME
-from app.services.agent_runtime.session_store import RuntimeSessionStore
+from app.services.agentscope.registry import AgentScopeRegistry
 from app.services.market.symbols import canonical_symbol, get_market_symbols_config
 from app.tasks.run_analysis_task import execute as run_analysis_task
 
@@ -27,8 +25,6 @@ def _serialize_run(
     hydrate_runtime: bool = False,
 ) -> RunOut | RunDetailOut:
     trace = run.trace if isinstance(run.trace, dict) else {}
-    if hydrate_runtime:
-        trace = RuntimeSessionStore().hydrate_trace(run)
 
     payload = {
         'id': run.id,
@@ -36,7 +32,7 @@ def _serialize_run(
         'timeframe': run.timeframe,
         'mode': run.mode,
         'status': run.status,
-        'decision': run.decision,
+        'decision': run.decision if isinstance(run.decision, dict) else {},
         'trace': trace,
         'error': run.error,
         'created_by_id': run.created_by_id,
@@ -94,7 +90,7 @@ async def create_run(
         status='pending',
         trace={
             'requested_metaapi_account_ref': payload.metaapi_account_ref,
-            'runtime_engine': AGENTIC_V2_RUNTIME,
+            'runtime_engine': 'agentscope_v1',
         },
         created_by_id=user.id,
     )
@@ -116,9 +112,11 @@ async def create_run(
         except Exception:
             logger.warning('run enqueue failed; falling back to in-request execution run_id=%s', run.id, exc_info=True)
 
-    run = await run_with_selected_runtime(
+    run = await AgentScopeRegistry().execute(
         db,
         run,
+        pair=run.pair,
+        timeframe=run.timeframe,
         risk_percent=payload.risk_percent,
         metaapi_account_ref=payload.metaapi_account_ref,
     )

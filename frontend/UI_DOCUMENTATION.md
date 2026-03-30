@@ -346,7 +346,6 @@ Base URL: `VITE_API_URL` (default `http://localhost:8000/api/v1`)
 | **Prompts** | GET/POST | `/prompts` | Prompt templates |
 | **LLM** | GET | `/llm/summary` | LLM usage stats |
 | **Backtests** | GET/POST | `/backtests` | Backtest CRUD |
-| **Memory** | POST | `/memory/search` | Vector memory search |
 
 ### WebSocket Endpoints
 

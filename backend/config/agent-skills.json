@@ -29,7 +29,6 @@
       "Never interpret ambiguous news as directional_signal by default; when in doubt, prefer weak_signal or neutral.",
       "Always distinguish observed fact, direct relevance or linked relevance, probable effect on the primary asset, probable effect on the reference asset, transmission to price, and final implication on the instrument.",
       "Coherence between signal, impact, horizon, confidence and justification is mandatory; a bullish summary cannot rely mostly on bearish evidence.",
-      "Never use memory as superior evidence over a fresh, relevant and traceable news item; memory serves as secondary context only.",
       "If multiple retained items contradict each other, explicitly reduce directional strength instead of fabricating an artificial consensus.",
       "The final signal must reflect the quality of retained evidence, identifiable catalysts and transmission logic, not the simple count of headlines or sentiment hints."
     ],

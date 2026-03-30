@@ -7,19 +7,11 @@ from app.db.models.execution_order import ExecutionOrder
 from app.db.models.metaapi_account import MetaApiAccount
 from app.db.session import get_db
 from app.schemas.metaapi_account import MetaApiAccountCreate, MetaApiAccountOut, MetaApiAccountUpdate
-from app.schemas.order_guardian import (
-    OrderGuardianEvaluateRequest,
-    OrderGuardianEvaluationOut,
-    OrderGuardianStatusOut,
-    OrderGuardianStatusUpdate,
-)
 from app.schemas.order import ExecutionOrderOut
 from app.services.trading.metaapi_client import MetaApiClient
-from app.services.trading.order_guardian import OrderGuardianService
 
 router = APIRouter(prefix='/trading', tags=['trading'])
 metaapi_client = MetaApiClient()
-order_guardian_service = OrderGuardianService()
 
 
 @router.get('/orders', response_model=list[ExecutionOrderOut])
@@ -148,37 +140,6 @@ def _get_account_or_none(db: Session, account_ref: int | None) -> MetaApiAccount
     if not account:
         raise HTTPException(status_code=404, detail='MetaApi account not found')
     return account
-
-
-@router.get('/order-guardian', response_model=OrderGuardianStatusOut)
-def order_guardian_status(
-    db: Session = Depends(get_db),
-    _=Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN, Role.TRADER_OPERATOR, Role.ANALYST, Role.VIEWER)),
-) -> OrderGuardianStatusOut:
-    return OrderGuardianStatusOut.model_validate(order_guardian_service.get_status(db))
-
-
-@router.patch('/order-guardian', response_model=OrderGuardianStatusOut)
-def update_order_guardian_status(
-    payload: OrderGuardianStatusUpdate,
-    db: Session = Depends(get_db),
-    _=Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN, Role.TRADER_OPERATOR)),
-) -> OrderGuardianStatusOut:
-    return OrderGuardianStatusOut.model_validate(order_guardian_service.update_status(db, payload))
-
-
-@router.post('/order-guardian/evaluate', response_model=OrderGuardianEvaluationOut)
-async def evaluate_order_guardian(
-    payload: OrderGuardianEvaluateRequest,
-    db: Session = Depends(get_db),
-    _=Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN, Role.TRADER_OPERATOR)),
-) -> OrderGuardianEvaluationOut:
-    result = await order_guardian_service.evaluate(
-        db,
-        account_ref=payload.account_ref,
-        dry_run=payload.dry_run,
-    )
-    return OrderGuardianEvaluationOut.model_validate(result)
 
 
 @router.get('/account')

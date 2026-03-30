@@ -50,62 +50,6 @@ export const api = {
       body: JSON.stringify(payload),
     }, token),
   getRun: (token: string, runId: string) => request(`/runs/${runId}`, {}, token),
-  listSchedules: (token: string) => request('/schedules', {}, token),
-  createSchedule: (
-    token: string,
-    payload: {
-      name: string;
-      pair: string;
-      timeframe: string;
-      mode: string;
-      risk_percent: number;
-      cron_expression: string;
-      is_active: boolean;
-      metaapi_account_ref?: number | null;
-    },
-  ) =>
-    request('/schedules', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }, token),
-  updateSchedule: (
-    token: string,
-    scheduleId: number,
-    payload: {
-      name?: string;
-      pair?: string;
-      timeframe?: string;
-      mode?: string;
-      risk_percent?: number;
-      cron_expression?: string;
-      is_active?: boolean;
-      metaapi_account_ref?: number | null;
-    },
-  ) =>
-    request(`/schedules/${scheduleId}`, {
-      method: 'PATCH',
-      body: JSON.stringify(payload),
-    }, token),
-  deleteSchedule: (token: string, scheduleId: number) =>
-    request(`/schedules/${scheduleId}`, { method: 'DELETE' }, token),
-  runScheduleNow: (token: string, scheduleId: number) =>
-    request(`/schedules/${scheduleId}/run-now`, { method: 'POST' }, token),
-  regenerateActiveSchedules: (
-    token: string,
-    payload: {
-      target_count: number;
-      mode: string;
-      risk_profile: 'conservative' | 'balanced' | 'aggressive';
-      allowed_timeframes?: string[];
-      use_llm: boolean;
-      deactivate_existing?: boolean;
-      metaapi_account_ref?: number | null;
-    },
-  ) =>
-    request('/schedules/regenerate-active', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }, token),
   listOrders: (token: string) => request('/trading/orders', {}, token),
   listConnectors: (token: string) => request('/connectors', {}, token),
   getMarketSymbols: (token: string) => request('/connectors/market-symbols', {}, token),
@@ -147,32 +91,6 @@ export const api = {
     const suffix = search.toString();
     return request(`/trading/open-orders${suffix ? `?${suffix}` : ''}`, {}, token);
   },
-  getOrderGuardianStatus: (token: string) => request('/trading/order-guardian', {}, token),
-  updateOrderGuardianStatus: (
-    token: string,
-    payload: {
-      enabled?: boolean;
-      timeframe?: string;
-      risk_percent?: number;
-      max_positions_per_cycle?: number;
-      sl_tp_min_delta?: number;
-    },
-  ) =>
-    request('/trading/order-guardian', {
-      method: 'PATCH',
-      body: JSON.stringify(payload),
-    }, token),
-  evaluateOrderGuardian: (
-    token: string,
-    payload: {
-      account_ref?: number | null;
-      dry_run?: boolean;
-    } = {},
-  ) =>
-    request('/trading/order-guardian/evaluate', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }, token),
   listMetaApiDeals: (
     token: string,
     params: { account_ref?: number | null; days?: number; limit?: number; offset?: number } = {},
@@ -247,14 +165,6 @@ export const api = {
     payload: { pair: string; timeframe: string; start_date: string; end_date: string; strategy: string },
   ) =>
     request('/backtests', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }, token),
-  searchMemory: (
-    token: string,
-    payload: { pair: string; timeframe: string; query: string; limit: number },
-  ) =>
-    request('/memory/search', {
       method: 'POST',
       body: JSON.stringify(payload),
     }, token),

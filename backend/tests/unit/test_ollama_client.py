@@ -146,3 +146,32 @@ def test_normalized_api_key_prefers_runtime_connector_settings(monkeypatch) -> N
         lambda *_args, **_kwargs: 'runtime-key',
     )
     assert client._normalized_api_key() == 'runtime-key'
+
+
+def test_normalize_messages_sanitizes_assistant_tool_calls_for_ollama() -> None:
+    client = OllamaCloudClient()
+    normalized = client._normalize_messages(
+        'system',
+        'user',
+        messages=[
+            {
+                'role': 'assistant',
+                'content': None,
+                'tool_calls': [
+                    {
+                        'id': 'call_1',
+                        'type': 'function',
+                        'function': {
+                            'name': 'get_price',
+                            'arguments': '{"symbol":"EURUSD"',
+                        },
+                    }
+                ],
+            }
+        ],
+    )
+
+    assert normalized[0]['role'] == 'assistant'
+    assert normalized[0]['content'] == ''
+    assert normalized[0]['tool_calls'][0]['function']['name'] == 'get_price'
+    assert normalized[0]['tool_calls'][0]['function']['arguments'] == {}

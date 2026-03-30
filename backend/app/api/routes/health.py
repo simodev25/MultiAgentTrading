@@ -34,7 +34,6 @@ def health(db: Session = Depends(get_db)) -> HealthResponse:
     # Backward-compatible key for existing dashboards/checklists.
     services['ollama'] = 'configured' if llm_provider == 'ollama' and llm_configured else 'degraded'
     services['metaapi'] = 'configured' if bool(settings.metaapi_token and settings.metaapi_account_id) else 'degraded'
-    services['qdrant'] = 'configured' if bool(settings.qdrant_url) else 'degraded'
 
     status = 'ok' if services.get('postgres') == 'ok' else 'degraded'
     return HealthResponse(status=status, services=services)

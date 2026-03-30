@@ -330,7 +330,7 @@ class RiskEngine:
         pair: str | None = None,
         asset_class: str | None = None,
     ) -> RiskAssessment:
-        """Validate proposed SL/TP modification (used by OrderGuardian).
+        """Validate proposed SL/TP modification.
 
         Ensures the new levels are geometrically valid and within risk limits.
         """

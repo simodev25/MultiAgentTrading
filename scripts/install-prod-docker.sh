@@ -151,8 +151,8 @@ if [[ "$NO_BUILD" -eq 0 ]]; then
   docker compose "${COMPOSE_ARGS[@]}" build
 fi
 
-log "Starting stateful services (postgres/redis/rabbitmq/qdrant)..."
-docker compose "${COMPOSE_ARGS[@]}" up -d postgres redis rabbitmq qdrant
+log "Starting stateful services (postgres/redis/rabbitmq)..."
+docker compose "${COMPOSE_ARGS[@]}" up -d postgres redis rabbitmq
 
 log "Applying database migrations..."
 docker compose "${COMPOSE_ARGS[@]}" run --rm backend alembic upgrade head

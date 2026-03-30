@@ -23,12 +23,11 @@ from app.services.llm.model_selector import (
 from app.services.llm.provider_client import LlmClient
 from app.services.market.symbols import get_market_symbols_config, save_market_symbols_config
 from app.services.market.news_provider import MarketProvider
-from app.services.memory.vector_memory import VectorMemoryService
 from app.services.trading.metaapi_client import MetaApiClient
 
 router = APIRouter(prefix='/connectors', tags=['connectors'])
 
-SUPPORTED_CONNECTORS = ['ollama', 'metaapi', 'news', 'qdrant']
+SUPPORTED_CONNECTORS = ['ollama', 'metaapi', 'news']
 CONNECTOR_SECRET_DEFAULT_FIELDS: dict[str, dict[str, str]] = {
     'ollama': {
         'OLLAMA_API_KEY': 'ollama_api_key',
@@ -124,23 +123,6 @@ def _normalize_agent_skills(raw_skills: object) -> dict[str, list[str]]:
     return normalized
 
 
-def _normalize_bool_setting(value: object, *, fallback: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {'1', 'true', 'yes', 'on'}:
-            return True
-        if normalized in {'0', 'false', 'no', 'off'}:
-            return False
-    if isinstance(value, (int, float)):
-        if value == 1:
-            return True
-        if value == 0:
-            return False
-    return fallback
-
-
 def _sanitize_ollama_settings(raw_settings: dict) -> dict:
     settings = dict(raw_settings or {})
     raw_enabled = settings.get('agent_llm_enabled')
@@ -166,10 +148,6 @@ def _sanitize_ollama_settings(raw_settings: dict) -> dict:
         settings.get('decision_mode'),
         fallback=DEFAULT_DECISION_MODE,
     )
-    settings['memory_context_enabled'] = _normalize_bool_setting(
-        settings.get('memory_context_enabled'),
-        fallback=False,
-    )
     normalized_agent_tools = normalize_agent_tools_settings(settings.get('agent_tools'))
     settings['agent_tools'] = normalized_agent_tools
     settings['agent_tools_catalog'] = build_agent_tools_catalog(normalized_agent_tools)
@@ -181,7 +159,6 @@ def _bootstrap_and_sanitize_ollama_settings(raw_settings: dict, app_settings) ->
         **dict(raw_settings or {}),
         'provider': dict(raw_settings or {}).get('provider', app_settings.llm_provider),
         'decision_mode': dict(raw_settings or {}).get('decision_mode', app_settings.decision_mode),
-        'memory_context_enabled': dict(raw_settings or {}).get('memory_context_enabled', False),
     }
     bootstrapped_settings, _changed, _status = bootstrap_agent_skills_into_settings(
         current_settings=base_settings,
@@ -371,14 +348,6 @@ async def test_connector(
             'market': provider.get_market_snapshot(sample_symbol, 'H1'),
             'news': provider.get_news_context(sample_symbol),
         }
-    if connector_name == 'qdrant':
-        service = VectorMemoryService()
-        return {
-            'configured': bool(service._qdrant),
-            'collection': service.collection,
-            'vector_size': service.vector_size,
-        }
-
     raise HTTPException(status_code=404, detail='Unsupported connector')
 
 

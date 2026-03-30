@@ -177,7 +177,7 @@ def test_agent_skills_json_contains_no_french() -> None:
 # ---------------------------------------------------------------------------
 
 def test_mcp_tool_descriptions_contain_no_french() -> None:
-    from app.services.agent_runtime.mcp_trading_server import MCP_TOOL_CATALOG
+    from app.services.mcp.trading_server import MCP_TOOL_CATALOG
 
     for tool_id, meta in MCP_TOOL_CATALOG.items():
         description = meta.get('description', '')
@@ -243,14 +243,3 @@ def test_rendered_prompt_is_english() -> None:
         assert 'respond in english' in system.lower(), 'Language directive missing from rendered prompt'
         assert 'réponds en français' not in system.lower(), 'French directive found in rendered prompt'
 
-
-# ---------------------------------------------------------------------------
-# Test: Automation agent prompts
-# ---------------------------------------------------------------------------
-
-def test_schedule_planner_prompts_are_english() -> None:
-    from app.services.scheduler.automation_agent import FALLBACK_SYSTEM_PROMPT, FALLBACK_USER_PROMPT
-
-    for label, text in [('system', FALLBACK_SYSTEM_PROMPT), ('user', FALLBACK_USER_PROMPT)]:
-        violations = _contains_disallowed_french(text)
-        assert not violations, f'French text in schedule planner {label}: {violations}'

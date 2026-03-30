@@ -1,6 +1,6 @@
 # Multi-Agent Trading Platform
 
-A multi-agent AI trading system that orchestrates **8 specialized LLM agents** to produce consensus-driven trading decisions across multiple asset classes. Features real-time execution via MetaAPI, vector-based memory learning from past trades, and a React monitoring dashboard.
+A multi-agent AI trading system that orchestrates **8 specialized LLM agents** to produce consensus-driven trading decisions across multiple asset classes. Features real-time execution via MetaAPI and a React monitoring dashboard.
 
 ## Architecture
 
@@ -18,14 +18,14 @@ A multi-agent AI trading system that orchestrates **8 specialized LLM agents** t
 │  └──────┬───────┘  └──────────────┘  └───────────────────┘    │
 │         │                                                      │
 │  ┌──────▼──────────────────────────────────────────────┐       │
-│  │           MCP Tool Layer (19 tools)                 │       │
+│  │           MCP Tool Layer (18 tools)                 │       │
 │  │  Market Data · Technical Analysis · Fundamentals    │       │
-│  │  Decision Support · Memory Query                    │       │
+│  │  Decision Support                                   │       │
 │  └─────────────────────────────────────────────────────┘       │
 └────────────────────────────────────────────────────────────────┘
-         │              │              │              │
-    PostgreSQL       Redis        RabbitMQ         Qdrant
-    + pgvector       Cache       Celery Queue     Vector DB
+         │              │              │
+    PostgreSQL       Redis        RabbitMQ
+    Primary DB       Cache       Celery Queue
 ```
 
 ### Agent Pipeline
@@ -49,8 +49,7 @@ Each analysis run flows sequentially through 8 agents:
 - **Multiple LLM providers** — Ollama (local), OpenAI, Mistral
 - **Multi-source news** — NewsAPI, Finnhub, AlphaVantage, Trading Economics, LLM Web Search (Ollama/OpenAI)
 - **3 decision modes** — Conservative (strict convergence), Balanced (default, moderate), Permissive (opportunistic)
-- **Vector memory** — Outcome-weighted learning from past trades (pgvector + Qdrant)
-- **19 MCP tools** — Technical indicators, news, macro events, pattern detection, correlation analysis
+- **18 MCP tools** — Technical indicators, news, macro events, pattern detection, correlation analysis
 - **Paper & live trading** — MetaAPI broker integration with order guardian
 - **Backtesting** — Historical analysis with configurable LLM sampling
 - **Scheduled runs** — Automated analysis via Celery Beat
@@ -64,7 +63,7 @@ Each analysis run flows sequentially through 8 agents:
 |-------|-------------|
 | Frontend | React 19, TypeScript, Material-UI 7, Vite, Lightweight Charts |
 | Backend | FastAPI, SQLAlchemy 2, Alembic, Celery, LangChain |
-| Data | PostgreSQL 16 (pgvector), Redis 7, RabbitMQ 3, Qdrant |
+| Data | PostgreSQL 16, Redis 7, RabbitMQ 3 |
 | Infra | Docker Compose, Helm/K8s, Prometheus, Grafana |
 | LLM | Ollama, OpenAI, Mistral (configurable per deployment) |
 
@@ -111,9 +110,9 @@ make frontend-run         # http://localhost:5173
 make backend-test
 ```
 
-> **Note**: Local development still requires PostgreSQL, Redis, RabbitMQ, and Qdrant. You can start only the infrastructure services with:
+> **Note**: Local development still requires PostgreSQL, Redis, and RabbitMQ. You can start only the infrastructure services with:
 > ```bash
-> docker compose up postgres redis rabbitmq qdrant -d
+> docker compose up postgres redis rabbitmq -d
 > ```
 
 ## Configuration
@@ -128,7 +127,6 @@ All configuration is done via environment variables. See [`backend/.env.example`
 | `ALLOW_LIVE_TRADING` | Enable real broker execution | `false` |
 | `ENABLE_PAPER_EXECUTION` | Enable paper trading | `true` |
 | `METAAPI_TOKEN` | MetaAPI authentication token | — |
-| `ENABLE_PGVECTOR` | Use pgvector for memory embeddings | `true` |
 | `NEWSAPI_API_KEY` | NewsAPI key (news provider) | — |
 | `FINNHUB_API_KEY` | Finnhub key (news provider) | — |
 | `ALPHAVANTAGE_API_KEY` | AlphaVantage key (news provider) | — |
@@ -167,7 +165,6 @@ backend/
     services/
       orchestrator/        # 8-agent workflow engine
       agent_runtime/       # v2 agentic runtime with MCP tools
-      memory/              # Vector memory service
       llm/                 # LLM provider clients
       market/              # Market data, news providers, instrument classification
       trading/             # MetaAPI client, order guardian, execution

@@ -54,11 +54,6 @@ agentic_runtime_session_messages_total = Counter(
     'Messages sent to runtime sessions',
     ['resume_requested'],
 )
-agentic_runtime_memory_refresh_total = Counter(
-    'agentic_runtime_memory_refresh_total',
-    'Memory refresh cycles triggered by the runtime',
-    ['mode'],
-)
 llm_calls_total = Counter('llm_calls_total', 'Total LLM calls', ['provider', 'status'])
 llm_prompt_tokens_total = Counter('llm_prompt_tokens_total', 'Total prompt tokens consumed', ['provider', 'model'])
 llm_completion_tokens_total = Counter('llm_completion_tokens_total', 'Total completion tokens consumed', ['provider', 'model'])
@@ -121,25 +116,6 @@ mcp_tool_duration_seconds = Histogram(
 )
 
 # ---------------------------------------------------------------------------
-# Memory system metrics
-# ---------------------------------------------------------------------------
-memory_store_total = Counter(
-    'memory_store_total',
-    'Memory entries stored',
-    ['source_type', 'agent_id'],
-)
-memory_search_total = Counter(
-    'memory_search_total',
-    'Memory searches executed',
-    ['agent_id', 'outcome_filter'],
-)
-memory_outcome_backfill_total = Counter(
-    'memory_outcome_backfill_total',
-    'Outcome weight backfill operations',
-    ['outcome_label'],
-)
-
-# ---------------------------------------------------------------------------
 # Risk engine metrics
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
@@ -166,9 +142,4 @@ risk_evaluation_total = Counter(
     'risk_evaluation_total',
     'Risk engine evaluations',
     ['accepted', 'asset_class', 'mode'],
-)
-order_guardian_actions_total = Counter(
-    'order_guardian_actions_total',
-    'Order guardian actions taken',
-    ['action', 'executed'],
 )

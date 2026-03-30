@@ -67,18 +67,6 @@ def test_sanitize_ollama_settings_normalizes_decision_mode() -> None:
     fallback = _sanitize_ollama_settings({'provider': 'ollama', 'decision_mode': 'invalid-value'})
     assert fallback['decision_mode'] == 'balanced'
 
-
-def test_sanitize_ollama_settings_normalizes_memory_context_flag() -> None:
-    enabled = _sanitize_ollama_settings({'provider': 'ollama', 'memory_context_enabled': 'true'})
-    assert enabled['memory_context_enabled'] is True
-
-    disabled = _sanitize_ollama_settings({'provider': 'ollama', 'memory_context_enabled': 'off'})
-    assert disabled['memory_context_enabled'] is False
-
-    fallback = _sanitize_ollama_settings({'provider': 'ollama'})
-    assert fallback['memory_context_enabled'] is False
-
-
 def test_sanitize_ollama_settings_adds_agent_tools_defaults_and_catalog() -> None:
     result = _sanitize_ollama_settings({'provider': 'ollama'})
 

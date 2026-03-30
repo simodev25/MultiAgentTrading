@@ -116,8 +116,6 @@ class MarketProvider:
         'deduplicate': True,
         'deduplicate_on': ['title', 'url', 'published_at'],
         'minimum_relevance_score': 0.35,
-        'fallback_to_memory_when_no_fresh_news': True,
-        'memory_is_secondary_evidence_only': True,
         'treat_no_news_as_no_evidence': True,
     }
     currency_aliases: dict[str, tuple[str, ...]] = {
