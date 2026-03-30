@@ -728,35 +728,7 @@ export function OpenOrdersChart({
         <p className="text-text-muted text-xs font-mono py-8 text-center">Chart error: {chartRenderError}</p>
       ) : hasRenderableData ? (
         <div className="relative w-full rounded-lg overflow-hidden" style={{ height: '520px' }}>
-          {/* ── TradingView-style price overlay ── */}
-          {priceOverlay && (
-            <div className="absolute top-3 left-4 z-10 flex items-center gap-4 pointer-events-none select-none">
-              <div className="flex items-center gap-2.5">
-                {displaySymbol && (
-                  <span className="text-[15px] font-bold tracking-wide text-white/90">
-                    {displaySymbol.replace('.PRO', '').replace('.pro', '').replace(/([A-Z]{3})([A-Z]{3})/, '$1/$2')}
-                  </span>
-                )}
-                <span className="text-[9px] font-bold tracking-wider px-2 py-0.5 rounded bg-[#26a69a] text-white">
-                  LIVE_FEED
-                </span>
-              </div>
-              <div className="flex items-center gap-6 text-[13px] font-mono">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] text-[#787b86] uppercase tracking-wider">Price</span>
-                  <span className="text-[#26a69a] font-semibold">
-                    {formatPrice(priceOverlay.livePrice)}
-                  </span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] text-[#787b86] uppercase tracking-wider">Delta_24H</span>
-                  <span className={`font-semibold ${priceOverlay.delta24h >= 0 ? 'text-[#26a69a]' : 'text-[#ef5350]'}`}>
-                    {priceOverlay.delta24h >= 0 ? '+' : ''}{priceOverlay.delta24h.toFixed(2)}%
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
+          {/* Price overlay removed — info is now in the LIVE_CHART header bar */}
           <div
             aria-label="TradingView chart for open orders"
             className="w-full h-full"
