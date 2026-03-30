@@ -4,7 +4,7 @@ import { Layout } from './components/Layout';
 import { RouteLoader } from './components/LoadingIndicators';
 import { AuthProvider, useAuth } from './hooks/useAuth';
 
-const DashboardPage = lazy(() => import('./pages/DashboardPage').then((module) => ({ default: module.DashboardPage })));
+const TerminalPage = lazy(() => import('./pages/TerminalPage').then((module) => ({ default: module.TerminalPage })));
 const BacktestsPage = lazy(() => import('./pages/BacktestsPage').then((module) => ({ default: module.BacktestsPage })));
 const RunDetailPage = lazy(() => import('./pages/RunDetailPage').then((module) => ({ default: module.RunDetailPage })));
 const OrdersPage = lazy(() => import('./pages/OrdersPage').then((module) => ({ default: module.OrdersPage })));
@@ -34,7 +34,7 @@ function AppRoutes() {
       <Route path="/login" element={<LoginPage />} />
       <Route
         path="/"
-        element={withLayout(<DashboardPage />)}
+        element={withLayout(<TerminalPage />)}
       />
       <Route
         path="/backtests"

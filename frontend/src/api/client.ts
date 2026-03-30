@@ -189,3 +189,12 @@ export function wsTradingOrdersUrl(token?: string): string {
   }
   return url;
 }
+
+export function wsMarketPricesUrl(symbol: string, token?: string): string {
+  const apiBase = BASE_URL.replace('/api/v1', '');
+  const wsBase = apiBase.replace('http://', 'ws://').replace('https://', 'wss://');
+  const params = new URLSearchParams();
+  if (symbol) params.set('symbol', symbol);
+  if (token) params.set('token', token);
+  return `${wsBase}/ws/market/prices?${params.toString()}`;
+}

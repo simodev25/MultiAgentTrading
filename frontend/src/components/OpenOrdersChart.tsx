@@ -24,6 +24,7 @@ interface OpenOrdersChartProps {
   selectedTicket?: string | null;
   selectedSymbol?: string | null;
   displaySymbol?: string | null;
+  colorScheme?: 'classic' | 'pro';
 }
 
 interface CandlePoint {
@@ -181,6 +182,7 @@ export function OpenOrdersChart({
   selectedTicket = null,
   selectedSymbol = null,
   displaySymbol = null,
+  colorScheme = 'classic',
 }: OpenOrdersChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [chartRenderError, setChartRenderError] = useState<string | null>(null);
@@ -481,14 +483,13 @@ export function OpenOrdersChart({
         },
       });
 
+      const candleColors = colorScheme === 'pro'
+        ? { upColor: '#ffffff', downColor: '#000000', borderUpColor: '#26a69a', borderDownColor: '#ef5350', wickUpColor: '#26a69a', wickDownColor: '#ef5350' }
+        : { upColor: '#26a69a', downColor: '#ef5350', borderUpColor: '#26a69a', borderDownColor: '#ef5350', wickUpColor: '#26a69a', wickDownColor: '#ef5350' };
+
       const marketSeries = chart.addSeries(CandlestickSeries, {
-        upColor: '#26a69a',
-        downColor: '#ef5350',
+        ...candleColors,
         borderVisible: true,
-        borderUpColor: '#26a69a',
-        borderDownColor: '#ef5350',
-        wickUpColor: '#26a69a',
-        wickDownColor: '#ef5350',
         priceLineColor: '#26a69a',
         lastValueVisible: true,
         title: '',
@@ -578,24 +579,47 @@ export function OpenOrdersChart({
         },
       });
 
+      // Resolve the current market price for proximity detection
+      const livePrice = marketCandleData.length > 0 ? marketCandleData[marketCandleData.length - 1].close : null;
+
       const addHorizontalLevels = (
         levels: number[],
         title: string,
         color: string,
         style: LineStyle,
+        entryLevels?: number[],
       ) => {
         for (const level of levels) {
+          // Check if price is within 50% of entry-to-level distance
+          let isClose = false;
+          if (livePrice != null && entryLevels && entryLevels.length > 0) {
+            for (const entry of entryLevels) {
+              const entryToLevel = Math.abs(entry - level);
+              if (entryToLevel > 0) {
+                const priceToLevel = Math.abs(livePrice - level);
+                const ratio = priceToLevel / entryToLevel;
+                if (ratio < 0.5) {
+                  isClose = true;
+                  break;
+                }
+              }
+            }
+          }
+
+          const effectiveColor = isClose ? (title.includes('S/L') ? '#ff2050' : '#00ff88') : color;
+          const effectiveWidth = isClose ? 2 : 1;
+
           const levelSeries = chart!.addSeries(LineSeries, {
-            color,
-            lineWidth: 1,
+            color: effectiveColor,
+            lineWidth: effectiveWidth,
             lineStyle: style,
             lineVisible: true,
             pointMarkersVisible: false,
             priceLineVisible: true,
-            priceLineColor: color,
+            priceLineColor: effectiveColor,
             lastValueVisible: false,
             crosshairMarkerVisible: false,
-            title,
+            title: isClose ? `${title} !!` : title,
             priceFormat: {
               type: 'price',
               precision: chartPriceFormat.precision,
@@ -640,10 +664,12 @@ export function OpenOrdersChart({
       if (positionCurrentData.length > 0) positionCurrentSeries.setData(positionCurrentData);
       if (pendingOpenData.length > 0) pendingOpenSeries.setData(pendingOpenData);
       if (pendingCurrentData.length > 0) pendingCurrentSeries.setData(pendingCurrentData);
-      addHorizontalLevels(positionStopLossLevels, 'Positions - S/L', '#ff5f7f', LineStyle.Dashed);
-      addHorizontalLevels(positionTakeProfitLevels, 'Positions - T/P', '#67f0a5', LineStyle.Dashed);
-      addHorizontalLevels(pendingStopLossLevels, 'Orders - S/L', '#ff8b5b', LineStyle.Dotted);
-      addHorizontalLevels(pendingTakeProfitLevels, 'Orders - T/P', '#9dee71', LineStyle.Dotted);
+      const positionEntryPrices = positionOpenData.map((p) => p.value);
+      const pendingEntryPrices = pendingOpenData.map((p) => p.value);
+      addHorizontalLevels(positionStopLossLevels, 'Positions - S/L', '#ff5f7f', LineStyle.Dashed, positionEntryPrices);
+      addHorizontalLevels(positionTakeProfitLevels, 'Positions - T/P', '#67f0a5', LineStyle.Dashed, positionEntryPrices);
+      addHorizontalLevels(pendingStopLossLevels, 'Orders - S/L', '#ff8b5b', LineStyle.Dotted, pendingEntryPrices);
+      addHorizontalLevels(pendingTakeProfitLevels, 'Orders - T/P', '#9dee71', LineStyle.Dotted, pendingEntryPrices);
 
       for (const link of positionLinks) {
         const linkSeries = chart.addSeries(LineSeries, {
@@ -702,6 +728,7 @@ export function OpenOrdersChart({
   }, [
     chartPriceFormat.minMove,
     chartPriceFormat.precision,
+    colorScheme,
     hasRenderableData,
     marketCandleData,
     marketVolumeData,
@@ -728,35 +755,7 @@ export function OpenOrdersChart({
         <p className="text-text-muted text-xs font-mono py-8 text-center">Chart error: {chartRenderError}</p>
       ) : hasRenderableData ? (
         <div className="relative w-full rounded-lg overflow-hidden" style={{ height: '520px' }}>
-          {/* ── TradingView-style price overlay ── */}
-          {priceOverlay && (
-            <div className="absolute top-3 left-4 z-10 flex items-center gap-4 pointer-events-none select-none">
-              <div className="flex items-center gap-2.5">
-                {displaySymbol && (
-                  <span className="text-[15px] font-bold tracking-wide text-white/90">
-                    {displaySymbol.replace('.PRO', '').replace('.pro', '').replace(/([A-Z]{3})([A-Z]{3})/, '$1/$2')}
-                  </span>
-                )}
-                <span className="text-[9px] font-bold tracking-wider px-2 py-0.5 rounded bg-[#26a69a] text-white">
-                  LIVE_FEED
-                </span>
-              </div>
-              <div className="flex items-center gap-6 text-[13px] font-mono">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] text-[#787b86] uppercase tracking-wider">Price</span>
-                  <span className="text-[#26a69a] font-semibold">
-                    {formatPrice(priceOverlay.livePrice)}
-                  </span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] text-[#787b86] uppercase tracking-wider">Delta_24H</span>
-                  <span className={`font-semibold ${priceOverlay.delta24h >= 0 ? 'text-[#26a69a]' : 'text-[#ef5350]'}`}>
-                    {priceOverlay.delta24h >= 0 ? '+' : ''}{priceOverlay.delta24h.toFixed(2)}%
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
+          {/* Price overlay removed — info is now in the LIVE_CHART header bar */}
           <div
             aria-label="TradingView chart for open orders"
             className="w-full h-full"

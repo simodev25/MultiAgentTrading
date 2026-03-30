@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { api } from '../api/client';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { api, wsMarketPricesUrl } from '../api/client';
 import type { ExecutionOrder, MarketCandle, MetaApiOpenOrder, MetaApiPosition } from '../types';
 import { normalizeSymbol, resolveTicket, symbolBase, symbolsLikelyMatch } from '../utils/tradingSymbols';
 
@@ -54,6 +54,7 @@ export function useOpenOrdersMarketChart(
   const [marketLoading, setMarketLoading] = useState(false);
   const [marketRefreshTick, setMarketRefreshTick] = useState(0);
   const [chartClockMs, setChartClockMs] = useState(() => Date.now());
+  const [wsStreamConnected, setWsStreamConnected] = useState(false);
 
   const lastAutoRefreshBoundaryRef = useRef<number | null>(null);
   const lastMarketQueryKeyRef = useRef<string | null>(null);
@@ -140,7 +141,10 @@ export function useOpenOrdersMarketChart(
       }
       if (currentBoundary > lastAutoRefreshBoundaryRef.current) {
         lastAutoRefreshBoundaryRef.current = currentBoundary;
-        setMarketRefreshTick((prev) => prev + 1);
+        // Skip polling refresh when WebSocket streaming is active
+        if (!wsStreamConnected) {
+          setMarketRefreshTick((prev) => prev + 1);
+        }
       }
     }, 1000);
 
@@ -216,6 +220,92 @@ export function useOpenOrdersMarketChart(
     };
   }, [chartSelection.symbol, chartSelection.timeframe, token, accountRef, marketRefreshTick]);
 
+  // ── WebSocket streaming: update last candle with live ticks ──
+  useEffect(() => {
+    const symbol = chartSelection.symbol;
+    if (!token || !symbol) return;
+
+    const WS_RECONNECT_MS = 3000;
+    let cancelled = false;
+    let ws: WebSocket | null = null;
+    let reconnectTimer: number | null = null;
+
+    const scheduleReconnect = () => {
+      if (cancelled) return;
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        connect();
+      }, WS_RECONNECT_MS);
+    };
+
+    const connect = () => {
+      if (cancelled) return;
+      ws = new WebSocket(wsMarketPricesUrl(symbol, token));
+
+      ws.onopen = () => {
+        if (!cancelled) setWsStreamConnected(true);
+      };
+
+      ws.onmessage = (event: MessageEvent<string>) => {
+        let msg: Record<string, unknown>;
+        try {
+          msg = JSON.parse(event.data) as Record<string, unknown>;
+        } catch {
+          return;
+        }
+
+        if (msg.type === 'tick') {
+          const bid = Number(msg.bid);
+          const ask = Number(msg.ask);
+          if (!Number.isFinite(bid) || !Number.isFinite(ask)) return;
+          const mid = (bid + ask) / 2;
+
+          // Update the last candle's close/high/low
+          setMarketCandles((prev) => {
+            if (prev.length === 0) return prev;
+            const last = prev[prev.length - 1];
+            const updated: MarketCandle = {
+              ...last,
+              close: mid,
+              high: Math.max(last.high, mid),
+              low: Math.min(last.low, mid),
+            };
+            return [...prev.slice(0, -1), updated];
+          });
+        }
+
+        if (msg.type === 'candle') {
+          const candle: MarketCandle = {
+            time: String(msg.time ?? ''),
+            open: Number(msg.open),
+            high: Number(msg.high),
+            low: Number(msg.low),
+            close: Number(msg.close),
+          };
+          setMarketCandles((prev) => [...prev, candle]);
+        }
+      };
+
+      ws.onerror = () => {
+        if (ws && ws.readyState < WebSocket.CLOSING) ws.close();
+      };
+
+      ws.onclose = () => {
+        setWsStreamConnected(false);
+        if (!cancelled) scheduleReconnect();
+      };
+    };
+
+    connect();
+
+    return () => {
+      cancelled = true;
+      setWsStreamConnected(false);
+      if (reconnectTimer != null) window.clearTimeout(reconnectTimer);
+      if (ws && ws.readyState < WebSocket.CLOSING) ws.close();
+    };
+  }, [token, chartSelection.symbol]);
+
   return {
     selectedChartTicket,
     setSelectedChartTicket,
@@ -228,5 +318,6 @@ export function useOpenOrdersMarketChart(
     marketLoading,
     chartCountdownLabel,
     chartNextRefreshAtLabel,
+    wsStreamConnected,
   };
 }
