@@ -508,7 +508,7 @@ export function OrdersPage() {
               <span className="text-[10px] text-text-dim">{chartSelection.timeframe ?? 'H1'}</span>
               <span className="text-[10px] text-text-dim">|</span>
               <span className="text-[10px] font-mono text-green-400">
-                {openPositions[0]?.currentPrice?.toFixed(5) ?? '-'}
+                {marketCandles.length > 0 ? marketCandles[marketCandles.length - 1].close.toFixed(5) : '-'}
               </span>
               {wsStreamConnected ? (
                 <Wifi className="w-3 h-3 text-green-400" title="Live stream connected" />
