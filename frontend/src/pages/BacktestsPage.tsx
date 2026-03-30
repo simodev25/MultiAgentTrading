@@ -125,6 +125,146 @@ function TradeRow({ trade, idx }: { trade: { side: string; entry_price: number; 
 }
 
 
+const TRADES_PER_PAGE = 10;
+
+// ── Position Distribution donut ──
+function PositionDistribution({ trades }: { trades: Array<{ side: string; pnl_pct: number }> }) {
+  const longs = trades.filter(t => t.side?.toUpperCase() === 'BUY');
+  const shorts = trades.filter(t => t.side?.toUpperCase() === 'SELL');
+  const total = trades.length || 1;
+  const longPct = (longs.length / total) * 100;
+  const shortPct = (shorts.length / total) * 100;
+  const longWins = longs.filter(t => t.pnl_pct >= 0).length;
+  const shortWins = shorts.filter(t => t.pnl_pct >= 0).length;
+
+  // SVG donut
+  const r = 60;
+  const cx = 80;
+  const cy = 80;
+  const circumference = 2 * Math.PI * r;
+  const longArc = (longPct / 100) * circumference;
+  const shortArc = circumference - longArc;
+
+  return (
+    <div className="hw-surface p-0 overflow-hidden">
+      <div className="flex items-center gap-3 px-4 py-2.5 border-b border-border">
+        <Target className="w-3.5 h-3.5 text-accent" />
+        <span className="text-[11px] font-bold tracking-[0.12em] text-accent uppercase">POSITION_DISTRIBUTION</span>
+      </div>
+      <div className="p-5 flex items-center gap-8">
+        {/* Donut */}
+        <svg width="160" height="160" viewBox="0 0 160 160">
+          <circle cx={cx} cy={cy} r={r} fill="none" stroke="#1e222d" strokeWidth="18" />
+          <circle
+            cx={cx} cy={cy} r={r} fill="none"
+            stroke="#22c55e" strokeWidth="18"
+            strokeDasharray={`${longArc} ${circumference}`}
+            strokeDashoffset="0"
+            transform={`rotate(-90 ${cx} ${cy})`}
+          />
+          <circle
+            cx={cx} cy={cy} r={r} fill="none"
+            stroke="#ef4444" strokeWidth="18"
+            strokeDasharray={`${shortArc} ${circumference}`}
+            strokeDashoffset={`${-longArc}`}
+            transform={`rotate(-90 ${cx} ${cy})`}
+          />
+          <text x={cx} y={cy - 5} textAnchor="middle" className="fill-text" fontSize="18" fontWeight="bold">{total}</text>
+          <text x={cx} y={cy + 12} textAnchor="middle" className="fill-text-dim" fontSize="9">TRADES</text>
+        </svg>
+
+        {/* Stats */}
+        <div className="flex flex-col gap-3 flex-1">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="w-3 h-3 rounded-full bg-green-500" />
+              <span className="text-[11px] font-bold text-green-400">LONG</span>
+            </div>
+            <span className="text-[11px] font-mono text-text">{longs.length} ({longPct.toFixed(0)}%)</span>
+            <span className="text-[10px] font-mono text-text-dim">Win: {longWins}/{longs.length}</span>
+          </div>
+          <div className="w-full h-1.5 rounded-full bg-border overflow-hidden">
+            <div className="h-full bg-green-500 rounded-full" style={{ width: `${longPct}%` }} />
+          </div>
+
+          <div className="flex items-center justify-between mt-2">
+            <div className="flex items-center gap-2">
+              <div className="w-3 h-3 rounded-full bg-red-500" />
+              <span className="text-[11px] font-bold text-red-400">SHORT</span>
+            </div>
+            <span className="text-[11px] font-mono text-text">{shorts.length} ({shortPct.toFixed(0)}%)</span>
+            <span className="text-[10px] font-mono text-text-dim">Win: {shortWins}/{shorts.length}</span>
+          </div>
+          <div className="w-full h-1.5 rounded-full bg-border overflow-hidden">
+            <div className="h-full bg-red-500 rounded-full" style={{ width: `${shortPct}%` }} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Trade History with pagination ──
+function TradeHistoryTable({ trades }: { trades: Array<{ side: string; entry_price: number; exit_price: number; pnl_pct: number; entry_time: string; outcome: string }> }) {
+  const [page, setPage] = useState(1);
+  const totalPages = Math.max(1, Math.ceil(trades.length / TRADES_PER_PAGE));
+  const start = (page - 1) * TRADES_PER_PAGE;
+  const pageTrades = trades.slice(start, start + TRADES_PER_PAGE);
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
+
+  return (
+    <ExpansionPanel title="TRADE_HISTORY" id="backtest-trades">
+      <div className="overflow-x-auto">
+        <table className="w-full">
+          <thead>
+            <tr className="border-b border-border">
+              <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">ID</th>
+              <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Type</th>
+              <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Entry Price</th>
+              <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Exit Price</th>
+              <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">P&L</th>
+              <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Status</th>
+              <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Date</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pageTrades.map((trade, i) => (
+              <TradeRow key={start + i} trade={trade} idx={start + i} />
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {/* Pagination */}
+      <div className="flex items-center justify-between px-3 py-2 border-t border-border">
+        <span className="text-[10px] text-text-dim">
+          {start + 1}-{Math.min(start + TRADES_PER_PAGE, trades.length)} of {trades.length}
+        </span>
+        <div className="flex items-center gap-2">
+          <button
+            className="text-[10px] text-text-muted hover:text-text disabled:opacity-30"
+            disabled={page <= 1}
+            onClick={() => setPage(p => p - 1)}
+          >
+            Previous
+          </button>
+          <span className="text-[10px] text-text-dim">Page {page} / {totalPages}</span>
+          <button
+            className="text-[10px] text-text-muted hover:text-text disabled:opacity-30"
+            disabled={page >= totalPages}
+            onClick={() => setPage(p => p + 1)}
+          >
+            Next
+          </button>
+        </div>
+      </div>
+    </ExpansionPanel>
+  );
+}
+
+
 export function BacktestsPage() {
   const { token } = useAuth();
   const { instruments } = useMarketSymbols(token);
@@ -408,30 +548,15 @@ export function BacktestsPage() {
             </div>
           )}
 
-          {/* Trade history */}
+          {/* Position distribution + trade history side by side */}
           {trades.length > 0 && (
-            <ExpansionPanel title="TRADE_HISTORY" id="backtest-trades">
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead>
-                    <tr className="border-b border-border">
-                      <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">ID</th>
-                      <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Type</th>
-                      <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Entry Price</th>
-                      <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Exit Price</th>
-                      <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">P&L</th>
-                      <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Status</th>
-                      <th className="px-3 py-2 text-left text-[9px] tracking-widest text-text-muted uppercase">Date</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {trades.map((trade, i) => (
-                      <TradeRow key={i} trade={trade} idx={i} />
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </ExpansionPanel>
+            <>
+              {/* Position distribution donut */}
+              <PositionDistribution trades={trades} />
+
+              {/* Trade history with pagination */}
+              <TradeHistoryTable trades={trades} />
+            </>
           )}
         </div>
       )}
