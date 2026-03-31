@@ -142,6 +142,18 @@ AGENT_TOOL_DEFINITIONS: dict[str, dict[str, Any]] = {
         'enabled_by_default': True,
         'reference_origin': 'mcp_trading_server.position_size_calculator',
     },
+    'strategy_templates_info': {
+        'label': 'Strategy Templates Info',
+        'description': "List available strategy templates with parameters and best use cases.",
+        'enabled_by_default': True,
+        'reference_origin': 'mcp_trading_server.strategy_templates_info',
+    },
+    'strategy_builder': {
+        'label': 'Strategy Builder',
+        'description': "Build and validate a strategy definition from a chosen template and parameters.",
+        'enabled_by_default': True,
+        'reference_origin': 'mcp_trading_server.strategy_builder',
+    },
 }
 DEFAULT_AGENT_ALLOWED_TOOLS: dict[str, tuple[str, ...]] = {
     'technical-analyst': (
@@ -188,6 +200,13 @@ DEFAULT_AGENT_ALLOWED_TOOLS: dict[str, tuple[str, ...]] = {
         'position_size_calculator',
     ),
     'agentic-runtime-planner': (),
+    'strategy-designer': (
+        'indicator_bundle',
+        'market_regime_context',
+        'volatility_context',
+        'strategy_templates_info',
+        'strategy_builder',
+    ),
 }
 
 

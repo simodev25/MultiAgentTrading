@@ -5,8 +5,10 @@ import {
   LineSeries,
   LineStyle,
   createChart,
+  createSeriesMarkers,
   type IChartApi,
   type ISeriesApi,
+  type ISeriesMarkersPluginApi,
   type UTCTimestamp,
 } from 'lightweight-charts';
 import { api, wsMarketPricesUrl } from '../api/client';
@@ -14,12 +16,30 @@ import { useAuth } from '../hooks/useAuth';
 import type { MarketCandle } from '../types';
 import { TrendingUp, RefreshCw, Wifi, WifiOff } from 'lucide-react';
 
+export interface IndicatorOverlay {
+  name: string;
+  color: string;
+  data: Array<{ time: string; value: number }>;
+}
+
+export interface SignalMarker {
+  time: string;
+  price: number;
+  side: 'BUY' | 'SELL';
+}
+
 interface TradingViewChartProps {
   symbol: string;
   timeframe: string;
   accountRef?: number | null;
   /** Optional price levels to draw on chart */
   levels?: PriceLevel[];
+  /** Optional indicator line overlays (EMA, Bollinger, etc.) */
+  overlays?: IndicatorOverlay[];
+  /** Optional BUY/SELL signal markers */
+  signals?: SignalMarker[];
+  /** Strategy name to display in header */
+  strategyName?: string;
 }
 
 export interface PriceLevel {
@@ -49,12 +69,14 @@ const LINE_STYLES: Record<string, number> = {
   dotted: LineStyle.Dotted,
 };
 
-function TradingViewChartInner({ symbol, timeframe, accountRef, levels = [] }: TradingViewChartProps) {
+function TradingViewChartInner({ symbol, timeframe, accountRef, levels = [], overlays = [], signals = [], strategyName }: TradingViewChartProps) {
   const { token } = useAuth();
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const levelSeriesRef = useRef<ISeriesApi<'Line'>[]>([]);
+  const overlaySeriesRef = useRef<ISeriesApi<'Line'>[]>([]);
+  const markersPluginRef = useRef<ISeriesMarkersPluginApi<number> | null>(null);
   const [loading, setLoading] = useState(false);
   const [lastPrice, setLastPrice] = useState<number | null>(null);
   const [candleCount, setCandleCount] = useState(0);
@@ -310,11 +332,81 @@ function TradingViewChartInner({ symbol, timeframe, accountRef, levels = [] }: T
     }
   }, [levels]);
 
+  // Draw indicator overlays (EMA lines, Bollinger bands, etc.)
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+
+    // Remove old overlay lines
+    for (const series of overlaySeriesRef.current) {
+      try { chart.removeSeries(series); } catch { /* ignore */ }
+    }
+    overlaySeriesRef.current = [];
+
+    if (!overlays.length) return;
+
+    for (const overlay of overlays) {
+      const series = chart.addSeries(LineSeries, {
+        color: overlay.color,
+        lineWidth: 1,
+        title: overlay.name,
+        crosshairMarkerVisible: false,
+        lastValueVisible: false,
+        priceLineVisible: false,
+      });
+
+      const points = overlay.data
+        .map((d) => {
+          const t = toEpochSeconds(d.time);
+          return t !== null ? { time: t as UTCTimestamp, value: d.value } : null;
+        })
+        .filter((p): p is { time: UTCTimestamp; value: number } => p !== null)
+        .sort((a, b) => Number(a.time) - Number(b.time));
+
+      series.setData(points);
+      overlaySeriesRef.current.push(series);
+    }
+  }, [overlays]);
+
+  // Draw BUY/SELL signal markers on the candle series
+  useEffect(() => {
+    // Clean up previous markers plugin
+    if (markersPluginRef.current) {
+      markersPluginRef.current.setMarkers([]);
+      markersPluginRef.current = null;
+    }
+
+    if (!candleSeriesRef.current || !signals.length) return;
+
+    const markerData = signals
+      .map((s) => {
+        const t = toEpochSeconds(s.time);
+        if (t === null) return null;
+        return {
+          time: t as UTCTimestamp,
+          position: s.side === 'BUY' ? ('belowBar' as const) : ('aboveBar' as const),
+          color: s.side === 'BUY' ? '#22c55e' : '#ef4444',
+          shape: s.side === 'BUY' ? ('arrowUp' as const) : ('arrowDown' as const),
+          text: s.side,
+        };
+      })
+      .filter((m): m is NonNullable<typeof m> => m !== null)
+      .sort((a, b) => Number(a.time) - Number(b.time));
+
+    markersPluginRef.current = createSeriesMarkers(candleSeriesRef.current, markerData);
+  }, [signals]);
+
   return (
     <div className="hw-surface p-0 overflow-hidden">
       <div className="flex items-center gap-3 px-4 py-2 border-b border-border">
         <TrendingUp className="w-3.5 h-3.5 text-accent" />
         <span className="text-[11px] font-bold tracking-[0.12em] text-accent uppercase">LIVE_CHART</span>
+        {strategyName && (
+          <>
+            <span className="text-[10px] text-text-dim">|</span>
+            <span className="text-[10px] font-mono text-purple-400">{strategyName}</span>
+          </>
+        )}
         <span className="text-[10px] text-text-dim">{symbol}</span>
         <span className="text-[10px] text-text-dim">|</span>
         <span className="text-[10px] text-text-dim">{timeframe}</span>

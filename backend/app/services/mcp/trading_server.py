@@ -1289,3 +1289,63 @@ def risk_evaluation(
         asset_class=trader_decision.get("asset_class"),
     )
     return {"accepted": assessment.accepted, "suggested_volume": assessment.suggested_volume, "reasons": assessment.reasons}
+
+
+# ── Strategy Builder tool ──────────────────────────────────────────
+
+STRATEGY_TEMPLATES = {
+    'ema_crossover': {
+        'description': 'EMA crossover with RSI filter — trend following',
+        'params': {'ema_fast': 'int (5-20)', 'ema_slow': 'int (20-100)', 'rsi_filter': 'int (25-45)'},
+        'best_for': 'trending markets, medium-term',
+    },
+    'rsi_mean_reversion': {
+        'description': 'RSI mean reversion — buy oversold, sell overbought',
+        'params': {'rsi_period': 'int (7-21)', 'oversold': 'int (15-35)', 'overbought': 'int (65-85)', 'atr_multiplier': 'float (1.0-4.0)'},
+        'best_for': 'ranging markets, high volatility pairs',
+    },
+    'bollinger_breakout': {
+        'description': 'Bollinger Band breakout — squeeze detection',
+        'params': {'bb_period': 'int (10-30)', 'bb_std': 'float (1.0-3.0)', 'volume_filter': 'bool'},
+        'best_for': 'consolidating markets, breakout setups',
+    },
+    'macd_divergence': {
+        'description': 'MACD signal line crossover',
+        'params': {'fast': 'int (6-15)', 'slow': 'int (18-30)', 'signal': 'int (5-12)'},
+        'best_for': 'momentum shifts, medium to long-term',
+    },
+}
+
+
+def strategy_templates_info() -> dict:
+    """List all available strategy templates with their parameters and best use cases."""
+    return {"templates": STRATEGY_TEMPLATES}
+
+
+def strategy_builder(
+    template: str = "ema_crossover",
+    name: str = "",
+    description: str = "",
+    params: dict | None = None,
+) -> dict:
+    """Build and validate a strategy definition from a chosen template and parameters.
+
+    Call this AFTER analyzing the market to formalize your strategy recommendation.
+    The template must be one of: ema_crossover, rsi_mean_reversion, bollinger_breakout, macd_divergence.
+    """
+    if template not in STRATEGY_TEMPLATES:
+        return {"error": f"Unknown template '{template}'. Valid: {list(STRATEGY_TEMPLATES.keys())}"}
+
+    params = params or {}
+    tmpl = STRATEGY_TEMPLATES[template]
+
+    return {
+        "status": "ok",
+        "strategy": {
+            "template": template,
+            "name": name or f"{template}_{id(params) % 1000}",
+            "description": description or tmpl['description'],
+            "params": params,
+            "template_info": tmpl,
+        },
+    }

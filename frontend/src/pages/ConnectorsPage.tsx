@@ -22,6 +22,7 @@ const ORCHESTRATION_AGENTS = [
   'trader-agent',
   'risk-manager',
   'execution-manager',
+  'strategy-designer',
 ];
 const MODEL_EDIT_AGENTS = [...ORCHESTRATION_AGENTS];
 const NON_SWITCHABLE_LLM_AGENTS = new Set<string>();
@@ -37,6 +38,7 @@ const DEFAULT_AGENT_LLM_ENABLED: Record<string, boolean> = {
   'trader-agent': false,
   'risk-manager': false,
   'execution-manager': false,
+  'strategy-designer': true,
 };
 const AGENT_PROMPT_FALLBACKS: Record<string, { system: string; user: string }> = {
   'technical-analyst': {
@@ -89,6 +91,13 @@ const AGENT_PROMPT_FALLBACKS: Record<string, { system: string; user: string }> =
       + 'Stop loss: {stop_loss}\nTake profit: {take_profit}\n'
       + 'Expected return: BUY, SELL or HOLD followed by concise justification.'
     ),
+  },
+  'strategy-designer': {
+    system: (
+      'You are a quantitative strategy designer agent. Analyze market conditions using your tools, '
+      + 'then design an optimal trading strategy by choosing the best template and parameters.'
+    ),
+    user: 'Design a trading strategy for {pair} on {timeframe}.\n\nUser request: {user_prompt}',
   },
 };
 

@@ -58,6 +58,12 @@
 | `symbol_providers.py` | symbol resolvers | Provider symbol normalization |
 | `symbols.py` | symbol config utilities | Tradeable symbol configuration |
 
+### `app/services/strategy/`
+
+| File | Class/Function | Responsibility |
+|------|---------------|----------------|
+| `designer.py` | `run_strategy_designer` | AgentScope-based strategy generation from user prompts |
+
 ### `app/services/execution/`
 
 | File | Class/Function | Responsibility |
@@ -76,15 +82,32 @@
 
 ## Frontend Modules
 
+### Tasks (Celery)
+| Task | Schedule | Responsibility |
+|------|----------|----------------|
+| `run_analysis_task.execute` | On-demand | Run agent pipeline for a single analysis |
+| `backtest_task.execute` | On-demand | Run historical backtest |
+| `strategy_backtest_task.execute` | On-demand | Backtest + score a strategy |
+| `strategy_monitor_task.check_all` | Every 30s (Beat) | Poll monitored strategies, create Runs on new signals |
+
 ### Pages
 | Page | Route | Purpose |
 |------|-------|---------|
-| `DashboardPage` | `/` | Run creation and monitoring |
+| `TerminalPage` | `/` | EXECUTE_ANALYSIS, EXECUTE_STRATEGY (monitoring, chart overlays), EXECUTION_HISTORY |
+| `StrategiesPage` | `/strategies` | AI strategy generator, strategy cards, lifecycle management |
 | `RunDetailPage` | `/runs/:id` | Run details + live stream |
 | `OrdersPage` | `/orders` | Trading views (positions/orders/deals) |
 | `BacktestsPage` | `/backtests` | Backtest execution and history |
 | `ConnectorsPage` | `/connectors` | Connectors, models, prompts, symbols, secrets |
 | `LoginPage` | `/login` | Authentication |
+
+### Key Components
+| Component | Library | Purpose |
+|-----------|---------|---------|
+| `TradingViewChart` | `lightweight-charts` v5 | Live OHLC chart with indicator overlays (EMA, Bollinger) and BUY/SELL signal markers (`createSeriesMarkers`) |
+| `RealTradesCharts` | `@mui/x-charts` | P&L curves, bar charts, pie charts for trade analysis |
+| `OpenOrdersChart` | `lightweight-charts` | Live positions with S/L, T/P lines |
+| `ExpansionPanel` | — | Collapsible sections |
 
 ### Key Hooks
 | Hook | Purpose |

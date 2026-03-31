@@ -1391,7 +1391,10 @@ class AgentScopeRegistry:
                 elif gating_inv.get("data", {}).get("combined_score"):
                     run.decision["combined_score"] = gating_inv["data"]["combined_score"]
 
+            # Preserve initial trace metadata (e.g. triggered_by, strategy info)
+            initial_trace = dict(run.trace) if run.trace else {}
             run.trace = {
+                **initial_trace,
                 "runtime_engine": "agentscope_v1",
                 "elapsed_seconds": round(elapsed, 1),
                 "market_data_source": snapshot.get("market_data_source", "unknown"),

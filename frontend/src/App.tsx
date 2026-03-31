@@ -9,6 +9,7 @@ const BacktestsPage = lazy(() => import('./pages/BacktestsPage').then((module) =
 const RunDetailPage = lazy(() => import('./pages/RunDetailPage').then((module) => ({ default: module.RunDetailPage })));
 const OrdersPage = lazy(() => import('./pages/OrdersPage').then((module) => ({ default: module.OrdersPage })));
 const ConnectorsPage = lazy(() => import('./pages/ConnectorsPage').then((module) => ({ default: module.ConnectorsPage })));
+const StrategiesPage = lazy(() => import('./pages/StrategiesPage').then((module) => ({ default: module.StrategiesPage })));
 const LoginPage = lazy(() => import('./pages/LoginPage').then((module) => ({ default: module.LoginPage })));
 
 function withLayout(element: React.ReactNode): React.ReactNode {
@@ -51,6 +52,10 @@ function AppRoutes() {
       <Route
         path="/connectors"
         element={withLayout(<ConnectorsPage />)}
+      />
+      <Route
+        path="/strategies"
+        element={withLayout(<StrategiesPage />)}
       />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

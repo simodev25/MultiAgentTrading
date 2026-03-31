@@ -8,8 +8,12 @@ import { FlaskConical, Play, TrendingUp, TrendingDown, Target, BarChart3, Activi
 import { ExpansionPanel } from '../components/ExpansionPanel';
 import type { BacktestRun, AgentValidationDetail } from '../types';
 
-const STRATEGIES = [
+const DEFAULT_STRATEGIES = [
   { value: 'ema_rsi', label: 'Trend Following (EMA + RSI)' },
+  { value: 'ema_crossover', label: 'EMA Crossover' },
+  { value: 'rsi_mean_reversion', label: 'RSI Mean Reversion' },
+  { value: 'bollinger_breakout', label: 'Bollinger Breakout' },
+  { value: 'macd_divergence', label: 'MACD Divergence' },
 ];
 
 const AGENTS = [
@@ -789,7 +793,7 @@ export function BacktestsPage() {
             <div>
               <label className="micro-label block mb-1.5">Strategy</label>
               <select value={strategy} onChange={(e) => setStrategy(e.target.value)}>
-                {STRATEGIES.map((s) => (
+                {DEFAULT_STRATEGIES.map((s) => (
                   <option key={s.value} value={s.value}>{s.label}</option>
                 ))}
               </select>

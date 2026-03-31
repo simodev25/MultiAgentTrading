@@ -16,11 +16,13 @@ celery_app = Celery(
     'trading_platform',
     broker=settings.celery_broker_url,
     backend=backend_url,
-    include=['app.tasks.run_analysis_task', 'app.tasks.backtest_task'],
+    include=['app.tasks.run_analysis_task', 'app.tasks.backtest_task', 'app.tasks.strategy_backtest_task', 'app.tasks.strategy_monitor_task'],
 )
 celery_app.conf.task_routes = {
     'app.tasks.run_analysis_task.*': {'queue': settings.celery_analysis_queue},
     'app.tasks.backtest_task.*': {'queue': settings.celery_backtest_queue},
+    'app.tasks.strategy_backtest_task.*': {'queue': settings.celery_backtest_queue},
+    'app.tasks.strategy_monitor_task.*': {'queue': settings.celery_analysis_queue},
 }
 celery_app.conf.task_default_queue = settings.celery_analysis_queue
 celery_app.conf.result_backend = backend_url
@@ -34,6 +36,16 @@ celery_app.conf.task_track_started = settings.celery_task_track_started
 # Ensure task module is imported when worker boots with "-A ...celery_app".
 import app.tasks.run_analysis_task  # noqa: E402,F401
 import app.tasks.backtest_task  # noqa: E402,F401
+import app.tasks.strategy_backtest_task  # noqa: E402,F401
+import app.tasks.strategy_monitor_task  # noqa: E402,F401
+
+# Beat schedule: periodic strategy monitoring (every 30 seconds)
+celery_app.conf.beat_schedule = {
+    'strategy-monitor-check': {
+        'task': 'app.tasks.strategy_monitor_task.check_all',
+        'schedule': 30.0,
+    },
+}
 
 
 @worker_ready.connect(weak=False)

@@ -51,6 +51,22 @@ Ce document résume les agents actifs et leurs responsabilités dans le pipeline
 - Entrées: positions broker + réanalyse orchestrateur.
 - Sorties: actions par position, résumé cycle, rapport LLM optionnel.
 
+## strategy-designer
+- Objectif: générer des stratégies de trading à partir de prompts utilisateur.
+- Entrées: prompt utilisateur, données de marché.
+- Sorties: template, params, symbol, timeframe, nom, description.
+- Templates supportés: ema_crossover, rsi_mean_reversion, bollinger_breakout, macd_divergence.
+
+## strategy-monitor (Celery Beat)
+- Objectif: surveiller les stratégies actives et déclencher des Runs automatiquement.
+- Cycle: toutes les 30 secondes via Celery Beat.
+- Fonctionnement:
+  1. Récupère les stratégies avec `is_monitoring=True`
+  2. Fetch les 200 dernières bougies pour chaque stratégie (symbol/timeframe)
+  3. Calcule les signaux d'indicateurs (EMA crossover, RSI, Bollinger, MACD)
+  4. Si nouveau signal détecté (dedup via `last_signal_key`) → crée un Run dans le pipeline agent complet
+- Modes: simulation, paper, live (configurable par stratégie)
+
 ## Orchestration
 1. Analyse parallèle: technical/news/market-context.
 2. Débat parallèle: bullish/bearish.
@@ -58,3 +74,13 @@ Ce document résume les agents actifs et leurs responsabilités dans le pipeline
 4. Validation: risk-manager.
 5. Plan + exécution: execution-manager + execution service.
 6. Optionnel: second pass si HOLD avec follow-up et politique active.
+
+## Strategy Lifecycle
+```
+DRAFT → BACKTESTING → VALIDATED → PAPER → LIVE
+                   ↓              ↓
+               REJECTED ←────────┘
+
+Monitoring (is_monitoring=True):
+  Strategy → Celery Beat (30s) → Signal Detection → Create Run → Agent Pipeline → Decision
+```

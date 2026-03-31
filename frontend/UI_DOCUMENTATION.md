@@ -11,20 +11,23 @@ src/
 ├── App.tsx                          # Routes + Auth
 ├── main.tsx                         # Entry point
 ├── types/index.ts                   # 30+ TypeScript interfaces
-├── api/client.ts                    # 40+ REST/WS endpoints
+├── api/client.ts                    # 50+ REST/WS endpoints
 ├── config/runtime.ts                # VITE_* env config
 ├── constants/markets.ts             # Trading symbols & timeframes
 ├── styles/theme.css                 # Design system (Tailwind v4)
 ├── pages/
 │   ├── LoginPage.tsx                # Auth terminal
-│   ├── DashboardPage.tsx            # Orchestration hub
+│   ├── TerminalPage.tsx             # Analysis + Strategy execution hub
+│   ├── StrategiesPage.tsx           # AI strategy generator + management
 │   ├── OrdersPage.tsx               # Orders & MT5 real-time
 │   ├── BacktestsPage.tsx            # Strategy backtesting
 │   ├── ConnectorsPage.tsx           # LLM/provider config
 │   └── RunDetailPage.tsx            # Run trace deep-dive
 ├── components/
 │   ├── Layout.tsx                   # Shell (sidebar + bars)
+│   ├── TradingViewChart.tsx         # Candlestick + indicator overlays + signal markers
 │   ├── LoadingIndicators.tsx        # Spinner, skeleton, progress
+│   ├── ExpansionPanel.tsx           # Collapsible sections
 │   ├── OpenOrdersChart.tsx          # Candlestick (lightweight-charts)
 │   ├── RealTradesCharts.tsx         # Analytics (MUI X-Charts)
 │   └── orders/                      # Table components
@@ -154,7 +157,8 @@ Following UX best practices:
 | Path | Page | Auth | Layout |
 |------|------|------|--------|
 | `/login` | LoginPage | Public | No |
-| `/` | DashboardPage | Protected | Yes |
+| `/` | TerminalPage | Protected | Yes |
+| `/strategies` | StrategiesPage | Protected | Yes |
 | `/orders` | OrdersPage | Protected | Yes |
 | `/backtests` | BacktestsPage | Protected | Yes |
 | `/runs/:runId` | RunDetailPage | Protected | Yes |
@@ -189,18 +193,49 @@ OrdersPage further lazy-loads 6 sub-components: `OpenOrdersChart`, `OpenPosition
 
 Terminal-style auth screen. Default credentials for dev: `admin@local.dev` / `admin1234`. Calls `api.login()` → stores JWT → redirects to `/`.
 
-### DashboardPage
+### TerminalPage
 
-**Orchestration hub** with 5 sections:
+**Main orchestration hub** with 6 sections:
 
-1. **QUICK_RUN** — Execute manual analysis: pair, timeframe, mode (simulation/paper/live), risk%, MetaApi account selector
-2. **RUN_STATUS** — KPI grid: Total / Active / Completed / Failed
-3. **CRON_SCHEDULER** — Create scheduled runs with cron expressions, smart presets per timeframe
-4. **AUTO_GENERATE** — AI-powered schedule generation: target count, risk profile (conservative/balanced/aggressive), LLM toggle
-5. **ACTIVE_SCHEDULES** — Table with pause/resume/delete/run-now actions
-6. **EXECUTION_HISTORY** — Paginated run history (10/page) with status badges, decision display, links to detail
+1. **RUN_STATUS** — KPI grid: Total / Active / Completed / Failed
+2. **EXECUTE_ANALYSIS** — Manual analysis: pair, timeframe, mode (simulation/paper/live), risk%, MetaApi account selector
+3. **EXECUTE_STRATEGY** — Strategy-driven execution:
+   - Strategy dropdown selector (with 🟢 indicator for monitored strategies)
+   - **Start** button → calls `POST /strategies/{id}/start-monitoring` (backend Celery Beat monitors every 30s)
+   - **Stop** button → calls `POST /strategies/{id}/stop-monitoring`
+   - Strategy details: template badge, symbol, timeframe, params, monitoring status, last signal key
+   - **OBSERVED_STRATEGIES** table: all monitored strategies with name (clickable → selects & updates chart), symbol, TF, template, mode, risk%, last signal, Stop action
+   - Selecting a strategy auto-adapts chart symbol/timeframe and loads indicator overlays
+4. **LIVE_CHART** — TradingViewChart (lightweight-charts v5) with:
+   - Candlestick series with WebSocket streaming
+   - Strategy indicator overlays (EMA lines, Bollinger bands) as LineSeries
+   - BUY/SELL signal markers via `createSeriesMarkers`
+   - Strategy name in header when active
+5. **EXECUTION_HISTORY** — Paginated run history (10/page) with enriched columns:
+   - **Source**: `STRATEGY` (purple badge + clickable strategy name) or `MANUAL` (gray badge)
+   - **Signal**: BUY (green) / SELL (red) / `--` for manual runs
+   - **Confidence**: agent confidence percentage
+   - Status badges, decision/execution summary, running time, Detail link
 
-**Polling**: Runs + schedules refresh every 5s when tab visible. Schedule polling throttled to every 3rd tick.
+**Polling**: Runs refresh every 3s, strategies every 5s when tab visible.
+
+### StrategiesPage
+
+**AI Strategy Generator & Management**:
+
+1. **STRATEGY_ENGINE** — Natural language prompt → LLM generates strategy (template, params, symbol, timeframe)
+   - Preset prompts for quick generation
+   - Supports 4 templates: ema_crossover, rsi_mean_reversion, bollinger_breakout, macd_divergence
+2. **Strategy Cards** — Grid display with:
+   - Status badge (DRAFT/BACKTESTING/VALIDATED/PAPER/LIVE/REJECTED)
+   - Validation score bar
+   - Metrics (Win Rate, Profit Factor, Max Drawdown)
+   - Symbol/timeframe badge (purple)
+   - Template + params display
+   - Actions: VALIDATE (backtest), PAPER_TRADING, GO_LIVE, VIEW_ON_CHART, DELETE
+3. **LLM Edit** — Conversational editing of strategy params via AI chat
+
+**Polling**: Strategy list refreshes every 3s.
 
 ### OrdersPage
 
@@ -346,6 +381,16 @@ Base URL: `VITE_API_URL` (default `http://localhost:8000/api/v1`)
 | **Prompts** | GET/POST | `/prompts` | Prompt templates |
 | **LLM** | GET | `/llm/summary` | LLM usage stats |
 | **Backtests** | GET/POST | `/backtests` | Backtest CRUD |
+| **Strategies** | GET | `/strategies` | List strategies |
+| **Strategies** | GET | `/strategies/:id` | Get single strategy |
+| **Strategies** | POST | `/strategies/generate` | AI-generate strategy |
+| **Strategies** | POST | `/strategies/:id/validate` | Launch backtest validation |
+| **Strategies** | POST | `/strategies/:id/promote` | Promote to PAPER/LIVE |
+| **Strategies** | POST | `/strategies/:id/edit` | Edit params via LLM |
+| **Strategies** | DELETE | `/strategies/:id` | Delete strategy |
+| **Strategies** | GET | `/strategies/:id/indicators` | Compute indicator overlays + signals |
+| **Strategies** | POST | `/strategies/:id/start-monitoring` | Start backend signal monitoring |
+| **Strategies** | POST | `/strategies/:id/stop-monitoring` | Stop monitoring |
 
 ### WebSocket Endpoints
 
@@ -420,4 +465,4 @@ Environment variables (`VITE_*` prefix):
 └─────────────────────────────────────────────────┘
 ```
 
-Sidebar is collapsible. Navigation items: Dashboard (NODE_01), Ordres (NODE_02), Backtests (NODE_03), Config (NODE_04).
+Sidebar is collapsible. Navigation items: Terminal (NODE_01), Ordres (NODE_02), Backtests (NODE_03), Config (NODE_04), Strategies (NODE_05).

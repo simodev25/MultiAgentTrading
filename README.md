@@ -7,7 +7,7 @@ A multi-agent AI trading system that orchestrates **8 specialized LLM agents** t
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │                     React Dashboard (Vite)                     │
-│         Charts · Orders · Backtests · Connectors · Auth        │
+│  Terminal · Strategies · Orders · Backtests · Connectors       │
 └────────────────────────┬───────────────────────────────────────┘
                          │ REST + WebSocket
 ┌────────────────────────▼───────────────────────────────────────┐
@@ -22,10 +22,16 @@ A multi-agent AI trading system that orchestrates **8 specialized LLM agents** t
 │  │  Market Data · Technical Analysis · Fundamentals    │       │
 │  │  Decision Support                                   │       │
 │  └─────────────────────────────────────────────────────┘       │
+│                                                                │
+│  ┌─────────────────────────────────────────────────────┐       │
+│  │         Strategy Engine + Monitor                   │       │
+│  │  AI Generation · Indicators · Signal Monitoring     │       │
+│  │  Auto-execution via Agent Workflow                  │       │
+│  └─────────────────────────────────────────────────────┘       │
 └────────────────────────────────────────────────────────────────┘
          │              │              │
     PostgreSQL       Redis        RabbitMQ
-    Primary DB       Cache       Celery Queue
+    Primary DB       Cache       Celery Queue + Beat
 ```
 
 ### Agent Pipeline
@@ -51,7 +57,10 @@ Each analysis run flows sequentially through 8 agents:
 - **3 decision modes** — Conservative (strict convergence), Balanced (default, moderate), Permissive (opportunistic)
 - **18 MCP tools** — Technical indicators, news, macro events, pattern detection, correlation analysis
 - **Paper & live trading** — MetaAPI broker integration with order guardian
-- **Backtesting** — Historical analysis with configurable LLM sampling
+- **AI Strategy Engine** — LLM-powered strategy generation (EMA crossover, RSI mean reversion, Bollinger breakout, MACD divergence) with per-strategy symbol/timeframe
+- **Strategy Monitoring** — Backend Celery Beat monitors active strategies every 30s, auto-creates Runs through the full agent workflow when new signals detected (dedup via signal key)
+- **Chart Overlays** — Strategy indicator lines (EMA, Bollinger bands) and BUY/SELL signal markers rendered on the live chart
+- **Backtesting** — Historical analysis with configurable LLM sampling and agent-validated entries
 - **Scheduled runs** — Automated analysis via Celery Beat
 - **Real-time updates** — WebSocket streaming during analysis runs
 - **Observability** — Prometheus metrics, Grafana dashboards, OpenTelemetry tracing
@@ -161,25 +170,27 @@ LLM Web Search uses the LLM provider selected in Connectors > AI Models to perfo
 ```
 backend/
   app/
-    api/routes/            # REST endpoints
+    api/routes/            # REST endpoints (runs, strategies, backtests, trading, connectors)
     services/
       orchestrator/        # 8-agent workflow engine
+      agentscope/          # AgentScope registry, debate, structured output schemas
       agent_runtime/       # v2 agentic runtime with MCP tools
+      strategy/            # Strategy designer agent
       llm/                 # LLM provider clients
       market/              # Market data, news providers, instrument classification
       trading/             # MetaAPI client, order guardian, execution
       risk/                # Risk engine & position sizing
-      backtest/            # Historical backtesting
+      backtest/            # Historical backtesting engine
       scheduler/           # Scheduled run management
       news/                # News aggregation & sentiment
     db/                    # SQLAlchemy models, Alembic migrations
     observability/         # Prometheus, OpenTelemetry
-    tasks/                 # Celery task definitions
+    tasks/                 # Celery tasks (analysis, backtest, strategy monitor)
 
 frontend/
   src/
-    pages/                 # Dashboard, RunDetail, Orders, Backtests, Connectors, Login
-    components/            # Charts, Layout, UI
+    pages/                 # Terminal, Strategies, RunDetail, Orders, Backtests, Connectors
+    components/            # TradingViewChart (overlays, markers), Layout, UI
     hooks/                 # Auth, market data, orders
 
 infra/
