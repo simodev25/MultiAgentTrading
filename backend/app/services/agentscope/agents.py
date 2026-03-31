@@ -58,6 +58,10 @@ def build_execution_manager(*, model, formatter, toolkit, sys_prompt: str, max_i
     return _build_agent("execution-manager", model, formatter, toolkit, sys_prompt, max_iters)
 
 
+def build_strategy_designer(*, model, formatter, toolkit, sys_prompt: str, max_iters: int = 6) -> ReActAgent:
+    return _build_agent("strategy-designer", model, formatter, toolkit, sys_prompt, max_iters, parallel_tool_calls=True)
+
+
 ALL_AGENT_FACTORIES = {
     "technical-analyst": build_technical_analyst,
     "news-analyst": build_news_analyst,

@@ -37,6 +37,10 @@ AGENT_TOOL_MAP: dict[str, list[str]] = {
     ],
     "risk-manager": ["position_size_calculator", "risk_evaluation"],
     "execution-manager": ["market_snapshot"],
+    "strategy-designer": [
+        "indicator_bundle", "market_regime_detector", "technical_scoring",
+        "volatility_analyzer", "strategy_templates_info", "strategy_builder",
+    ],
 }
 
 

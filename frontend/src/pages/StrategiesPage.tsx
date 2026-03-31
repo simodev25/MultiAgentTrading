@@ -50,12 +50,14 @@ function StrategyCard({
   onValidate,
   onPromote,
   onViewChart,
+  onDelete,
   validatingId,
 }: {
   strategy: Strategy;
   onValidate: (id: number) => void;
   onPromote: (id: number, target: string) => void;
   onViewChart: (id: number) => void;
+  onDelete: (id: number) => void;
   validatingId: number | null;
 }) {
   const m = strategy.metrics;
@@ -75,10 +77,20 @@ function StrategyCard({
             <span className="text-[8px] font-mono text-text-dim">{strategy.strategy_id}</span>
           </div>
         </div>
-        <span className={`text-[8px] font-bold tracking-widest px-2 py-1 rounded border ${STATUS_COLORS[strategy.status] || STATUS_COLORS.DRAFT}`}>
-          {strategy.status === 'LIVE' && <Zap className="w-2.5 h-2.5 inline mr-1" />}
-          {strategy.status}
-        </span>
+        <div className="flex items-center gap-1.5">
+          <span className={`text-[8px] font-bold tracking-widest px-2 py-1 rounded border ${STATUS_COLORS[strategy.status] || STATUS_COLORS.DRAFT}`}>
+            {strategy.status === 'LIVE' && <Zap className="w-2.5 h-2.5 inline mr-1" />}
+            {strategy.status}
+          </span>
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onDelete(strategy.id); }}
+            className="w-5 h-5 flex items-center justify-center rounded text-text-dim hover:text-red-400 hover:bg-red-500/10 transition-colors"
+            title="Delete strategy"
+          >
+            <XCircle className="w-3 h-3" />
+          </button>
+        </div>
       </div>
 
       {/* Body */}
@@ -247,6 +259,16 @@ export function StrategiesPage() {
     navigate(`/?strategy=${id}`);
   };
 
+  const deleteStrategy = async (id: number) => {
+    if (!token) return;
+    try {
+      await api.deleteStrategy(token, id);
+      await loadStrategies();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Delete failed');
+    }
+  };
+
   return (
     <div className="flex flex-col gap-5">
 
@@ -258,21 +280,44 @@ export function StrategiesPage() {
           <span className="text-[10px] text-text-dim">|</span>
           <span className="text-[10px] text-text-dim">AI-Powered Strategy Generator</span>
         </div>
-        <form onSubmit={generateStrategy} className="p-4 flex items-center gap-3">
-          <Bot className="w-4 h-4 text-accent shrink-0" />
-          <input
-            type="text"
-            value={generatePrompt}
-            onChange={(e) => setGeneratePrompt(e.target.value)}
-            placeholder="Describe the strategy you want to generate..."
-            className="flex-1 text-[11px] bg-surface-alt border border-border rounded px-3 py-2 text-text placeholder-text-dim font-mono"
-            disabled={isGenerating}
-          />
-          <button
-            type="submit"
-            className="btn-primary flex items-center gap-2"
-            disabled={isGenerating || !generatePrompt.trim()}
-          >
+        <form onSubmit={generateStrategy} className="p-4 space-y-3">
+          <div className="flex flex-wrap gap-1.5">
+            {[
+              'Conservative RSI mean reversion for ranging forex with tight stops',
+              'Aggressive EMA trend following for volatile crypto pairs',
+              'Bollinger Band squeeze breakout with volume confirmation',
+              'MACD divergence momentum strategy for indices',
+              'Adaptive crossover strategy balancing speed and reliability',
+            ].map((preset) => (
+              <button
+                key={preset}
+                type="button"
+                onClick={() => setGeneratePrompt(preset)}
+                className={`text-[8px] font-mono px-2 py-1 rounded border transition-colors ${
+                  generatePrompt === preset
+                    ? 'border-accent/60 bg-accent/10 text-accent'
+                    : 'border-border/40 text-text-dim hover:text-accent hover:border-accent/40'
+                }`}
+              >
+                {preset}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-3">
+            <Bot className="w-4 h-4 text-accent shrink-0" />
+            <input
+              type="text"
+              value={generatePrompt}
+              onChange={(e) => setGeneratePrompt(e.target.value)}
+              placeholder="Describe the strategy you want to generate..."
+              className="flex-1 text-[11px] bg-surface-alt border border-border rounded px-3 py-2 text-text placeholder-text-dim font-mono"
+              disabled={isGenerating}
+            />
+            <button
+              type="submit"
+              className="btn-primary flex items-center gap-2"
+              disabled={isGenerating || !generatePrompt.trim()}
+            >
             {isGenerating ? (
               <>
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -284,7 +329,8 @@ export function StrategiesPage() {
                 <span className="text-[9px]">GENERATE_NEW_STRATEGY</span>
               </>
             )}
-          </button>
+            </button>
+          </div>
         </form>
         {error && <p className="alert mx-4 mb-4">{error}</p>}
       </div>
@@ -299,6 +345,7 @@ export function StrategiesPage() {
                 onValidate={validateStrategy}
                 onPromote={promoteStrategy}
                 onViewChart={viewOnChart}
+                onDelete={deleteStrategy}
                 validatingId={validatingId}
               />
               {/* LLM Edit zone */}

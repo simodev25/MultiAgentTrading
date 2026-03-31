@@ -179,6 +179,8 @@ export const api = {
     request(`/strategies/${id}/promote`, { method: 'POST', body: JSON.stringify({ target }) }, token),
   editStrategy: (token: string, id: number, prompt: string) =>
     request(`/strategies/${id}/edit`, { method: 'POST', body: JSON.stringify({ prompt }) }, token),
+  deleteStrategy: (token: string, id: number) =>
+    request(`/strategies/${id}`, { method: 'DELETE' }, token),
 };
 
 export function wsRunUrl(runId: number, token?: string): string {

@@ -154,53 +154,90 @@ def get_strategy(
     return StrategyOut.model_validate(strategy)
 
 
+@router.delete('/{strategy_id}', status_code=204)
+def delete_strategy(
+    strategy_id: int,
+    db: Session = Depends(get_db),
+    _=Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN, Role.TRADER_OPERATOR)),
+):
+    strategy = db.get(Strategy, strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail='Strategy not found')
+    db.delete(strategy)
+    db.commit()
+    logger.info('strategy_deleted id=%s name=%s', strategy.strategy_id, strategy.name)
+
+
 @router.post('/generate', response_model=StrategyOut)
 async def generate_strategy(
     payload: StrategyGenerateRequest,
     db: Session = Depends(get_db),
     user: User = Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN, Role.TRADER_OPERATOR)),
 ) -> StrategyOut:
-    """Generate a new strategy using LLM."""
-    llm_result = await _llm_generate(payload.prompt)
+    """Generate a new strategy using the strategy-designer agent with MCP tools."""
+    from app.services.strategy.designer import run_strategy_designer
 
-    if llm_result and llm_result.get('template') in VALID_TEMPLATES:
-        template = llm_result['template']
-        params = llm_result.get('params', {})
-        name = llm_result.get('name', f'{template}_{random.randint(100, 999)}')
-        description = llm_result.get('description', f'LLM-generated {template} strategy.')
-        llm_response = json.dumps(llm_result, indent=2)
-    else:
-        # Fallback to random if LLM fails
-        logger.info('LLM generation failed or invalid, using random fallback')
-        template = random.choice(VALID_TEMPLATES)
-        if template == 'ema_crossover':
-            params = {'ema_fast': random.choice([5, 8, 9, 12]), 'ema_slow': random.choice([20, 21, 26, 50]), 'rsi_filter': random.choice([30, 35, 40])}
-        elif template == 'rsi_mean_reversion':
-            params = {'rsi_period': 14, 'oversold': random.choice([25, 30, 35]), 'overbought': random.choice([65, 70, 75]), 'atr_multiplier': round(random.uniform(1.5, 3.0), 1)}
-        elif template == 'bollinger_breakout':
-            params = {'bb_period': random.choice([14, 20, 26]), 'bb_std': random.choice([1.5, 2.0, 2.5]), 'volume_filter': True}
+    # Run the agent — it analyzes the market then builds a strategy
+    agent_result = await run_strategy_designer(
+        db=db,
+        pair='EURUSD.PRO',
+        timeframe='H1',
+        user_prompt=payload.prompt,
+    )
+
+    template = agent_result.get('template')
+    params = agent_result.get('params', {})
+    name = agent_result.get('name', '')
+    description = agent_result.get('description', '')
+    prompt_history = agent_result.get('prompt_history', [])
+
+    if not template or template not in VALID_TEMPLATES:
+        # Agent fallback: use simple LLM call
+        logger.info('Agent strategy generation failed (template=%s), trying direct LLM', template)
+        llm_result = await _llm_generate(payload.prompt)
+        if llm_result and llm_result.get('template') in VALID_TEMPLATES:
+            template = llm_result['template']
+            params = llm_result.get('params', {})
+            name = llm_result.get('name', f'{template}_{random.randint(100, 999)}')
+            description = llm_result.get('description', '')
+            prompt_history = [
+                {'role': 'user', 'content': payload.prompt},
+                {'role': 'assistant', 'content': json.dumps(llm_result, indent=2)},
+            ]
         else:
-            params = {'fast': random.choice([8, 12]), 'slow': random.choice([21, 26]), 'signal': random.choice([7, 9])}
-        name = f'{template}_{random.randint(100, 999)}'
-        description = f'Auto-generated {template.replace("_", " ")} strategy (LLM fallback).'
-        llm_response = f'Fallback: random {template} with params {params}'
+            # Ultimate fallback: random
+            template = random.choice(VALID_TEMPLATES)
+            if template == 'ema_crossover':
+                params = {'ema_fast': 9, 'ema_slow': 21, 'rsi_filter': 30}
+            elif template == 'rsi_mean_reversion':
+                params = {'rsi_period': 14, 'oversold': 30, 'overbought': 70, 'atr_multiplier': 2.0}
+            elif template == 'bollinger_breakout':
+                params = {'bb_period': 20, 'bb_std': 2.0, 'volume_filter': True}
+            else:
+                params = {'fast': 12, 'slow': 26, 'signal': 9}
+            name = f'{template}_{random.randint(100, 999)}'
+            description = f'Auto-generated {template} strategy (fallback).'
+            prompt_history = [
+                {'role': 'user', 'content': payload.prompt},
+                {'role': 'assistant', 'content': f'Fallback: {template} with default params'},
+            ]
 
     strategy = Strategy(
         strategy_id=_next_strategy_id(db),
-        name=name,
-        description=description,
+        name=name or f'{template}_{random.randint(100, 999)}',
+        description=description or f'{template} strategy',
         status='DRAFT',
         score=0.0,
         template=template,
         params=params,
         metrics={},
-        prompt_history=[{'role': 'user', 'content': payload.prompt}, {'role': 'assistant', 'content': llm_response}],
+        prompt_history=prompt_history,
         created_by_id=user.id,
     )
     db.add(strategy)
     db.commit()
     db.refresh(strategy)
-    logger.info('strategy_generated id=%s name=%s template=%s', strategy.strategy_id, name, template)
+    logger.info('strategy_generated id=%s name=%s template=%s agent=strategy-designer', strategy.strategy_id, strategy.name, template)
     return StrategyOut.model_validate(strategy)
 
 
