@@ -168,6 +168,17 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }, token),
+  // Strategies
+  listStrategies: (token: string) => request('/strategies', {}, token),
+  getStrategy: (token: string, id: number) => request(`/strategies/${id}`, {}, token),
+  generateStrategy: (token: string, prompt: string) =>
+    request('/strategies/generate', { method: 'POST', body: JSON.stringify({ prompt }) }, token),
+  validateStrategy: (token: string, id: number) =>
+    request(`/strategies/${id}/validate`, { method: 'POST' }, token),
+  promoteStrategy: (token: string, id: number, target: string) =>
+    request(`/strategies/${id}/promote`, { method: 'POST', body: JSON.stringify({ target }) }, token),
+  editStrategy: (token: string, id: number, prompt: string) =>
+    request(`/strategies/${id}/edit`, { method: 'POST', body: JSON.stringify({ prompt }) }, token),
 };
 
 export function wsRunUrl(runId: number, token?: string): string {

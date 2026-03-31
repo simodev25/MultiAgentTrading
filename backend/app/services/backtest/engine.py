@@ -9,8 +9,8 @@ import numpy as np
 import pandas as pd
 from sqlalchemy.orm import Session
 from ta.momentum import RSIIndicator
-from ta.trend import EMAIndicator
-from ta.volatility import AverageTrueRange
+from ta.trend import EMAIndicator, MACD
+from ta.volatility import AverageTrueRange, BollingerBands
 
 from app.core.config import get_settings
 from app.services.market.news_provider import MarketProvider
@@ -31,12 +31,21 @@ class BacktestResult:
 
 
 class BacktestEngine:
-    SUPPORTED_STRATEGIES = {'ema_rsi'}
+    SUPPORTED_STRATEGIES = {'ema_rsi', 'ema_crossover', 'rsi_mean_reversion', 'bollinger_breakout', 'macd_divergence'}
     STRATEGY_ALIASES = {
         'ema-rsi': 'ema_rsi',
         'legacy_ema_rsi': 'ema_rsi',
         'legacy-ema-rsi': 'ema_rsi',
         'default': 'ema_rsi',
+        'ema_cross': 'ema_crossover',
+        'ema-crossover': 'ema_crossover',
+        'rsi_mr': 'rsi_mean_reversion',
+        'rsi-mean-reversion': 'rsi_mean_reversion',
+        'bollinger': 'bollinger_breakout',
+        'bb_breakout': 'bollinger_breakout',
+        'bollinger-breakout': 'bollinger_breakout',
+        'macd': 'macd_divergence',
+        'macd-divergence': 'macd_divergence',
     }
 
     PERIODS_PER_YEAR = {
@@ -119,6 +128,20 @@ class BacktestEngine:
         prepared['ema_slow'] = EMAIndicator(close=close, window=50).ema_indicator()
         prepared['rsi'] = RSIIndicator(close=close, window=14).rsi()
         prepared['atr'] = AverageTrueRange(high=high, low=low, close=close).average_true_range()
+
+        # Bollinger Bands
+        bb = BollingerBands(close=close, window=20, window_dev=2)
+        prepared['bb_upper'] = bb.bollinger_hband()
+        prepared['bb_lower'] = bb.bollinger_lband()
+        prepared['bb_middle'] = bb.bollinger_mavg()
+        prepared['bb_width'] = bb.bollinger_wband()
+
+        # MACD
+        macd = MACD(close=close, window_fast=12, window_slow=26, window_sign=9)
+        prepared['macd'] = macd.macd()
+        prepared['macd_signal'] = macd.macd_signal()
+        prepared['macd_diff'] = macd.macd_diff()
+
         prepared = prepared.dropna()
         prepared['change_pct'] = prepared['Close'].pct_change().fillna(0) * 100
         return prepared
@@ -127,6 +150,62 @@ class BacktestEngine:
         signal = np.where((frame['ema_fast'] > frame['ema_slow']) & (frame['rsi'] < 70), 1, 0)
         signal = np.where((frame['ema_fast'] < frame['ema_slow']) & (frame['rsi'] > 30), -1, signal)
         return pd.Series(signal, index=frame.index, dtype='int64')
+
+    def _signal_series_ema_crossover(self, frame: pd.DataFrame, params: dict | None = None) -> pd.Series:
+        """EMA crossover with configurable periods and RSI filter."""
+        p = params or {}
+        fast_period = p.get('ema_fast', 9)
+        slow_period = p.get('ema_slow', 21)
+        rsi_filter = p.get('rsi_filter', 30)
+
+        fast = frame['Close'].ewm(span=fast_period, adjust=False).mean()
+        slow = frame['Close'].ewm(span=slow_period, adjust=False).mean()
+
+        signal = np.where((fast > slow) & (frame['rsi'] < (100 - rsi_filter)), 1, 0)
+        signal = np.where((fast < slow) & (frame['rsi'] > rsi_filter), -1, signal)
+        return pd.Series(signal, index=frame.index, dtype='int64')
+
+    def _signal_series_rsi_mean_reversion(self, frame: pd.DataFrame, params: dict | None = None) -> pd.Series:
+        """RSI mean reversion: buy oversold, sell overbought."""
+        p = params or {}
+        oversold = p.get('oversold', 30)
+        overbought = p.get('overbought', 70)
+
+        signal = np.where(frame['rsi'] < oversold, 1, 0)
+        signal = np.where(frame['rsi'] > overbought, -1, signal)
+        return pd.Series(signal, index=frame.index, dtype='int64')
+
+    def _signal_series_bollinger_breakout(self, frame: pd.DataFrame, params: dict | None = None) -> pd.Series:
+        """Bollinger Band breakout: buy on lower band touch, sell on upper band touch."""
+        signal = np.where(frame['Close'] <= frame['bb_lower'], 1, 0)
+        signal = np.where(frame['Close'] >= frame['bb_upper'], -1, signal)
+        return pd.Series(signal, index=frame.index, dtype='int64')
+
+    def _signal_series_macd_divergence(self, frame: pd.DataFrame, params: dict | None = None) -> pd.Series:
+        """MACD signal line crossover."""
+        signal = np.where(
+            (frame['macd'] > frame['macd_signal']) & (frame['macd_diff'] > 0), 1, 0
+        )
+        signal = np.where(
+            (frame['macd'] < frame['macd_signal']) & (frame['macd_diff'] < 0), -1, signal
+        )
+        return pd.Series(signal, index=frame.index, dtype='int64')
+
+    def _generate_signals(self, frame: pd.DataFrame, strategy: str, agent_config: dict | None = None) -> pd.Series:
+        """Dispatch to the appropriate signal generator."""
+        params = (agent_config or {}).get('strategy_params')
+        if strategy == 'ema_rsi':
+            return self._signal_series_ema_rsi(frame)
+        elif strategy == 'ema_crossover':
+            return self._signal_series_ema_crossover(frame, params)
+        elif strategy == 'rsi_mean_reversion':
+            return self._signal_series_rsi_mean_reversion(frame, params)
+        elif strategy == 'bollinger_breakout':
+            return self._signal_series_bollinger_breakout(frame, params)
+        elif strategy == 'macd_divergence':
+            return self._signal_series_macd_divergence(frame, params)
+        else:
+            return self._signal_series_ema_rsi(frame)
 
     def _market_snapshot_at(self, pair: str, timeframe: str, frame: pd.DataFrame, index_pos: int) -> dict[str, Any]:
         row = frame.iloc[index_pos]
@@ -425,7 +504,7 @@ class BacktestEngine:
         self._update_progress(db, run_id, 20)
 
         # ── Phase 3: Strategy signals (20→40%)
-        signal_series = self._signal_series_ema_rsi(frame)
+        signal_series = self._generate_signals(frame, normalized_strategy, agent_config)
         self._update_progress(db, run_id, 40)
 
         # ── Phase 4: Agent validation (40→90%) — only if llm_enabled
