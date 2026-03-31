@@ -173,10 +173,10 @@ Each agent's LLM, tools, and skills can be configured at runtime via the Connect
 
 ## Known Limitations
 
-- No persistent memory across runs; each run starts with fresh agent context
+- No persistent memory across runs; each run starts with fresh agent context (`MEMORI_*` env vars exist but are not wired into application code yet)
 - Debate is bounded to 1-3 rounds (configurable) -- may terminate before convergence
 - Debate is sequential (bullish first, then bearish) -- no rebuttal phase; on failure/timeout, falls back to independent researchers
 - Structured output validation can degrade gracefully (clamping, normalization) but may mask LLM errors; NaN/Inf values are now explicitly rejected
 - Researcher confidence is capped by news scores, which may be conservative
 - Agent skills are behavioral guidelines, not hard constraints -- LLMs may deviate
-- All agent calls have configurable timeouts (default 60s); timeout falls back to deterministic execution
+- All agent calls have configurable timeouts (`AGENTSCOPE_AGENT_TIMEOUT_SECONDS`, default 120s); timeout or interruption falls back to deterministic execution

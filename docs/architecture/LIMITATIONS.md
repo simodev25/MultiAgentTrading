@@ -14,7 +14,7 @@ Covers all known limitations as of the current codebase. Organized by area.
 
 | Limitation | Impact | Status |
 |-----------|--------|--------|
-| No persistent memory across runs | Each run starts with fresh context; no learning from past decisions | By design (stateless runs) |
+| No persistent memory across runs | Each run starts with fresh context; no learning from past decisions. `MEMORI_*` env vars exist but are not wired into application code yet. | By design (stateless runs) |
 | Debate bounded to 1-3 rounds | May terminate before convergence on complex scenarios | Configurable but fixed max |
 | Agent skills are soft guidelines | LLMs may deviate from SKILL.md behavioral rules | Inherent to LLM-based agents |
 | Structured output degradation | Schema validation uses clamping/normalization that can mask LLM errors; NaN/Inf now explicitly rejected | Graceful with NaN guard |

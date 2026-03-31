@@ -110,6 +110,7 @@ async def build_toolkit(
     news: dict | None = None,
     analysis_outputs: dict | None = None,
     skills: list[str] | None = None,
+    snapshot: dict | None = None,
 ) -> Toolkit:
     """Build a Toolkit with the MCP tools assigned to the given agent.
 
@@ -119,6 +120,9 @@ async def build_toolkit(
         news: Optional dict with keys "news" (list), "macro_events" (list).
         analysis_outputs: Optional dict of agent outputs for evidence_query tool.
         skills: Optional list of skill strings from DB to inject via AgentScope native mechanism.
+        snapshot: Optional market snapshot dict for pre-injecting authoritative
+            values into trader-agent tools (contradiction_detector, trade_sizing)
+            so the LLM cannot invent incorrect market data.
     """
     from app.services.mcp import trading_server
     from agentscope.tool._toolkit import AgentSkill
@@ -188,6 +192,18 @@ async def build_toolkit(
                 preset["news_items"] = news["news"]
             if news.get("macro_events"):
                 preset["macro_items"] = news["macro_events"]
+
+        # Pre-inject authoritative market data into trader-agent tools so the
+        # LLM cannot invent incorrect values (e.g. macd_diff=-0.01 instead of
+        # the real -0.000119).  The LLM still chooses *when* to call these
+        # tools and provides qualitative args (trend, momentum, decision_side),
+        # but the numerical market facts come from the snapshot.
+        if snapshot and tool_id == "contradiction_detector":
+            preset["macd_diff"] = snapshot.get("macd_diff", 0.0)
+            preset["atr"] = snapshot.get("atr", 0.001)
+        elif snapshot and tool_id == "trade_sizing":
+            preset["price"] = snapshot.get("last_price", 0.0)
+            preset["atr"] = snapshot.get("atr", 0.0)
 
         toolkit.register_tool_function(wrapped, preset_kwargs=preset if preset else None)
 

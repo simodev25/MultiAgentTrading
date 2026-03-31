@@ -1174,7 +1174,13 @@ def technical_scoring(
     change_val = min(max(change_pct / 1.0, -1.0), 1.0) * CHANGE_WEIGHT
     momentum_score = rsi_val + macd_val + change_val
 
-    pattern_score = sum(PATTERN_WEIGHT * (1 if p.get("direction") == "bullish" else -1) for p in patterns)
+    # Accept both "direction" (legacy) and "signal" (from pattern_detector tool).
+    # Neutral patterns (e.g. doji) contribute 0, not -1.
+    _PAT_DIR = {"bullish": 1, "bearish": -1}
+    pattern_score = sum(
+        PATTERN_WEIGHT * _PAT_DIR.get(p.get("direction") or p.get("signal", ""), 0)
+        for p in patterns
+    )
     divergence_score = sum(DIVERGENCE_WEIGHT * (1 if d.get("type") == "bullish" else -1) for d in divergences)
     multi_tf_score = multi_tf_alignment * MULTI_TF_WEIGHT
     level_score = (support_proximity - resistance_proximity) * LEVEL_WEIGHT

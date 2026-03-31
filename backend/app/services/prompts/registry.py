@@ -115,6 +115,8 @@ class SafeDict(dict):
 
 
 class PromptTemplateService:
+    # Canonical key names for the score breakdown (with _score suffix).
+    # These match the sign guardrails block and the LLM output contract.
     TECHNICAL_SCORE_KEYS: tuple[str, ...] = (
         'structure_score',
         'momentum_score',
@@ -126,6 +128,18 @@ class PromptTemplateService:
         'recency_adjustment',
         'final_score',
     )
+
+    # Maps short names returned by technical_scoring().components to canonical
+    # _score suffix names.  Used to accept dicts with either naming convention
+    # in _format_runtime_score_breakdown_block().
+    _SCORE_SHORT_TO_CANONICAL: dict[str, str] = {
+        'structure': 'structure_score',
+        'momentum': 'momentum_score',
+        'pattern': 'pattern_score',
+        'divergence': 'divergence_score',
+        'multi_tf': 'multi_timeframe_score',
+        'level': 'level_score',
+    }
     TECHNICAL_SIGN_GUARDRAILS_BLOCK = (
         "Authoritative runtime rules (mandatory):\n"
         "- Unique sign convention: bullish = positive score, bearish = negative score, neutral = zero or near-zero score.\n"
@@ -229,6 +243,16 @@ class PromptTemplateService:
 
     @classmethod
     def _format_runtime_score_breakdown_block(cls, variables: dict[str, Any]) -> str:
+        """Format the authoritative runtime score breakdown for prompt injection.
+
+        Accepts dicts with either canonical keys (``structure_score``) or short
+        keys (``structure``) from ``technical_scoring().components``.  Output
+        always uses canonical ``_score`` suffix names for consistency with the
+        sign guardrails block and the LLM output contract.
+
+        If ``runtime_score_breakdown_block`` is already a non-empty string
+        (pre-formatted by ``_build_prompt_variables``), it is returned as-is.
+        """
         explicit_block = variables.get('runtime_score_breakdown_block')
         if isinstance(explicit_block, str) and explicit_block.strip():
             return explicit_block.strip()
@@ -241,10 +265,15 @@ class PromptTemplateService:
 
         lines = []
         for key in cls.TECHNICAL_SCORE_KEYS:
-            if key not in runtime_breakdown:
-                continue
             value = runtime_breakdown.get(key)
-            lines.append(f'{key}={value}')
+            if value is None:
+                # Check short-name aliases (e.g. 'structure' → 'structure_score')
+                for short, canonical in cls._SCORE_SHORT_TO_CANONICAL.items():
+                    if canonical == key and short in runtime_breakdown:
+                        value = runtime_breakdown[short]
+                        break
+            if value is not None:
+                lines.append(f'{key}={value}')
         if not lines:
             return 'UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN'
         return '\n'.join(lines)
