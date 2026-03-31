@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     env: str = Field(default='dev', alias='ENV')
     api_prefix: str = Field(default='/api/v1', alias='API_PREFIX')
 
-    secret_key: str = Field(default='change-me', alias='SECRET_KEY')
+    secret_key: str = Field(default='', alias='SECRET_KEY')
     access_token_expire_minutes: int = Field(default=720, alias='ACCESS_TOKEN_EXPIRE_MINUTES')
     cors_origins: Annotated[List[str], NoDecode] = Field(
         default_factory=lambda: ['http://localhost:5173'],
@@ -163,12 +163,16 @@ class Settings(BaseSettings):
     prometheus_worker_port: int = Field(default=9101, alias='PROMETHEUS_WORKER_PORT')
     open_telemetry_enabled: bool = Field(default=False, alias='OPEN_TELEMETRY_ENABLED')
     ws_require_auth: bool = Field(default=True, alias='WS_REQUIRE_AUTH')
-    ws_allow_query_token: bool = Field(default=True, alias='WS_ALLOW_QUERY_TOKEN')
+    ws_allow_query_token: bool = Field(default=False, alias='WS_ALLOW_QUERY_TOKEN')
     ws_run_poll_seconds: float = Field(default=2.0, alias='WS_RUN_POLL_SECONDS')
     ws_trading_orders_poll_seconds: float = Field(default=2.0, alias='WS_TRADING_ORDERS_POLL_SECONDS')
     debate_max_rounds: int = Field(default=3, alias='DEBATE_MAX_ROUNDS')
     debate_min_rounds: int = Field(default=1, alias='DEBATE_MIN_ROUNDS')
     agentscope_max_iters: int = Field(default=3, alias='AGENTSCOPE_MAX_ITERS')
+    agentscope_agent_timeout_seconds: int = Field(default=60, ge=10, le=300, alias='AGENTSCOPE_AGENT_TIMEOUT_SECONDS')
+    agentscope_candle_limit: int = Field(default=240, ge=50, le=1000, alias='AGENTSCOPE_CANDLE_LIMIT')
+    agentscope_min_bars: int = Field(default=30, ge=10, le=100, alias='AGENTSCOPE_MIN_BARS')
+    agentscope_retry_count: int = Field(default=3, ge=1, le=5, alias='AGENTSCOPE_RETRY_COUNT')
     log_agent_steps: bool = Field(default=True, alias='LOG_AGENT_STEPS')
     backtest_agent_log_every: int = Field(default=25, alias='BACKTEST_AGENT_LOG_EVERY')
     backtest_enable_llm: bool = Field(default=False, alias='BACKTEST_ENABLE_LLM')
@@ -265,6 +269,21 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     settings = Settings()
+
+    # Generate a random secret key if none is configured (dev convenience)
+    if not settings.secret_key or settings.secret_key == 'change-me':
+        import secrets as _secrets
+        settings.secret_key = _secrets.token_urlsafe(48)
+        import logging as _log
+        _logger = _log.getLogger(__name__)
+        if settings.env == 'production':
+            _logger.critical(
+                "SECRET_KEY not set in production! A random key was generated. "
+                "Set SECRET_KEY env var for stable JWT signing across restarts."
+            )
+        else:
+            _logger.warning("SECRET_KEY not set — generated ephemeral key (tokens invalidated on restart)")
+
     # Backward-compatible aliases used by some MetaApi setups.
     if not settings.metaapi_token:
         settings.metaapi_token = os.getenv('API_TOKEN', '').strip()

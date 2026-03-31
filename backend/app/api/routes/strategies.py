@@ -150,9 +150,13 @@ def _next_strategy_id(db: Session) -> str:
 def list_strategies(
     limit: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db),
-    _=Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN, Role.TRADER_OPERATOR, Role.ANALYST, Role.VIEWER)),
+    user: User = Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN, Role.TRADER_OPERATOR, Role.ANALYST, Role.VIEWER)),
 ) -> list[StrategyOut]:
-    strategies = db.query(Strategy).order_by(Strategy.created_at.desc()).limit(limit).all()
+    query = db.query(Strategy)
+    # Per-user data isolation: admins see all, others see only their own
+    if user.role not in {Role.SUPER_ADMIN, Role.ADMIN}:
+        query = query.filter(Strategy.created_by_id == user.id)
+    strategies = query.order_by(Strategy.created_at.desc()).limit(limit).all()
     return [StrategyOut.model_validate(s) for s in strategies]
 
 

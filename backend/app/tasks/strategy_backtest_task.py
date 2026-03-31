@@ -24,13 +24,15 @@ def execute(strategy_db_id: int) -> None:
             return
 
         engine = BacktestEngine()
-        # Backtest on default pair/timeframe for last 30 days
+        # Backtest on strategy's own symbol/timeframe (fallback to EURUSD.PRO H1)
+        pair = strategy.symbol or 'EURUSD.PRO'
+        timeframe = strategy.timeframe or 'H1'
         end_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         start_date = (datetime.now(timezone.utc) - timedelta(days=30)).strftime('%Y-%m-%d')
 
         try:
             result = engine.run(
-                'EURUSD.PRO', 'H1',
+                pair, timeframe,
                 start_date, end_date,
                 strategy=strategy.template,
                 db=db,

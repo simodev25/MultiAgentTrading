@@ -1,4 +1,7 @@
 import asyncio
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from app.core.security import create_access_token
 from app.db.models.user import User
@@ -30,20 +33,32 @@ def test_authorize_websocket_rejects_missing_token(monkeypatch) -> None:
     assert ws.closed_code == 1008
 
 
-def test_authorize_websocket_accepts_valid_token_with_active_user(monkeypatch) -> None:
-    ws = _FakeWebSocket(headers={'authorization': f'Bearer {create_access_token("42", "admin")}'})
+@pytest.mark.asyncio
+async def test_authorize_websocket_accepts_valid_token_with_active_user(monkeypatch) -> None:
+    monkeypatch.setattr(settings, 'secret_key', 'test-stable-ws-key-suite')
     monkeypatch.setattr(settings, 'ws_require_auth', True)
 
-    class _FakeSession:
-        def get(self, _model, user_id: int):
-            if user_id != 42:
-                return None
-            return User(id=42, email='ws@local.dev', hashed_password='x', role='admin', is_active=True)
+    token = create_access_token("42", "admin")
+    ws = _FakeWebSocket(headers={'authorization': f'Bearer {token}'})
 
-        def close(self) -> None:
-            return
+    fake_user = User(id=42, email='ws@local.dev', hashed_password='x', role='admin', is_active=True)
+    mock_session = MagicMock()
+    mock_session.get.return_value = fake_user
 
-    monkeypatch.setattr('app.main.SessionLocal', lambda: _FakeSession())
+    monkeypatch.setattr('app.main._get_session', lambda: mock_session)
 
-    assert asyncio.run(_authorize_websocket(ws)) is True
+    # Also patch the settings used by security.py's create_access_token / jwt.decode
+    from app.core.config import get_settings as _gs
+    _gs_settings = _gs()
+    monkeypatch.setattr(_gs_settings, 'secret_key', 'test-stable-ws-key-suite')
+
+    # Re-create token with the patched key
+    token = create_access_token("42", "admin")
+    ws = _FakeWebSocket(headers={'authorization': f'Bearer {token}'})
+
+    result = await _authorize_websocket(ws)
+
+    assert result is True
     assert ws.closed_code is None
+    mock_session.get.assert_called_once_with(User, 42)
+    mock_session.close.assert_called_once()

@@ -66,13 +66,19 @@ async def lifespan(_: FastAPI):
         db = SessionLocal()
         try:
             if db.query(User).count() == 0:
+                import secrets as _s
+                _bootstrap_pw = os.environ.get('BOOTSTRAP_ADMIN_PASSWORD', '') or _s.token_urlsafe(16)
+                _bootstrap_email = os.environ.get('BOOTSTRAP_ADMIN_EMAIL', 'admin@local.dev')
                 admin = User(
-                    email='admin@local.dev',
-                    hashed_password=get_password_hash('admin1234'),
+                    email=_bootstrap_email,
+                    hashed_password=get_password_hash(_bootstrap_pw),
                     role=Role.SUPER_ADMIN,
                     is_active=True,
                 )
                 db.add(admin)
+                logger.info("Bootstrap admin created: %s (password from BOOTSTRAP_ADMIN_PASSWORD env or generated)", _bootstrap_email)
+                if not os.environ.get('BOOTSTRAP_ADMIN_PASSWORD'):
+                    logger.warning("Generated bootstrap admin password: %s — set BOOTSTRAP_ADMIN_PASSWORD to control this", _bootstrap_pw)
 
             for name in ['ollama', 'metaapi', 'yfinance']:
                 exists = db.query(ConnectorConfig).filter(ConnectorConfig.connector_name == name).first()
@@ -141,6 +147,19 @@ app.add_middleware(
     allow_headers=['*'],
 )
 
+
+
+# Security headers middleware
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
+
+
 app.include_router(api_router, prefix=settings.api_prefix)
 
 if settings.open_telemetry_enabled:
@@ -185,6 +204,11 @@ def _resolve_websocket_token(websocket: WebSocket) -> str | None:
     return None
 
 
+def _get_session():
+    """Indirection for testability — allows patching the session factory."""
+    return SessionLocal()
+
+
 async def _authorize_websocket(websocket: WebSocket) -> bool:
     if not settings.ws_require_auth:
         return True
@@ -201,7 +225,7 @@ async def _authorize_websocket(websocket: WebSocket) -> bool:
         await websocket.close(code=1008)
         return False
 
-    db: Session = SessionLocal()
+    db: Session = _get_session()
     try:
         user = db.get(User, user_id)
         if not user or not user.is_active:

@@ -292,3 +292,40 @@ def test_prompt_registry_render_technical_injects_sign_guardrails_for_legacy_pro
         assert 'Unique sign convention: bullish = positive score' in rendered['system_prompt']
         assert 'Authoritative runtime score breakdown' in rendered['user_prompt']
         assert 'UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN' in rendered['user_prompt']
+
+
+def test_prompt_registry_render_technical_runtime_score_breakdown_accepts_short_names() -> None:
+    """Score breakdown dict with short names (from technical_scoring().components) should
+    be normalized to canonical _score suffix names in the prompt output."""
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(bind=engine)
+
+    service = PromptTemplateService()
+    with Session(engine) as db:
+        service.seed_defaults(db)
+        rendered = service.render(
+            db=db,
+            agent_name='technical-analyst',
+            fallback_system='system',
+            fallback_user='unused',
+            variables={
+                'pair': 'EURUSD',
+                'asset_class': 'forex',
+                'timeframe': 'M15',
+                'raw_facts_block': '- trend=bearish',
+                'tool_results_block': '- [tool:indicator_bundle] trend=bearish',
+                'interpretation_rules_block': '',
+                'score_breakdown': {
+                    'structure': -0.35,
+                    'momentum': -0.1286,
+                    'multi_tf': -0.16,
+                    'final_score': -0.4206,
+                },
+            },
+        )
+
+        # Short names should be normalized to canonical _score suffix in output
+        assert 'structure_score=-0.35' in rendered['user_prompt']
+        assert 'momentum_score=-0.1286' in rendered['user_prompt']
+        assert 'multi_timeframe_score=-0.16' in rendered['user_prompt']
+        assert 'final_score=-0.4206' in rendered['user_prompt']

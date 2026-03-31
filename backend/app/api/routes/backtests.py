@@ -24,9 +24,13 @@ logger = logging.getLogger(__name__)
 def list_backtests(
     limit: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db),
-    _=Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN, Role.TRADER_OPERATOR, Role.ANALYST, Role.VIEWER)),
+    user: User = Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN, Role.TRADER_OPERATOR, Role.ANALYST, Role.VIEWER)),
 ) -> list[BacktestRunOut]:
-    runs = db.query(BacktestRun).order_by(BacktestRun.created_at.desc()).limit(limit).all()
+    query = db.query(BacktestRun)
+    # Per-user data isolation: admins see all, others see only their own
+    if user.role not in {Role.SUPER_ADMIN, Role.ADMIN}:
+        query = query.filter(BacktestRun.created_by_id == user.id)
+    runs = query.order_by(BacktestRun.created_at.desc()).limit(limit).all()
     return [BacktestRunOut.model_validate(run) for run in runs]
 
 

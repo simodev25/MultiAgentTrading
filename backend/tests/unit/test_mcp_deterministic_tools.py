@@ -54,6 +54,35 @@ def test_trade_sizing_sell():
     assert result["take_profit"] < result["entry"] < result["stop_loss"]
 
 
+def test_technical_scoring_patterns_use_signal_field():
+    """Patterns from pattern_detector use 'signal' not 'direction'.
+    Bullish patterns must contribute positive score, bearish negative,
+    neutral (doji) must contribute zero."""
+    result = technical_scoring(
+        trend="neutral", rsi=50.0, macd_diff=0.0, atr=0.005,
+        patterns=[
+            {"signal": "bullish", "type": "bullish_engulfing"},
+            {"signal": "bullish", "type": "pin_bar"},
+            {"signal": "neutral", "type": "doji"},
+            {"signal": "bearish", "type": "bearish_engulfing"},
+        ],
+    )
+    # 2 bullish (+2) + 1 neutral (0) + 1 bearish (-1) = net +1
+    assert result["components"]["pattern"] > 0, (
+        f"Net bullish patterns should give positive pattern_score, got {result['components']['pattern']}"
+    )
+
+
+def test_technical_scoring_patterns_legacy_direction_field():
+    """Legacy patterns with 'direction' field should still work."""
+    result = technical_scoring(
+        trend="neutral", rsi=50.0, macd_diff=0.0, atr=0.005,
+        patterns=[{"direction": "bullish"}, {"direction": "bearish"}],
+    )
+    # 1 bullish + 1 bearish = net 0
+    assert result["components"]["pattern"] == 0
+
+
 def test_news_evidence_scoring_empty():
     result = news_evidence_scoring()
     assert result["coverage"] == "none"

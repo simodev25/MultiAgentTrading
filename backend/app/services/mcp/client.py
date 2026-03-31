@@ -36,10 +36,14 @@ class InProcessMCPClient:
         if handler is None:
             return {"error": f"Unknown tool: {tool_id}"}
         try:
-            return handler(**kwargs)
+            result = handler(**kwargs)
+            # If handler is a coroutine, await it
+            if inspect.isawaitable(result):
+                result = await result
+            return result
         except Exception as exc:
-            logger.warning("MCP tool %s failed: %s", tool_id, exc)
-            return {"error": str(exc)}
+            logger.warning("MCP tool %s failed: %s", tool_id, exc, exc_info=True)
+            return {"error": f"{type(exc).__name__}: {exc}"}
 
 
 _client: InProcessMCPClient | None = None

@@ -40,13 +40,20 @@ def me(user: User = Depends(get_current_user)) -> UserOut:
 
 @router.post('/bootstrap-admin', response_model=UserOut)
 def bootstrap_admin(db: Session = Depends(get_db)) -> UserOut:
+    import os
+    import secrets as _secrets
+
     existing = db.query(User).count()
     if existing > 0:
         raise HTTPException(status_code=400, detail='Bootstrap already completed')
 
+    # Require BOOTSTRAP_ADMIN_PASSWORD env var or generate a random one
+    password = os.environ.get('BOOTSTRAP_ADMIN_PASSWORD', '') or _secrets.token_urlsafe(16)
+    email = os.environ.get('BOOTSTRAP_ADMIN_EMAIL', 'admin@local.dev')
+
     admin = User(
-        email='admin@local.dev',
-        hashed_password=get_password_hash('admin1234'),
+        email=email,
+        hashed_password=get_password_hash(password),
         role=Role.SUPER_ADMIN,
         is_active=True,
     )

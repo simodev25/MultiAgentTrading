@@ -32,9 +32,9 @@ BALANCED = DecisionGatingPolicy(
 PERMISSIVE = DecisionGatingPolicy(
     min_combined_score=0.13, min_confidence=0.25, min_aligned_sources=1,
     allow_technical_single_source_override=True, block_major_contradiction=True,
-    contradiction_penalty_weak=0.02, contradiction_penalty_moderate=0.06,
-    contradiction_penalty_major=0.11, confidence_multiplier_moderate=0.85,
-    confidence_multiplier_major=0.70,
+    contradiction_penalty_weak=0.01, contradiction_penalty_moderate=0.04,
+    contradiction_penalty_major=0.08, confidence_multiplier_moderate=0.90,
+    confidence_multiplier_major=0.75,
 )
 DECISION_MODES: dict[str, DecisionGatingPolicy] = {
     "conservative": CONSERVATIVE, "balanced": BALANCED, "permissive": PERMISSIVE,
@@ -51,16 +51,19 @@ def higher_timeframes(current_tf: str, max_count: int = 2) -> list[str]:
     cap = TIMEFRAME_ORDER.index(MAX_USEFUL_TF)
     return list(TIMEFRAME_ORDER[idx + 1 : min(idx + 1 + max_count, cap + 1)])
 
-# Technical scoring weights
-TREND_WEIGHT = 0.24
-EMA_WEIGHT = 0.11
-RSI_WEIGHT = 0.14
-MACD_WEIGHT = 0.18
-CHANGE_WEIGHT = 0.07
+# Technical scoring weights (MUST sum to 1.0)
+TREND_WEIGHT = 0.22
+EMA_WEIGHT = 0.10
+RSI_WEIGHT = 0.13
+MACD_WEIGHT = 0.16
+CHANGE_WEIGHT = 0.06
 PATTERN_WEIGHT = 0.06
-DIVERGENCE_WEIGHT = 0.08
-MULTI_TF_WEIGHT = 0.16
+DIVERGENCE_WEIGHT = 0.07
+MULTI_TF_WEIGHT = 0.14
 LEVEL_WEIGHT = 0.06
+
+_WEIGHT_SUM = TREND_WEIGHT + EMA_WEIGHT + RSI_WEIGHT + MACD_WEIGHT + CHANGE_WEIGHT + PATTERN_WEIGHT + DIVERGENCE_WEIGHT + MULTI_TF_WEIGHT + LEVEL_WEIGHT
+assert abs(_WEIGHT_SUM - 1.0) < 1e-6, f"Scoring weights must sum to 1.0, got {_WEIGHT_SUM}"
 
 # Risk sizing
 SL_ATR_MULTIPLIER = 1.5

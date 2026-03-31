@@ -1,6 +1,6 @@
 # Frontend UI Documentation
 
-> Forex Multi-Agent Trading Platform — Terminal-style React SPA
+> Multi-Agent Trading Platform — Terminal-style React SPA
 
 ---
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -51,7 +52,8 @@ async def _extract_tool_invocations(agent) -> dict[str, dict[str, Any]]:
 
     try:
         msgs = await agent.memory.get_memory()
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to extract tool invocations from agent memory: %s", exc)
         return invocations
 
     # Collect tool_use and tool_result pairs by id
@@ -61,7 +63,8 @@ async def _extract_tool_invocations(agent) -> dict[str, dict[str, Any]]:
     for msg in msgs:
         try:
             blocks = msg.get_content_blocks()
-        except Exception:
+        except Exception as exc:
+            logger.debug("Failed to get content blocks from message: %s", exc)
             continue
         for block in blocks:
             if not isinstance(block, dict):
@@ -166,6 +169,149 @@ def _msg_to_dict(msg: Msg | None, tool_invocations: dict | None = None) -> dict[
                 result.setdefault("tool_results", {})[tool_name] = data
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Technical-analyst output consistency helpers
+# ---------------------------------------------------------------------------
+
+# Maps technical_scoring() component short names → canonical prompt names
+# matching the sign guardrails block and the output contract.
+_COMPONENT_TO_PROMPT_KEY: dict[str, str] = {
+    "structure": "structure_score",
+    "momentum": "momentum_score",
+    "pattern": "pattern_score",
+    "divergence": "divergence_score",
+    "multi_tf": "multi_timeframe_score",
+    "level": "level_score",
+}
+
+
+def _patch_technical_analyst_output(msg_dict: dict, scoring_result: dict) -> None:
+    """Override technical-analyst output with authoritative runtime scoring.
+
+    Ensures metadata and text are mutually consistent, and both reflect
+    the deterministic scoring pipeline rather than LLM-generated values.
+
+    **Score semantics**:
+
+    * ``raw_score`` / ``final_score`` / ``score`` — all equal the deterministic
+      composite from ``technical_scoring()``.  The pipeline produces a single
+      score; there is no separate post-contradiction deterministic penalty.
+      The LLM's role is qualitative interpretation (setup_quality, tradability,
+      contradictions), not score rewriting.
+
+    * ``score_breakdown`` — component dict from ``technical_scoring().components``,
+      using short key names (structure, momentum, …) in metadata.
+
+    **Known limitation**: The pre-computed score uses only snapshot indicators
+    (trend, RSI, MACD, EMA, change_pct).  Patterns, divergences, multi-TF
+    alignment, and S/R levels discovered by agent tools during execution are
+    NOT reflected in the score.  This means pattern, divergence, multi_tf,
+    and level components will be zero unless a post-execution re-computation
+    step is added.
+    """
+    if not scoring_result:
+        return
+
+    runtime_score = scoring_result.get("score", 0.0)
+    runtime_signal = scoring_result.get("signal", "neutral")
+    runtime_confidence = scoring_result.get("confidence", 0.5)
+    runtime_setup = scoring_result.get("setup_state", "conditional")
+    components = scoring_result.get("components", {})
+
+    meta = msg_dict.setdefault("metadata", {})
+
+    # ── Authoritative runtime overrides ──
+    meta["score_breakdown"] = components
+    meta["raw_score"] = runtime_score
+    meta["final_score"] = runtime_score      # same as raw_score — see docstring
+    meta["score"] = runtime_score
+    meta["signal"] = runtime_signal
+
+    # Override confidence/setup_state only if LLM returned empty/zero
+    if not meta.get("confidence") or meta.get("confidence") == 0:
+        meta["confidence"] = runtime_confidence
+    if not meta.get("setup_state"):
+        meta["setup_state"] = runtime_setup
+
+    # Flatten component scores into metadata for direct access
+    for comp_key in ("structure", "momentum", "pattern", "divergence", "multi_tf", "level"):
+        meta[comp_key] = components.get(comp_key, 0.0)
+
+    # ── Patch text to match authoritative metadata ──
+    text = msg_dict.get("text", "")
+    if text:
+        msg_dict["text"] = _patch_technical_text(text, meta)
+
+
+def _patch_technical_text(text: str, authoritative_meta: dict) -> str:
+    """Patch the LLM's text output so score fields match authoritative runtime values.
+
+    Handles both markdown-fenced JSON (````` ```json … ``` `````) and bare JSON
+    objects.  Non-JSON text is returned unchanged — the LLM's qualitative
+    commentary (summaries, contradiction descriptions) is preserved.
+
+    This ensures downstream consumers reading the ``text`` field see values
+    consistent with ``metadata``.
+    """
+    if not text:
+        return text
+
+    # Fields to override in any JSON block found in the text
+    override_keys = ("raw_score", "final_score", "score", "signal", "score_breakdown")
+
+    def _apply_overrides(parsed: dict) -> None:
+        for key in override_keys:
+            if key in authoritative_meta:
+                parsed[key] = authoritative_meta[key]
+
+    # Try markdown-fenced JSON first
+    fence_pattern = re.compile(r"(```(?:json)?\s*\n)(\{.*?\})(\s*\n```)", re.DOTALL)
+    match = fence_pattern.search(text)
+    if match:
+        try:
+            parsed = json.loads(match.group(2))
+            if isinstance(parsed, dict):
+                _apply_overrides(parsed)
+                updated = json.dumps(parsed, indent=2, ensure_ascii=False)
+                return text[: match.start(2)] + updated + text[match.end(2) :]
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Try bare JSON (no code fences)
+    start = text.find("{")
+    if start >= 0:
+        end = text.rfind("}")
+        if end > start:
+            try:
+                parsed = json.loads(text[start : end + 1])
+                if isinstance(parsed, dict):
+                    _apply_overrides(parsed)
+                    updated = json.dumps(parsed, indent=2, ensure_ascii=False)
+                    return text[:start] + updated + text[end + 1 :]
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+    # ── Fallback: plain-text replacement ──
+    # When the LLM outputs free-form text (not JSON), replace the
+    # UNAVAILABLE sentinel and inject the real score breakdown so that
+    # downstream consumers (e.g. trader-agent prompt) see correct values.
+    score_breakdown = authoritative_meta.get("score_breakdown")
+    if score_breakdown and isinstance(score_breakdown, dict):
+        formatted = ", ".join(f"{k}={v}" for k, v in score_breakdown.items())
+        # Replace any occurrence of the UNAVAILABLE sentinel
+        text = text.replace("UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN", formatted)
+    # Also fix raw_score / final_score if they appear as literal "0.0" in text
+    for field in ("raw_score", "final_score"):
+        if field in authoritative_meta:
+            # Pattern: "raw_score: 0.0" or "raw_score=0.0" in free text
+            for sep in (": ", "="):
+                old_fragment = f"{field}{sep}0.0"
+                new_fragment = f"{field}{sep}{authoritative_meta[field]}"
+                text = text.replace(old_fragment, new_fragment)
+
+    return text
 
 
 def _filter_invalid_invalidations(metadata: dict, agent_name: str, snapshot: dict) -> None:
@@ -426,6 +572,11 @@ class AgentScopeRegistry:
         ) if macro_items else "No macro events available."
 
         # Raw facts block (for technical-analyst)
+        # NOTE: These values come from the pre-execution market snapshot.  The
+        # agent's tool calls (e.g. indicator_bundle()) may return slightly
+        # different values because they recompute from OHLC arrays.  The
+        # snapshot is the source of truth for the pre-computed runtime score
+        # breakdown; tool results are the source of truth for detailed analysis.
         raw_facts_lines = []
         for key in ("trend", "rsi", "macd_diff", "atr", "last_price", "change_pct"):
             val = snapshot.get(key)
@@ -433,7 +584,13 @@ class AgentScopeRegistry:
                 raw_facts_lines.append(f"- {key.replace('_', ' ').title()}: {val} [tool:indicator_bundle]")
         raw_facts_block = "\n".join(raw_facts_lines) if raw_facts_lines else "No raw facts available."
 
-        # Pre-compute technical_scoring for score_breakdown
+        # Pre-compute technical_scoring for score_breakdown.
+        # Uses ONLY snapshot indicators (trend, rsi, macd_diff, atr, ema, change_pct).
+        # Patterns, divergences, multi-TF alignment, and S/R levels are NOT available
+        # at this stage — they are discovered by agent tools during execution.
+        # Therefore pattern_score, divergence_score, multi_timeframe_score, and
+        # level_score will be zero in this pre-computation.  See
+        # _patch_technical_analyst_output() for the post-execution override.
         runtime_score_breakdown_text = "UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN"
         try:
             from app.services.mcp.trading_server import technical_scoring
@@ -446,11 +603,15 @@ class AgentScopeRegistry:
                 change_pct=snapshot.get("change_pct", 0.0),
             )
             components = scoring.get("components", {})
-            score_lines = [f"{k}={v}" for k, v in components.items()]
+            # Use canonical _score suffix names matching sign guardrails & output contract
+            score_lines = [
+                f"{_COMPONENT_TO_PROMPT_KEY.get(k, k)}={v}"
+                for k, v in components.items()
+            ]
             score_lines.append(f"final_score={scoring.get('score', 0)}")
             runtime_score_breakdown_text = "\n".join(score_lines)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to compute runtime score breakdown: %s", exc)
 
         # Store the full scoring result for runtime injection (Fix 1)
         _scoring_result: dict[str, Any] = {}
@@ -538,9 +699,17 @@ class AgentScopeRegistry:
                 error=error,
             )
             db.add(step)
-            db.commit()
+            # NOTE: commit is deferred — call _flush_pending_steps() after all phases
         except Exception as exc:
             logger.warning("Failed to record step for %s: %s", agent_name, exc)
+
+    @staticmethod
+    def _flush_pending_steps(db) -> None:
+        """Flush all pending agent steps in a single batch commit."""
+        try:
+            db.commit()
+        except Exception as exc:
+            logger.warning("Failed to batch-commit agent steps: %s", exc)
 
     @staticmethod
     def _build_agentic_runtime(
@@ -858,12 +1027,24 @@ class AgentScopeRegistry:
             logger.warning("Failed to write debug trace: %s", exc)
 
     def _build_prompt_meta(self, db, agent_name: str, model_name: str, llm_enabled: bool,
-                           variables: dict | None = None) -> dict[str, Any]:
-        """Build prompt_meta dict matching v1 format for an agent."""
+                           variables: dict | None = None,
+                           _prompt_cache: dict | None = None) -> dict[str, Any]:
+        """Build prompt_meta dict matching v1 format for an agent.
+
+        If _prompt_cache is provided, rendered prompts are memoized per agent_name
+        to avoid redundant DB lookups and template rendering within a single run.
+        """
         from app.services.llm.model_selector import AgentModelSelector
         from app.services.agentscope.toolkit import AGENT_TOOL_MAP
 
-        rendered = self._render_prompt(db, agent_name, variables)
+        # Memoize prompt rendering within a run
+        if _prompt_cache is not None and agent_name in _prompt_cache:
+            rendered = _prompt_cache[agent_name]
+        else:
+            rendered = self._render_prompt(db, agent_name, variables)
+            if _prompt_cache is not None:
+                _prompt_cache[agent_name] = rendered
+
         enabled_tools = AGENT_TOOL_MAP.get(agent_name, [])
 
         return {
@@ -1017,8 +1198,8 @@ class AgentScopeRegistry:
             try:
                 run.progress = pct
                 db.commit()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Failed to update run progress to %d%%: %s", pct, exc)
 
         try:
             run.status = "running"
@@ -1057,13 +1238,14 @@ class AgentScopeRegistry:
                 if not enabled:
                     logger.info("LLM disabled for agent %s — will run deterministic", name)
 
-            # Build toolkits with OHLC preset + DB skills
+            # Build toolkits with OHLC preset + DB skills + snapshot for trader tools
             toolkits = {}
             for name in ALL_AGENT_FACTORIES:
                 agent_skills = model_selector.resolve_skills(db, name)
                 toolkits[name] = await build_toolkit(
                     name, ohlc=ohlc, news=market_data.get("news", {}),
                     skills=agent_skills,
+                    snapshot=snapshot,
                 )
 
             # Build prompt variables for context injection
@@ -1083,38 +1265,81 @@ class AgentScopeRegistry:
                 )
 
             analysis_outputs: dict[str, dict] = {}
+            _prompt_cache: dict[str, dict] = {}  # Memoize prompt renders within this run
 
             # Store tool invocations per agent (filled after each call)
             agent_tool_invocations: dict[str, dict] = {}
+
+            from app.core.config import get_settings as _gs
+            _agent_timeout = getattr(_gs(), "agentscope_agent_timeout_seconds", 60)
 
             async def _call_agent(
                 name: str, msg: Msg,
                 trader_out: dict | None = None, risk_out: dict | None = None,
             ) -> Msg:
-                """Call agent via LLM (with retry on 5xx) or deterministic."""
+                """Call agent via LLM (with retry on 5xx and timeout) or deterministic.
+
+                AgentScope's ReActAgent catches ``asyncio.CancelledError``
+                internally in ``handle_interrupt()`` and returns a Msg with
+                ``metadata._is_interrupted = True`` plus a generic text like
+                "I noticed that you have interrupted me".  This means
+                ``asyncio.wait_for`` will NOT raise ``TimeoutError`` — it gets
+                a normal-looking result.  We must therefore check for the
+                ``_is_interrupted`` flag explicitly and fall back to
+                deterministic execution when detected.
+                """
                 if name in agents:
                     schema = AGENT_STRUCTURED_MODELS.get(name)
                     last_err: Exception | None = None
                     for attempt in range(3):
                         try:
                             if schema:
-                                result = await agents[name](msg, structured_model=schema)
+                                result = await asyncio.wait_for(
+                                    agents[name](msg, structured_model=schema),
+                                    timeout=_agent_timeout,
+                                )
                             else:
-                                result = await agents[name](msg)
+                                result = await asyncio.wait_for(
+                                    agents[name](msg),
+                                    timeout=_agent_timeout,
+                                )
+
+                            # AgentScope silently catches CancelledError inside
+                            # handle_interrupt() and returns a result with
+                            # _is_interrupted=True.  Detect this and fall back
+                            # to deterministic execution instead of accepting
+                            # the useless "I noticed you interrupted me" text.
+                            _meta = getattr(result, "metadata", None) or {}
+                            if isinstance(_meta, dict) and _meta.get("_is_interrupted"):
+                                logger.warning(
+                                    "Agent %s was interrupted (likely timeout after %ds), "
+                                    "falling back to deterministic",
+                                    name, _agent_timeout,
+                                )
+                                # Still extract partial tool invocations if any
+                                agent_tool_invocations[name] = await _extract_tool_invocations(agents[name])
+                                break
+
                             agent_tool_invocations[name] = await _extract_tool_invocations(agents[name])
                             return result
+                        except asyncio.TimeoutError:
+                            logger.warning("Agent %s timed out after %ds, falling back to deterministic", name, _agent_timeout)
+                            break
                         except Exception as exc:
                             last_err = exc
                             err_str = str(exc)
                             if any(code in err_str for code in ("500", "502", "503", "Internal Server Error")):
-                                wait = (attempt + 1) * 3
+                                wait = min((attempt + 1) * 3, 9)
                                 logger.warning("Agent %s got 5xx, retry in %ds (%d/3): %s", name, wait, attempt + 1, err_str[:100])
                                 await asyncio.sleep(wait)
                                 continue
                             raise
-                    # All retries exhausted — propagate the error
-                    logger.error("Agent %s failed after 3 retries: %s", name, str(last_err)[:200])
-                    raise last_err  # type: ignore[misc]
+                    else:
+                        if last_err is not None:
+                            # All retries exhausted — propagate the error
+                            logger.error("Agent %s failed after 3 retries: %s", name, str(last_err)[:200])
+                            raise last_err
+                # Deterministic fallback (LLM disabled, timeout, interrupted, or retry exhaustion)
                 return await self._run_deterministic(
                     name, toolkits.get(name), msg,
                     ohlc=ohlc, snapshot=snapshot, pair=pair, timeframe=timeframe,
@@ -1122,6 +1347,10 @@ class AgentScopeRegistry:
                     trader_out=trader_out, risk_out=risk_out,
                     news=market_data.get("news", {}),
                 )
+
+            # Clear run-scoped indicator cache before starting agents
+            from app.services.mcp.trading_server import clear_indicator_cache
+            clear_indicator_cache()
 
             # ── Phase 1: Parallel analysts ──
             _set_progress(10)
@@ -1141,31 +1370,37 @@ class AgentScopeRegistry:
                     tool_invocations=invocations,
                 )
                 msg_dict["llm_enabled"] = llm_enabled.get(name, False)
-                msg_dict["prompt_meta"] = self._build_prompt_meta(db, name, model_name, llm_enabled.get(name, False), variables=base_vars)
+                msg_dict["prompt_meta"] = self._build_prompt_meta(db, name, model_name, llm_enabled.get(name, False), variables=base_vars, _prompt_cache=_prompt_cache)
 
-                # Fix 1: FORCE-OVERRIDE deterministic scoring into technical-analyst metadata
-                # The LLM may return score=0.0 or UNAVAILABLE — runtime values always win
-                if name == "technical-analyst" and base_vars.get("_scoring_result"):
-                    sr = base_vars["_scoring_result"]
-                    runtime_score = sr.get("score", 0.0)
-                    runtime_signal = sr.get("signal", "neutral")
-                    runtime_confidence = sr.get("confidence", 0.5)
-                    runtime_setup = sr.get("setup_state", "conditional")
-                    components = sr.get("components", {})
+                # Fix 1: FORCE-OVERRIDE deterministic scoring into technical-analyst
+                # metadata AND text.  The LLM may return score=0.0 or
+                # UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN — runtime values always win.
+                # See _patch_technical_analyst_output() docstring for full semantics.
+                #
+                # Priority for scoring result:
+                #   1. Agent's own technical_scoring() call — includes patterns,
+                #      divergences, multi_tf, and level from tool execution.
+                #   2. Pre-computed from snapshot — only structure + momentum.
+                if name == "technical-analyst":
+                    scoring_result = base_vars.get("_scoring_result", {})
 
-                    meta = msg_dict.setdefault("metadata", {})
-                    # Always override these from runtime — LLM cannot change them
-                    meta["score_breakdown"] = components
-                    meta["raw_score"] = runtime_score
-                    meta["score"] = runtime_score  # Override LLM's score
-                    meta["signal"] = runtime_signal  # Override LLM's signal
-                    # Only override confidence/setup_state if LLM returned 0 or empty
-                    if not meta.get("confidence") or meta.get("confidence") == 0:
-                        meta["confidence"] = runtime_confidence
-                    if not meta.get("setup_state"):
-                        meta["setup_state"] = runtime_setup
-                    for comp_key in ("structure", "momentum", "pattern", "divergence", "multi_tf", "level"):
-                        meta[comp_key] = components.get(comp_key, 0.0)
+                    # Check if the agent called technical_scoring() during
+                    # execution — that result includes all 6 components from
+                    # actual tool data, not just snapshot indicators.
+                    agent_ts = invocations.get("technical_scoring", {}).get("data")
+                    if (isinstance(agent_ts, dict)
+                            and "score" in agent_ts
+                            and "components" in agent_ts
+                            and agent_ts.get("components")):
+                        logger.info(
+                            "Using agent's own technical_scoring result "
+                            "(score=%.4f, 6 components) over pre-computed (score=%.4f)",
+                            agent_ts["score"], scoring_result.get("score", 0),
+                        )
+                        scoring_result = agent_ts
+
+                    if scoring_result:
+                        _patch_technical_analyst_output(msg_dict, scoring_result)
 
                 analysis_outputs[name] = msg_dict
                 self._record_step(db, run, name,
@@ -1205,16 +1440,30 @@ class AgentScopeRegistry:
             )
 
             if debate_agents_enabled:
-                bullish_msg, bearish_msg, debate_result = await run_debate(
-                    bullish=agents["bullish-researcher"],
-                    bearish=agents["bearish-researcher"],
-                    moderator=agents["trader-agent"],
-                    context_msg=research_msg, config=DebateConfig(),
-                )
+                try:
+                    bullish_msg, bearish_msg, debate_result = await asyncio.wait_for(
+                        run_debate(
+                            bullish=agents["bullish-researcher"],
+                            bearish=agents["bearish-researcher"],
+                            moderator=agents["trader-agent"],
+                            context_msg=research_msg, config=DebateConfig(),
+                        ),
+                        timeout=_agent_timeout * 3,  # debate involves multiple agent rounds
+                    )
+                except (asyncio.TimeoutError, Exception) as exc:
+                    logger.warning("Debate failed or timed out, falling back to independent researchers: %s", exc)
+                    bullish_msg = await _call_agent("bullish-researcher", research_msg)
+                    bearish_msg = await _call_agent("bearish-researcher", research_msg)
+                    debate_result = DebateResult(
+                        finished=False, winning_side="neutral", confidence=0.3,
+                        reason=f"Debate failed: {type(exc).__name__}",
+                    )
             else:
-                # Deterministic: run researchers without debate
-                bullish_msg = await _call_agent("bullish-researcher", research_msg)
-                bearish_msg = await _call_agent("bearish-researcher", research_msg)
+                # Deterministic: run researchers in parallel without debate
+                bullish_msg, bearish_msg = await asyncio.gather(
+                    _call_agent("bullish-researcher", research_msg),
+                    _call_agent("bearish-researcher", research_msg),
+                )
                 debate_result = DebateResult(
                     finished=True, winning_side="neutral", confidence=0.5,
                     reason="Debate skipped — LLM disabled for debate agents",
@@ -1239,7 +1488,7 @@ class AgentScopeRegistry:
             for name, msg in [("bullish-researcher", bullish_msg), ("bearish-researcher", bearish_msg)]:
                 d = _msg_to_dict(msg, tool_invocations=agent_tool_invocations.get(name, {}))
                 d["llm_enabled"] = llm_enabled.get(name, False)
-                d["prompt_meta"] = self._build_prompt_meta(db, name, model_name, llm_enabled.get(name, False), variables=base_vars)
+                d["prompt_meta"] = self._build_prompt_meta(db, name, model_name, llm_enabled.get(name, False), variables=base_vars, _prompt_cache=_prompt_cache)
 
                 # Fix 4: Constrain researcher confidence by Phase 1 news scores
                 d.setdefault("metadata", {})
@@ -1327,7 +1576,7 @@ class AgentScopeRegistry:
                     _trader_decision_is_hold = meta.get("decision", "HOLD") == "HOLD"
                 elif name == "risk-manager":
                     base_vars["risk_result"] = d.get("text", "")[:500]
-                d["prompt_meta"] = self._build_prompt_meta(db, name, model_name, llm_enabled.get(name, False), variables=base_vars)
+                d["prompt_meta"] = self._build_prompt_meta(db, name, model_name, llm_enabled.get(name, False), variables=base_vars, _prompt_cache=_prompt_cache)
                 analysis_outputs[name] = d
                 self._record_step(db, run, name,
                     {"phase": "decision", "llm_enabled": llm_enabled.get(name, False)},
@@ -1347,25 +1596,52 @@ class AgentScopeRegistry:
             risk_out = analysis_outputs.get("risk-manager", {})
             exec_out = analysis_outputs.get("execution-manager", {})
 
-            # Determine trade decision from debate + trader output
-            signal = debate_result.winning_side or "neutral"
-            trade_decision = "HOLD"
-            if signal == "bullish":
-                trade_decision = "BUY"
-            elif signal == "bearish":
-                trade_decision = "SELL"
+            # ── Determine trade decision: trader-agent is authoritative, debate is advisory ──
+            trader_meta = trader_out.get("metadata", {})
+            trader_decision_raw = trader_meta.get("decision", "").strip().upper()
+            debate_signal = debate_result.winning_side or "neutral"
+
+            # Trader-agent structured output takes priority over debate
+            if trader_decision_raw in ("BUY", "SELL", "HOLD"):
+                trade_decision = trader_decision_raw
+            else:
+                # Fallback to debate if trader didn't produce valid decision
+                trade_decision = "HOLD"
+                if debate_signal == "bullish":
+                    trade_decision = "BUY"
+                elif debate_signal == "bearish":
+                    trade_decision = "SELL"
+                logger.warning("Trader-agent did not produce valid decision (%r), falling back to debate signal: %s",
+                               trader_decision_raw, trade_decision)
+
+            # Determine signal from authoritative decision
+            signal = {"BUY": "bullish", "SELL": "bearish"}.get(trade_decision, "neutral")
+
+            # Use trader confidence/score if available, debate as fallback
+            trade_confidence = trader_meta.get("confidence", debate_result.confidence)
+            trade_combined_score = trader_meta.get("combined_score")
+            trade_execution_allowed = trader_meta.get("execution_allowed", trade_decision != "HOLD")
+
+            # combined_score recovery from tool invocations (only if truly absent, not 0.0)
+            if trade_combined_score is None:
+                trader_invocations = agent_tool_invocations.get("trader-agent", {})
+                gating_inv = trader_invocations.get("decision_gating", {})
+                trade_combined_score = gating_inv.get("input", {}).get("combined_score")
+                if trade_combined_score is None:
+                    trade_combined_score = gating_inv.get("data", {}).get("combined_score", 0.0)
 
             run.status = "completed"
             run.decision = {
                 # Frontend reads these exact fields
                 "decision": trade_decision,
                 "signal": signal,
-                "confidence": debate_result.confidence,
-                "execution_allowed": trade_decision != "HOLD",
+                "confidence": trade_confidence,
+                "combined_score": trade_combined_score,
+                "execution_allowed": trade_execution_allowed,
                 "execution": {
                     "status": "skipped" if trade_decision == "HOLD" else "simulation",
                 },
-                # Debate details
+                # Debate details (advisory)
                 "debate": {
                     "finished": debate_result.finished,
                     "winning_side": debate_result.winning_side,
@@ -1376,20 +1652,9 @@ class AgentScopeRegistry:
                 "trader_summary": trader_out.get("text", "")[:500],
                 "risk_summary": risk_out.get("text", "")[:500],
                 "execution_summary": exec_out.get("text", "")[:500],
-                # Merge trader metadata if structured output was used
-                **trader_out.get("metadata", {}),
+                # Merge remaining trader metadata (entry, stop_loss, take_profit, reason, etc.)
+                **{k: v for k, v in trader_meta.items() if k not in ("decision", "confidence", "combined_score", "execution_allowed")},
             }
-
-            # Fix combined_score divergence: if metadata has 0.0, check tool invocations
-            if not run.decision.get("combined_score"):
-                trader_invocations = agent_tool_invocations.get("trader-agent", {})
-                gating_inv = trader_invocations.get("decision_gating", {})
-                tool_combined = gating_inv.get("input", {}).get("combined_score")
-                if tool_combined is not None and tool_combined != 0.0:
-                    run.decision["combined_score"] = tool_combined
-                    # Also try to extract from tool output data
-                elif gating_inv.get("data", {}).get("combined_score"):
-                    run.decision["combined_score"] = gating_inv["data"]["combined_score"]
 
             # Preserve initial trace metadata (e.g. triggered_by, strategy info)
             initial_trace = dict(run.trace) if run.trace else {}
@@ -1423,7 +1688,8 @@ class AgentScopeRegistry:
             self._write_debug_trace(run, pair, timeframe, risk_percent,
                                     market_data, analysis_outputs, elapsed)
 
-            db.commit()
+            # Batch-commit all pending agent steps + final run update in one DB round-trip
+            self._flush_pending_steps(db)
 
         except Exception as exc:
             logger.exception("Pipeline failed for %s/%s: %s", pair, timeframe, exc)
@@ -1483,6 +1749,7 @@ class AgentScopeRegistry:
                 toolkits[name] = await build_toolkit(
                     name, ohlc=ohlc, news=market_data.get("news", {}),
                     skills=agent_skills,
+                    snapshot=snapshot,
                 )
                 is_debate = name in ("bullish-researcher", "bearish-researcher", "trader-agent")
                 agents[name] = factory(

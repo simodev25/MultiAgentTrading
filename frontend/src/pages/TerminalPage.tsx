@@ -164,7 +164,7 @@ export function TerminalPage() {
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'hidden') return;
       void loadRuns();
-    }, 3000);
+    }, 10000);
 
     const onVisibilityChange = () => {
       if (document.visibilityState !== 'visible') return;
@@ -209,7 +209,7 @@ export function TerminalPage() {
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'hidden') return;
       void load();
-    }, 5000);
+    }, 15000);
     return () => window.clearInterval(interval);
   }, [token]);
 

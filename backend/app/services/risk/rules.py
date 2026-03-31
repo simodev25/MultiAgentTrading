@@ -205,6 +205,7 @@ class RiskEngine:
         pair: str | None = None,
         equity: float = 10000.0,
         asset_class: str | None = None,
+        leverage: float = 100.0,
     ) -> RiskAssessment:
         reasons: list[str] = []
         ac = self._resolve_asset_class(pair, asset_class)
@@ -217,10 +218,40 @@ class RiskEngine:
                 asset_class=ac,
             )
 
+        # Validate numeric inputs — reject NaN/Inf/negative
+        if not (isinstance(price, (int, float)) and math.isfinite(price) and price > 0):
+            return RiskAssessment(
+                accepted=False,
+                reasons=[f'Invalid price: {price}'],
+                suggested_volume=0.0,
+                asset_class=ac,
+            )
+        if not (isinstance(equity, (int, float)) and math.isfinite(equity) and equity > 0):
+            return RiskAssessment(
+                accepted=False,
+                reasons=[f'Invalid equity: {equity}'],
+                suggested_volume=0.0,
+                asset_class=ac,
+            )
+        if not (isinstance(risk_percent, (int, float)) and math.isfinite(risk_percent) and risk_percent > 0):
+            return RiskAssessment(
+                accepted=False,
+                reasons=[f'Invalid risk_percent: {risk_percent}'],
+                suggested_volume=0.0,
+                asset_class=ac,
+            )
+
         if stop_loss is None:
             return RiskAssessment(
                 accepted=False,
                 reasons=['Stop loss is mandatory.'],
+                suggested_volume=0.0,
+                asset_class=ac,
+            )
+        if not (isinstance(stop_loss, (int, float)) and math.isfinite(stop_loss) and stop_loss > 0):
+            return RiskAssessment(
+                accepted=False,
+                reasons=[f'Invalid stop_loss: {stop_loss}'],
                 suggested_volume=0.0,
                 asset_class=ac,
             )
@@ -253,7 +284,8 @@ class RiskEngine:
         suggested_volume = self._round_to_step(suggested_volume, volume_step)
         suggested_volume = max(suggested_volume, min_vol)  # ensure >= min after flooring
         contract_size = float(spec.get('contract_size', 100_000))
-        margin_required = suggested_volume * contract_size * price / 100  # Assumes 1:100 leverage
+        effective_leverage = leverage if isinstance(leverage, (int, float)) and leverage > 0 else 100.0
+        margin_required = (suggested_volume * contract_size * price) / effective_leverage
 
         accepted = len(reasons) == 0
         if accepted:
@@ -293,6 +325,13 @@ class RiskEngine:
         """
         ac = self._resolve_asset_class(pair, asset_class)
         spec = _CONTRACT_SPECS.get(ac, _CONTRACT_SPECS['unknown'])
+
+        # Validate numeric inputs
+        for label, val in [('entry_price', entry_price), ('stop_loss', stop_loss),
+                           ('risk_percent', risk_percent), ('equity', equity)]:
+            if not (isinstance(val, (int, float)) and math.isfinite(val) and val > 0):
+                return {'error': f'invalid_{label}', 'suggested_volume': 0.0, 'detail': f'{label}={val}'}
+
         stop_distance = abs(entry_price - stop_loss)
 
         if stop_distance <= 0:

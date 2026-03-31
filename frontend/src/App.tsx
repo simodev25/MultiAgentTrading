@@ -1,4 +1,5 @@
-import { Suspense, lazy } from 'react';
+import { Component, Suspense, lazy } from 'react';
+import type { ErrorInfo, ReactNode } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { RouteLoader } from './components/LoadingIndicators';
@@ -12,11 +13,48 @@ const ConnectorsPage = lazy(() => import('./pages/ConnectorsPage').then((module)
 const StrategiesPage = lazy(() => import('./pages/StrategiesPage').then((module) => ({ default: module.StrategiesPage })));
 const LoginPage = lazy(() => import('./pages/LoginPage').then((module) => ({ default: module.LoginPage })));
 
+
+class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean; error: Error | null }> {
+  state = { hasError: false, error: null as Error | null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('[ErrorBoundary]', error, info.componentStack);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: 32, color: '#FF4757', fontFamily: 'JetBrains Mono, monospace', fontSize: 12 }}>
+          <h2 style={{ color: '#C8CBD0', marginBottom: 12 }}>RUNTIME_ERROR</h2>
+          <p style={{ marginBottom: 8 }}>{this.state.error?.message || 'An unexpected error occurred.'}</p>
+          <button
+            onClick={() => { this.setState({ hasError: false, error: null }); window.location.reload(); }}
+            style={{
+              background: 'transparent', border: '1px solid #4B7BF5', color: '#4B7BF5',
+              padding: '6px 16px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit',
+            }}
+          >
+            RELOAD
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+
 function withLayout(element: React.ReactNode): React.ReactNode {
   return (
     <Protected>
       <Layout>
-        <Suspense fallback={<RouteLoader />}>{element}</Suspense>
+        <ErrorBoundary>
+          <Suspense fallback={<RouteLoader />}>{element}</Suspense>
+        </ErrorBoundary>
       </Layout>
     </Protected>
   );
@@ -65,9 +103,11 @@ function AppRoutes() {
 export function App() {
   return (
     <AuthProvider>
-      <Suspense fallback={<RouteLoader />}>
-        <AppRoutes />
-      </Suspense>
+      <ErrorBoundary>
+        <Suspense fallback={<RouteLoader />}>
+          <AppRoutes />
+        </Suspense>
+      </ErrorBoundary>
     </AuthProvider>
   );
 }

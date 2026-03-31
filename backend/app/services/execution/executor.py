@@ -1,4 +1,5 @@
 import logging
+import math
 from typing import Any
 
 from fastapi.encoders import jsonable_encoder
@@ -17,6 +18,19 @@ class ExecutionService:
         self.settings = get_settings()
         self.metaapi = MetaApiClient()
         self.account_selector = MetaApiAccountSelector()
+
+    @staticmethod
+    def _safe_commit(db: Session, order: 'ExecutionOrder', context: str) -> None:
+        """Commit DB changes with error handling to prevent orphaned orders."""
+        try:
+            db.commit()
+        except Exception as exc:
+            logger.error("DB commit failed during %s for order %s: %s", context, order.id, exc, exc_info=True)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            raise
 
     @staticmethod
     def _json_safe(payload: Any) -> dict[str, Any]:
@@ -156,6 +170,22 @@ class ExecutionService:
             reason = 'No order executed for HOLD decision.'
             return self._normalized_result({'reason': reason}, status='skipped', executed=False, reason=reason)
 
+        # Validate financial inputs — reject NaN, Inf, negative, zero
+        def _valid_float(v: float | None, *, allow_none: bool = False) -> bool:
+            if v is None:
+                return allow_none
+            return isinstance(v, (int, float)) and math.isfinite(v) and v > 0
+
+        if not _valid_float(volume):
+            reason = f'Invalid volume: {volume}'
+            return self._normalized_result({'error': reason}, status='rejected', executed=False, reason=reason)
+        if not _valid_float(stop_loss, allow_none=True):
+            reason = f'Invalid stop_loss: {stop_loss}'
+            return self._normalized_result({'error': reason}, status='rejected', executed=False, reason=reason)
+        if not _valid_float(take_profit, allow_none=True):
+            reason = f'Invalid take_profit: {take_profit}'
+            return self._normalized_result({'error': reason}, status='rejected', executed=False, reason=reason)
+
         normalized_mode = str(mode or '').strip().lower()
         normalized_symbol = str(symbol or '').strip().upper()
         normalized_side = str(side or '').strip().upper()
@@ -221,7 +251,7 @@ class ExecutionService:
             response['idempotency_key'] = idempotency_key
             order.status = 'simulated'
             order.response_payload = response
-            db.commit()
+            self._safe_commit(db, order, 'simulation')
             return response
 
         if normalized_mode == 'paper' and not self.settings.enable_paper_execution:
@@ -230,7 +260,7 @@ class ExecutionService:
             response = self._normalized_result({'error': order.error}, status='blocked', executed=False, reason=order.error)
             response['idempotency_key'] = idempotency_key
             order.response_payload = response
-            db.commit()
+            self._safe_commit(db, order, 'paper_disabled')
             return response
 
         if normalized_mode == 'live' and not self.settings.allow_live_trading:
@@ -239,7 +269,7 @@ class ExecutionService:
             response = self._normalized_result({'error': order.error}, status='blocked', executed=False, reason=order.error)
             response['idempotency_key'] = idempotency_key
             order.response_payload = response
-            db.commit()
+            self._safe_commit(db, order, 'live_disabled')
             return response
 
         if normalized_mode in {'paper', 'live'}:
@@ -265,7 +295,7 @@ class ExecutionService:
                 response['idempotency_key'] = idempotency_key
                 order.status = 'submitted'
                 order.response_payload = response
-                db.commit()
+                self._safe_commit(db, order, 'broker_submitted')
                 return response
 
             # Degraded fallback: emulate paper execution without external broker.
@@ -283,7 +313,7 @@ class ExecutionService:
                 response['idempotency_key'] = idempotency_key
                 order.status = 'paper-simulated'
                 order.response_payload = response
-                db.commit()
+                self._safe_commit(db, order, 'paper_simulated')
                 return response
 
             order.status = 'failed'
@@ -302,7 +332,7 @@ class ExecutionService:
                 reason=order.error,
             )
             order.response_payload = response
-            db.commit()
+            self._safe_commit(db, order, 'broker_failed')
             return response
 
         order.status = 'failed'
@@ -320,5 +350,5 @@ class ExecutionService:
             reason=order.error,
         )
         order.response_payload = response
-        db.commit()
+        self._safe_commit(db, order, 'unsupported_mode')
         return response

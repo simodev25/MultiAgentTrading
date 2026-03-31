@@ -13,14 +13,15 @@ A multi-agent AI trading system that orchestrates **8 specialized LLM agents** t
 ┌────────────────────────▼───────────────────────────────────────┐
 │                    FastAPI Backend                              │
 │  ┌──────────────┐  ┌──────────────┐  ┌───────────────────┐    │
-│  │  Orchestrator │  │  Risk Engine │  │  Execution Layer  │    │
-│  │  (8 Agents)   │  │  + Guardian  │  │  Paper / Live     │    │
-│  └──────┬───────┘  └──────────────┘  └───────────────────┘    │
+│  │  AgentScope   │  │  Risk Engine │  │  Execution Layer  │    │
+│  │  Registry     │  │ (determin.)  │  │  Paper / Live     │    │
+│  │  (8 Agents)   │  └──────────────┘  └───────────────────┘    │
+│  └──────┬───────┘                                              │
 │         │                                                      │
 │  ┌──────▼──────────────────────────────────────────────┐       │
-│  │           MCP Tool Layer (18 tools)                 │       │
-│  │  Market Data · Technical Analysis · Fundamentals    │       │
-│  │  Decision Support                                   │       │
+│  │           MCP Tool Layer (25+ tools)                │       │
+│  │  Indicators · Patterns · News · Risk · Sizing       │       │
+│  │  Decision Support · Strategy Building               │       │
 │  └─────────────────────────────────────────────────────┘       │
 │                                                                │
 │  ┌─────────────────────────────────────────────────────┐       │
@@ -55,8 +56,8 @@ Each analysis run flows sequentially through 8 agents:
 - **Multiple LLM providers** — Ollama (local), OpenAI, Mistral
 - **Multi-source news** — NewsAPI, Finnhub, AlphaVantage, Trading Economics, LLM Web Search (Ollama/OpenAI)
 - **3 decision modes** — Conservative (strict convergence), Balanced (default, moderate), Permissive (opportunistic)
-- **18 MCP tools** — Technical indicators, news, macro events, pattern detection, correlation analysis
-- **Paper & live trading** — MetaAPI broker integration with order guardian
+- **25+ MCP tools** — Technical indicators, news, patterns, risk evaluation, decision gating, strategy building
+- **Paper & live trading** — MetaAPI broker integration with idempotency, input validation, and DB commit protection
 - **AI Strategy Engine** — LLM-powered strategy generation (EMA crossover, RSI mean reversion, Bollinger breakout, MACD divergence) with per-strategy symbol/timeframe
 - **Strategy Monitoring** — Backend Celery Beat monitors active strategies every 30s, auto-creates Runs through the full agent workflow when new signals detected (dedup via signal key)
 - **Chart Overlays** — Strategy indicator lines (EMA, Bollinger bands) and BUY/SELL signal markers rendered on the live chart
@@ -64,7 +65,8 @@ Each analysis run flows sequentially through 8 agents:
 - **Scheduled runs** — Automated analysis via Celery Beat
 - **Real-time updates** — WebSocket streaming during analysis runs
 - **Observability** — Prometheus metrics, Grafana dashboards, OpenTelemetry tracing
-- **Risk management** — Per-asset-class contract specs, position sizing, SL/TP validation
+- **Risk management** — Per-asset-class contract specs, configurable leverage, NaN/Inf validation, position sizing, SL/TP validation
+- **Safety** — Agent call timeouts, debate fallback, per-user data isolation, security headers, bcrypt hashing, ephemeral key generation
 
 ## Tech Stack
 
@@ -172,18 +174,20 @@ backend/
   app/
     api/routes/            # REST endpoints (runs, strategies, backtests, trading, connectors)
     services/
-      orchestrator/        # 8-agent workflow engine
-      agentscope/          # AgentScope registry, debate, structured output schemas
-      agent_runtime/       # v2 agentic runtime with MCP tools
+      agentscope/          # 4-phase agent pipeline (registry, debate, schemas, toolkit)
+      mcp/                 # MCP tool server (25+ computational tools) + in-process client
       strategy/            # Strategy designer agent
-      llm/                 # LLM provider clients
+      llm/                 # LLM provider clients (Ollama, OpenAI, Mistral)
       market/              # Market data, news providers, instrument classification
-      trading/             # MetaAPI client, order guardian, execution
+      trading/             # MetaAPI client, price streaming, execution
       risk/                # Risk engine & position sizing
+      execution/           # Paper/live order execution service
       backtest/            # Historical backtesting engine
-      scheduler/           # Scheduled run management
-      news/                # News aggregation & sentiment
-    db/                    # SQLAlchemy models, Alembic migrations
+      news/                # News aggregation & FX pair bias
+      analytics/           # LLM usage analytics
+      prompts/             # Prompt template management
+      connectors/          # Runtime connector settings
+    db/                    # SQLAlchemy models
     observability/         # Prometheus, OpenTelemetry
     tasks/                 # Celery tasks (analysis, backtest, strategy monitor)
 

@@ -1,7 +1,11 @@
 """Pydantic output schemas for structured agent output (msg.metadata)."""
 from __future__ import annotations
+import logging
+import math
 from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+logger = logging.getLogger(__name__)
 
 
 _SIGNAL_ALIASES = {"hold": "neutral", "none": "neutral", "flat": "neutral", "buy": "bullish", "sell": "bearish"}
@@ -11,6 +15,7 @@ _MOMENTUM_VALID = {"bullish", "bearish", "neutral", "mixed"}
 
 def _normalize_signal(value: Any) -> str:
     if not isinstance(value, str):
+        logger.debug("_normalize_signal: non-string input %r, defaulting to neutral", type(value).__name__)
         return "neutral"
     lower = value.strip().lower()
     mapped = _SIGNAL_ALIASES.get(lower, lower)
@@ -18,7 +23,9 @@ def _normalize_signal(value: Any) -> str:
     if mapped not in {"bullish", "bearish", "neutral", "mixed"}:
         for keyword in ("bearish", "bullish", "mixed", "neutral"):
             if keyword in mapped:
+                logger.debug("_normalize_signal: extracted '%s' from '%s'", keyword, value[:50])
                 return keyword
+        logger.debug("_normalize_signal: unrecognized value '%s', defaulting to neutral", value[:50])
         return "neutral"
     return mapped
 
@@ -53,11 +60,14 @@ class TechnicalAnalysisResult(_SchemaBase):
             for field in ("signal", "structural_bias", "local_momentum"):
                 if field in data:
                     data[field] = _normalize_signal(data[field])
-            # Clamp score/confidence/tradability to valid ranges
+            # Clamp score/confidence/tradability to valid ranges (reject NaN/Inf)
             for field, lo, hi, default in [("score", -1.0, 1.0, 0.0), ("confidence", 0.0, 1.0, 0.5), ("tradability", 0.0, 1.0, 0.0)]:
                 if field in data:
                     try:
-                        data[field] = max(lo, min(hi, float(data[field])))
+                        val = float(data[field])
+                        if not math.isfinite(val):
+                            raise ValueError(f"NaN/Inf in {field}")
+                        data[field] = max(lo, min(hi, val))
                     except (TypeError, ValueError):
                         data[field] = default
             # Normalize setup_state

@@ -26,8 +26,12 @@ mcp = FastMCP(
 # ---------------------------------------------------------------------------
 
 def _safe_float(v: Any, default: float = 0.0) -> float:
+    """Convert value to float, returning default if NaN, Inf, or unconvertible."""
     try:
-        return float(v)
+        result = float(v)
+        if math.isfinite(result):
+            return result
+        return default
     except (TypeError, ValueError):
         return default
 
@@ -38,23 +42,50 @@ def _safe_series(data: list[float] | None) -> pd.Series:
     return pd.Series(data, dtype=float)
 
 
+# Run-scoped indicator cache — avoids recomputing RSI/ATR when called
+# multiple times with the same data (e.g. indicator_bundle + divergence_detector)
+_indicator_cache: dict[str, pd.Series] = {}
+
+
+def _cache_key_for_series(prefix: str, data: pd.Series, period: int) -> str:
+    """Build a lightweight cache key from series length + last 3 values + period."""
+    n = len(data)
+    tail = tuple(round(float(data.iloc[i]), 8) for i in range(max(0, n - 3), n)) if n > 0 else ()
+    return f"{prefix}:{n}:{tail}:{period}"
+
+
+def clear_indicator_cache() -> None:
+    """Clear the run-scoped indicator cache (call between runs if reusing process)."""
+    _indicator_cache.clear()
+
+
 def _compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
-    """Compute RSI from a close price series."""
+    """Compute RSI from a close price series (cached per data+period)."""
+    key = _cache_key_for_series("rsi", close, period)
+    if key in _indicator_cache:
+        return _indicator_cache[key]
     delta = close.diff()
     gain = delta.clip(lower=0).ewm(span=period, adjust=False).mean()
     loss = (-delta.clip(upper=0)).ewm(span=period, adjust=False).mean()
     rs = gain / loss.replace(0, 1e-10)
-    return 100 - (100 / (1 + rs))
+    result = 100 - (100 / (1 + rs))
+    _indicator_cache[key] = result
+    return result
 
 
 def _compute_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-    """Compute ATR from high/low/close series."""
+    """Compute ATR from high/low/close series (cached per data+period)."""
+    key = _cache_key_for_series("atr", close, period)
+    if key in _indicator_cache:
+        return _indicator_cache[key]
     tr = pd.concat([
         high - low,
         (high - close.shift(1)).abs(),
         (low - close.shift(1)).abs(),
     ], axis=1).max(axis=1)
-    return tr.ewm(span=period, adjust=False).mean()
+    result = tr.ewm(span=period, adjust=False).mean()
+    _indicator_cache[key] = result
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +163,7 @@ def indicator_bundle(
 
     # RSI
     rsi = _compute_rsi(close, rsi_period)
-    rsi_value = round(float(rsi.iloc[-1]), 3)
+    rsi_value = round(_safe_float(rsi.iloc[-1], 50.0), 3)
 
     # EMAs
     ema_fast = close.ewm(span=ema_fast_period, adjust=False).mean()
@@ -148,9 +179,9 @@ def indicator_bundle(
     # ATR
     atr = _compute_atr(high, low, close, atr_period)
 
-    # Trend
-    ema_f_val = float(ema_fast.iloc[-1])
-    ema_s_val = float(ema_slow.iloc[-1])
+    # Trend — use _safe_float to prevent NaN propagation
+    ema_f_val = _safe_float(ema_fast.iloc[-1])
+    ema_s_val = _safe_float(ema_slow.iloc[-1])
     trend = "bullish" if ema_f_val > ema_s_val else "bearish" if ema_f_val < ema_s_val else "neutral"
 
     return {
@@ -160,14 +191,14 @@ def indicator_bundle(
         "ema_slow": round(ema_s_val, 6),
         "ema_fast_period": ema_fast_period,
         "ema_slow_period": ema_slow_period,
-        "macd_line": round(float(macd_line.iloc[-1]), 6),
-        "macd_signal": round(float(macd_signal.iloc[-1]), 6),
-        "macd_histogram": round(float(macd_hist.iloc[-1]), 6),
-        "macd_diff": round(float(macd_line.iloc[-1] - macd_signal.iloc[-1]), 6),
-        "atr": round(float(atr.iloc[-1]), 6),
+        "macd_line": round(_safe_float(macd_line.iloc[-1]), 6),
+        "macd_signal": round(_safe_float(macd_signal.iloc[-1]), 6),
+        "macd_histogram": round(_safe_float(macd_hist.iloc[-1]), 6),
+        "macd_diff": round(_safe_float(macd_line.iloc[-1] - macd_signal.iloc[-1]), 6),
+        "atr": round(_safe_float(atr.iloc[-1]), 6),
         "atr_period": atr_period,
         "trend": trend,
-        "last_price": round(float(close.iloc[-1]), 6),
+        "last_price": round(_safe_float(close.iloc[-1]), 6),
     }
 
 
@@ -212,10 +243,10 @@ def divergence_detector(
                             and recent_rsi.iloc[i] > recent_rsi.iloc[j]):
                         divergences.append({
                             "type": "bullish",
-                            "price_low_1": round(float(recent_close.iloc[j]), 6),
-                            "price_low_2": round(float(recent_close.iloc[i]), 6),
-                            "rsi_low_1": round(float(recent_rsi.iloc[j]), 2),
-                            "rsi_low_2": round(float(recent_rsi.iloc[i]), 2),
+                            "price_low_1": round(_safe_float(recent_close.iloc[j]), 6),
+                            "price_low_2": round(_safe_float(recent_close.iloc[i]), 6),
+                            "rsi_low_1": round(_safe_float(recent_rsi.iloc[j]), 2),
+                            "rsi_low_2": round(_safe_float(recent_rsi.iloc[i]), 2),
                             "bars_apart": i - j,
                         })
                     break
@@ -230,10 +261,10 @@ def divergence_detector(
                             and recent_rsi.iloc[i] < recent_rsi.iloc[j]):
                         divergences.append({
                             "type": "bearish",
-                            "price_high_1": round(float(recent_close.iloc[j]), 6),
-                            "price_high_2": round(float(recent_close.iloc[i]), 6),
-                            "rsi_high_1": round(float(recent_rsi.iloc[j]), 2),
-                            "rsi_high_2": round(float(recent_rsi.iloc[i]), 2),
+                            "price_high_1": round(_safe_float(recent_close.iloc[j]), 6),
+                            "price_high_2": round(_safe_float(recent_close.iloc[i]), 6),
+                            "rsi_high_1": round(_safe_float(recent_rsi.iloc[j]), 2),
+                            "rsi_high_2": round(_safe_float(recent_rsi.iloc[i]), 2),
                             "bars_apart": i - j,
                         })
                     break
@@ -268,7 +299,9 @@ def support_resistance_detector(
     h = np.array(highs, dtype=float)
     l = np.array(lows, dtype=float)
     c = np.array(closes, dtype=float)
-    last_price = float(c[-1])
+    last_price = _safe_float(c[-1])
+    if last_price <= 0:
+        return {"levels": [], "error": "invalid_last_price"}
 
     # Collect pivot points (local min/max over 5‑bar windows)
     pivots: list[float] = []
@@ -296,13 +329,14 @@ def support_resistance_detector(
     for cluster in sorted(clusters, key=len, reverse=True)[:num_levels]:
         avg_price = sum(cluster) / len(cluster)
         level_type = "support" if avg_price < last_price else "resistance"
-        if abs(avg_price - last_price) / last_price < tolerance_pct:
+        distance_ratio = abs(avg_price - last_price) / last_price if last_price > 0 else 0.0
+        if distance_ratio < tolerance_pct:
             level_type = "pivot"
         levels.append({
             "price": round(avg_price, 6),
             "touch_count": len(cluster),
             "type": level_type,
-            "distance_pct": round(abs(avg_price - last_price) / last_price * 100, 3),
+            "distance_pct": round(distance_ratio * 100, 3),
         })
 
     levels.sort(key=lambda x: x["price"])
@@ -569,15 +603,16 @@ def volatility_analyzer(
 
     high = _safe_series(highs) if highs else close
     low = _safe_series(lows) if lows else close
-    last_price = float(close.iloc[-1])
+    last_price = _safe_float(close.iloc[-1])
 
     # ATR
     atr = _compute_atr(high, low, close, atr_period)
-    current_atr = float(atr.iloc[-1])
+    current_atr = _safe_float(atr.iloc[-1])
 
     # Historical volatility (annualised)
     log_returns = np.log(close / close.shift(1)).dropna()
-    hist_vol = float(log_returns.std()) * math.sqrt(252) if len(log_returns) > 5 else 0.0
+    raw_std = log_returns.std() if len(log_returns) > 5 else 0.0
+    hist_vol = _safe_float(raw_std) * math.sqrt(252)
 
     # Bollinger Bandwidth
     sma20 = close.rolling(20).mean()
@@ -1139,7 +1174,13 @@ def technical_scoring(
     change_val = min(max(change_pct / 1.0, -1.0), 1.0) * CHANGE_WEIGHT
     momentum_score = rsi_val + macd_val + change_val
 
-    pattern_score = sum(PATTERN_WEIGHT * (1 if p.get("direction") == "bullish" else -1) for p in patterns)
+    # Accept both "direction" (legacy) and "signal" (from pattern_detector tool).
+    # Neutral patterns (e.g. doji) contribute 0, not -1.
+    _PAT_DIR = {"bullish": 1, "bearish": -1}
+    pattern_score = sum(
+        PATTERN_WEIGHT * _PAT_DIR.get(p.get("direction") or p.get("signal", ""), 0)
+        for p in patterns
+    )
     divergence_score = sum(DIVERGENCE_WEIGHT * (1 if d.get("type") == "bullish" else -1) for d in divergences)
     multi_tf_score = multi_tf_alignment * MULTI_TF_WEIGHT
     level_score = (support_proximity - resistance_proximity) * LEVEL_WEIGHT

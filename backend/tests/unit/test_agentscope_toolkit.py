@@ -7,7 +7,7 @@ def test_agent_tool_map_has_all_agents():
     expected = {
         "technical-analyst", "news-analyst", "market-context-analyst",
         "bullish-researcher", "bearish-researcher", "trader-agent",
-        "risk-manager", "execution-manager",
+        "risk-manager", "execution-manager", "strategy-designer",
     }
     assert set(AGENT_TOOL_MAP.keys()) == expected
 
