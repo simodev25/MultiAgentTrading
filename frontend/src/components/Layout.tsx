@@ -16,8 +16,8 @@ const navItems = [
   { to: '/', label: 'TERMINAL', icon: Terminal, node: '01' },
   { to: '/orders', label: 'ORDRES', icon: Receipt, node: '02' },
   { to: '/backtests', label: 'BACKTESTS', icon: FlaskConical, node: '03' },
-  { to: '/connectors', label: 'CONFIG', icon: Settings, node: '04' },
-  { to: '/strategies', label: 'STRATEGIES', icon: Cpu, node: '05' },
+  { to: '/strategies', label: 'STRATEGIES', icon: Cpu, node: '04' },
+  { to: '/connectors', label: 'SYSTEM_CONFIG', icon: Settings, node: '05' },
 ];
 
 export function Layout({ children }: { children: React.ReactNode }) {

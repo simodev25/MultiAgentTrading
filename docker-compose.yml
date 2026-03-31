@@ -42,6 +42,9 @@ services:
       CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
       CELERY_IGNORE_RESULT: 'true'
       CORS_ORIGINS: http://localhost:5173
+      BOOTSTRAP_ADMIN_PASSWORD: admin1234
+      SECRET_KEY: local-dev-secret-key-change-in-production
+      WS_ALLOW_QUERY_TOKEN: 'true'
       AGENT_SKILLS_BOOTSTRAP_FILE: ${AGENT_SKILLS_BOOTSTRAP_FILE:-/app/config/agent-skills.json}
       AGENT_SKILLS_BOOTSTRAP_MODE: ${AGENT_SKILLS_BOOTSTRAP_MODE:-merge}
       AGENT_SKILLS_BOOTSTRAP_APPLY_ONCE: ${AGENT_SKILLS_BOOTSTRAP_APPLY_ONCE:-true}
