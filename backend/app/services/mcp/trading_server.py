@@ -42,23 +42,50 @@ def _safe_series(data: list[float] | None) -> pd.Series:
     return pd.Series(data, dtype=float)
 
 
+# Run-scoped indicator cache — avoids recomputing RSI/ATR when called
+# multiple times with the same data (e.g. indicator_bundle + divergence_detector)
+_indicator_cache: dict[str, pd.Series] = {}
+
+
+def _cache_key_for_series(prefix: str, data: pd.Series, period: int) -> str:
+    """Build a lightweight cache key from series length + last 3 values + period."""
+    n = len(data)
+    tail = tuple(round(float(data.iloc[i]), 8) for i in range(max(0, n - 3), n)) if n > 0 else ()
+    return f"{prefix}:{n}:{tail}:{period}"
+
+
+def clear_indicator_cache() -> None:
+    """Clear the run-scoped indicator cache (call between runs if reusing process)."""
+    _indicator_cache.clear()
+
+
 def _compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
-    """Compute RSI from a close price series."""
+    """Compute RSI from a close price series (cached per data+period)."""
+    key = _cache_key_for_series("rsi", close, period)
+    if key in _indicator_cache:
+        return _indicator_cache[key]
     delta = close.diff()
     gain = delta.clip(lower=0).ewm(span=period, adjust=False).mean()
     loss = (-delta.clip(upper=0)).ewm(span=period, adjust=False).mean()
     rs = gain / loss.replace(0, 1e-10)
-    return 100 - (100 / (1 + rs))
+    result = 100 - (100 / (1 + rs))
+    _indicator_cache[key] = result
+    return result
 
 
 def _compute_atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
-    """Compute ATR from high/low/close series."""
+    """Compute ATR from high/low/close series (cached per data+period)."""
+    key = _cache_key_for_series("atr", close, period)
+    if key in _indicator_cache:
+        return _indicator_cache[key]
     tr = pd.concat([
         high - low,
         (high - close.shift(1)).abs(),
         (low - close.shift(1)).abs(),
     ], axis=1).max(axis=1)
-    return tr.ewm(span=period, adjust=False).mean()
+    result = tr.ewm(span=period, adjust=False).mean()
+    _indicator_cache[key] = result
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -540,9 +540,17 @@ class AgentScopeRegistry:
                 error=error,
             )
             db.add(step)
-            db.commit()
+            # NOTE: commit is deferred — call _flush_pending_steps() after all phases
         except Exception as exc:
             logger.warning("Failed to record step for %s: %s", agent_name, exc)
+
+    @staticmethod
+    def _flush_pending_steps(db) -> None:
+        """Flush all pending agent steps in a single batch commit."""
+        try:
+            db.commit()
+        except Exception as exc:
+            logger.warning("Failed to batch-commit agent steps: %s", exc)
 
     @staticmethod
     def _build_agentic_runtime(
@@ -860,12 +868,24 @@ class AgentScopeRegistry:
             logger.warning("Failed to write debug trace: %s", exc)
 
     def _build_prompt_meta(self, db, agent_name: str, model_name: str, llm_enabled: bool,
-                           variables: dict | None = None) -> dict[str, Any]:
-        """Build prompt_meta dict matching v1 format for an agent."""
+                           variables: dict | None = None,
+                           _prompt_cache: dict | None = None) -> dict[str, Any]:
+        """Build prompt_meta dict matching v1 format for an agent.
+
+        If _prompt_cache is provided, rendered prompts are memoized per agent_name
+        to avoid redundant DB lookups and template rendering within a single run.
+        """
         from app.services.llm.model_selector import AgentModelSelector
         from app.services.agentscope.toolkit import AGENT_TOOL_MAP
 
-        rendered = self._render_prompt(db, agent_name, variables)
+        # Memoize prompt rendering within a run
+        if _prompt_cache is not None and agent_name in _prompt_cache:
+            rendered = _prompt_cache[agent_name]
+        else:
+            rendered = self._render_prompt(db, agent_name, variables)
+            if _prompt_cache is not None:
+                _prompt_cache[agent_name] = rendered
+
         enabled_tools = AGENT_TOOL_MAP.get(agent_name, [])
 
         return {
@@ -1085,6 +1105,7 @@ class AgentScopeRegistry:
                 )
 
             analysis_outputs: dict[str, dict] = {}
+            _prompt_cache: dict[str, dict] = {}  # Memoize prompt renders within this run
 
             # Store tool invocations per agent (filled after each call)
             agent_tool_invocations: dict[str, dict] = {}
@@ -1140,6 +1161,10 @@ class AgentScopeRegistry:
                     news=market_data.get("news", {}),
                 )
 
+            # Clear run-scoped indicator cache before starting agents
+            from app.services.mcp.trading_server import clear_indicator_cache
+            clear_indicator_cache()
+
             # ── Phase 1: Parallel analysts ──
             _set_progress(10)
             logger.info("Phase 1: Running 3 analysts in parallel for %s/%s", pair, timeframe)
@@ -1158,7 +1183,7 @@ class AgentScopeRegistry:
                     tool_invocations=invocations,
                 )
                 msg_dict["llm_enabled"] = llm_enabled.get(name, False)
-                msg_dict["prompt_meta"] = self._build_prompt_meta(db, name, model_name, llm_enabled.get(name, False), variables=base_vars)
+                msg_dict["prompt_meta"] = self._build_prompt_meta(db, name, model_name, llm_enabled.get(name, False), variables=base_vars, _prompt_cache=_prompt_cache)
 
                 # Fix 1: FORCE-OVERRIDE deterministic scoring into technical-analyst metadata
                 # The LLM may return score=0.0 or UNAVAILABLE — runtime values always win
@@ -1241,9 +1266,11 @@ class AgentScopeRegistry:
                         reason=f"Debate failed: {type(exc).__name__}",
                     )
             else:
-                # Deterministic: run researchers without debate
-                bullish_msg = await _call_agent("bullish-researcher", research_msg)
-                bearish_msg = await _call_agent("bearish-researcher", research_msg)
+                # Deterministic: run researchers in parallel without debate
+                bullish_msg, bearish_msg = await asyncio.gather(
+                    _call_agent("bullish-researcher", research_msg),
+                    _call_agent("bearish-researcher", research_msg),
+                )
                 debate_result = DebateResult(
                     finished=True, winning_side="neutral", confidence=0.5,
                     reason="Debate skipped — LLM disabled for debate agents",
@@ -1268,7 +1295,7 @@ class AgentScopeRegistry:
             for name, msg in [("bullish-researcher", bullish_msg), ("bearish-researcher", bearish_msg)]:
                 d = _msg_to_dict(msg, tool_invocations=agent_tool_invocations.get(name, {}))
                 d["llm_enabled"] = llm_enabled.get(name, False)
-                d["prompt_meta"] = self._build_prompt_meta(db, name, model_name, llm_enabled.get(name, False), variables=base_vars)
+                d["prompt_meta"] = self._build_prompt_meta(db, name, model_name, llm_enabled.get(name, False), variables=base_vars, _prompt_cache=_prompt_cache)
 
                 # Fix 4: Constrain researcher confidence by Phase 1 news scores
                 d.setdefault("metadata", {})
@@ -1356,7 +1383,7 @@ class AgentScopeRegistry:
                     _trader_decision_is_hold = meta.get("decision", "HOLD") == "HOLD"
                 elif name == "risk-manager":
                     base_vars["risk_result"] = d.get("text", "")[:500]
-                d["prompt_meta"] = self._build_prompt_meta(db, name, model_name, llm_enabled.get(name, False), variables=base_vars)
+                d["prompt_meta"] = self._build_prompt_meta(db, name, model_name, llm_enabled.get(name, False), variables=base_vars, _prompt_cache=_prompt_cache)
                 analysis_outputs[name] = d
                 self._record_step(db, run, name,
                     {"phase": "decision", "llm_enabled": llm_enabled.get(name, False)},
@@ -1468,7 +1495,8 @@ class AgentScopeRegistry:
             self._write_debug_trace(run, pair, timeframe, risk_percent,
                                     market_data, analysis_outputs, elapsed)
 
-            db.commit()
+            # Batch-commit all pending agent steps + final run update in one DB round-trip
+            self._flush_pending_steps(db)
 
         except Exception as exc:
             logger.exception("Pipeline failed for %s/%s: %s", pair, timeframe, exc)

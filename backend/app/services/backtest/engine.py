@@ -83,7 +83,7 @@ class BacktestEngine:
                 cached = r.get(cache_key)
                 if cached:
                     candles = _json.loads(cached)
-                    r.delete(cache_key)
+                    # Let TTL expire naturally — don't delete cache for potential reuse
                     if candles:
                         logger.info('backtest_source=redis_cache candles=%d pair=%s', len(candles), pair)
                         frame = pd.DataFrame([
