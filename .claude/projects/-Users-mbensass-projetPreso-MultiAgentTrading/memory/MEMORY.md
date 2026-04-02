@@ -1,0 +1,5 @@
+- [Project Architecture](project_architecture.md) — Multi-agent trading platform: 4-phase pipeline (analysis→debate→decision→execution), AgentScope framework, 8 agents
+- [LLM-First Refonte](llm_first_refonte.md) — 2026-04-02: refactored from deterministic-cage to LLM-First philosophy. LLM decides freely, code provides facts and safety rails.
+- [User Profile](user_profile.md) — Senior developer, wants LLM as decision master not puppet. Pure algo trading already exists and doesn't work.
+- [Model Config](model_config.md) — deepseek-v3.2 via Ollama cloud has bad tool calling. GPT-5.1 via OpenAI works well (52-78s runs). Multi-model per agent supported.
+- [Known Issues](known_issues.md) — System always outputs HOLD (too conservative), DEGRADED flags on most agents, risk-manager LLM never tested, execution-optimizer never tested.

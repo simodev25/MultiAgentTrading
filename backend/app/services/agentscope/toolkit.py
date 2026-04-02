@@ -193,30 +193,12 @@ async def build_toolkit(
             if news.get("macro_events"):
                 preset["macro_items"] = news["macro_events"]
 
-        # Pre-inject authoritative market data into trader-agent tools so the
-        # LLM cannot invent incorrect values (e.g. macd_diff=-0.01 instead of
-        # the real -0.000119).  The LLM still chooses *when* to call these
-        # tools and provides qualitative args (trend, momentum, decision_side),
-        # but the numerical market facts come from the snapshot.
-        # DM-5: Pre-inject aligned_sources for decision_gating
-        if tool_id == "decision_gating" and analysis_outputs:
-            from app.services.agentscope.decision_helpers import (
-                compute_deterministic_score,
-                count_aligned_sources,
-            )
-            _det_score = compute_deterministic_score(analysis_outputs or {})
-            _direction = "bullish" if _det_score > 0 else ("bearish" if _det_score < 0 else "neutral")
-            preset["aligned_sources"] = count_aligned_sources(analysis_outputs or {}, _direction)
-
+        # Pre-inject factual market DATA into tools (not opinions/scores).
+        # The LLM decides freely, but gets accurate numbers from the snapshot.
         if snapshot and tool_id == "contradiction_detector":
             preset["macd_diff"] = snapshot.get("macd_diff", 0.0)
             preset["atr"] = snapshot.get("atr", 0.001)
-            # DM-6: Derive trend/momentum deterministically from snapshot
-            from app.services.agentscope.decision_helpers import derive_trend_momentum
-            _trend, _momentum = derive_trend_momentum(snapshot)
-            preset["trend"] = _trend
-            preset["momentum"] = _momentum
-        elif snapshot and tool_id == "trade_sizing":
+        if snapshot and tool_id == "trade_sizing":
             preset["price"] = snapshot.get("last_price", 0.0)
             preset["atr"] = snapshot.get("atr", 0.0)
 

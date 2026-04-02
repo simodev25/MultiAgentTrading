@@ -7,7 +7,9 @@ Key pattern from AgentScope tutorial:
   so the moderator hears the full debate history
 - Moderator is called OUTSIDE the MsgHub so debaters don't hear the verdict
 - Each debater receives a specific role message (affirmative/negative side)
-- Loop continues until moderator says finished=True
+- Loop continues until moderator says finished (winner != None)
+
+LLM-First: moderator MUST tranche — bullish, bearish, or no_edge.
 """
 from __future__ import annotations
 
@@ -43,7 +45,7 @@ async def run_debate(
     the verdict until next round.
     """
     config = config or DebateConfig()
-    result = DebateResult(finished=False)
+    result = DebateResult(winner="no_edge")
     bullish_msg = context_msg
     bearish_msg = context_msg
 
@@ -75,9 +77,18 @@ async def run_debate(
         judge_msg = await moderator(
             Msg(
                 "user",
-                "You have heard both sides of the debate. "
-                "Has the debate reached a conclusion? Which side has stronger evidence? "
-                "Can you determine the winning direction (bullish, bearish, or neutral)?",
+                "You have heard both sides of the debate. You MUST pick a winner.\n\n"
+                "Conviction guide:\n"
+                "- 'strong': one side has clear momentum + structure + catalyst alignment\n"
+                "- 'moderate': one side has better evidence but with some contradictions\n"
+                "- 'weak': one side is slightly better but edge is thin\n"
+                "- 'no_edge': genuinely no directional evidence at all (rare — most markets lean)\n\n"
+                "Rules:\n"
+                "- Pick 'bullish' if the bull case has stronger confirmed evidence\n"
+                "- Pick 'bearish' if the bear case has stronger confirmed evidence\n"
+                "- Pick 'no_edge' ONLY if evidence is truly balanced with zero lean\n"
+                "- Lean toward picking a direction — markets rarely have zero bias\n"
+                "- State the KEY ARGUMENT that decided it and the biggest WEAKNESS of the winner",
                 "user",
             ),
             structured_model=DebateResult,
@@ -88,16 +99,19 @@ async def run_debate(
             result = DebateResult(**meta)
         except Exception:
             logger.warning("DebateResult validation failed, using fallback (metadata=%s)", meta)
-            result = DebateResult(finished=True, winning_side="neutral", confidence=0.3,
-                                 reason="Structured output failed — debate inconclusive")
+            result = DebateResult(winner="no_edge", conviction="weak",
+                                 key_argument="Structured output failed — debate inconclusive",
+                                 weakness="")
+
+        result.rounds_completed = round_num + 1
 
         logger.info(
-            "Debate round %d/%d: finished=%s, side=%s, confidence=%.2f",
-            round_num + 1, config.max_rounds, result.finished,
-            result.winning_side, result.confidence,
+            "Debate round %d/%d: winner=%s, conviction=%s",
+            round_num + 1, config.max_rounds, result.winner, result.conviction,
         )
 
-        if result.finished and round_num + 1 >= config.min_rounds:
+        # Stop if moderator has decided and minimum rounds met
+        if result.winner in ("bullish", "bearish", "no_edge") and round_num + 1 >= config.min_rounds:
             break
 
     return bullish_msg, bearish_msg, result

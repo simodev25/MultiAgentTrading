@@ -1,4 +1,11 @@
-"""Pydantic output schemas for structured agent output (msg.metadata)."""
+"""Pydantic output schemas for structured agent output (msg.metadata).
+
+LLM-First philosophy:
+- Analysts produce qualitative FACTS (no scores, no signals)
+- Trader decides freely (conviction, not constrained score)
+- Risk-manager can only make more conservative, never more aggressive
+- Debate moderator must tranche (bullish, bearish, or no_edge)
+"""
 from __future__ import annotations
 import logging
 import math
@@ -10,7 +17,6 @@ logger = logging.getLogger(__name__)
 
 _SIGNAL_ALIASES = {"hold": "neutral", "none": "neutral", "flat": "neutral", "buy": "bullish", "sell": "bearish"}
 _DECISION_ALIASES = {"bullish": "BUY", "bearish": "SELL", "neutral": "HOLD", "hold": "HOLD", "buy": "BUY", "sell": "SELL"}
-_MOMENTUM_VALID = {"bullish", "bearish", "neutral", "mixed"}
 
 
 def _normalize_signal(value: Any) -> str:
@@ -19,7 +25,6 @@ def _normalize_signal(value: Any) -> str:
         return "neutral"
     lower = value.strip().lower()
     mapped = _SIGNAL_ALIASES.get(lower, lower)
-    # If it's a long phrase, extract the first recognized keyword
     if mapped not in {"bullish", "bearish", "neutral", "mixed"}:
         for keyword in ("bearish", "bullish", "mixed", "neutral"):
             if keyword in mapped:
@@ -41,114 +46,132 @@ class _SchemaBase(BaseModel):
     model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
 
 
+# ---------------------------------------------------------------------------
+# Phase 1 — Analysts produce FACTS, not opinions
+# ---------------------------------------------------------------------------
+
 class TechnicalAnalysisResult(_SchemaBase):
-    signal: Literal["bullish", "bearish", "neutral"]
-    score: float = Field(ge=-1.0, le=1.0)
-    confidence: float = Field(ge=0.0, le=1.0)
-    setup_state: Literal["non_actionable", "conditional", "weak_actionable", "actionable", "high_conviction"]
-    summary: str = Field(min_length=1)
+    """Technical analyst output — describes what the data shows, no trading recommendation."""
     structural_bias: Literal["bullish", "bearish", "neutral"] = "neutral"
     local_momentum: Literal["bullish", "bearish", "neutral", "mixed"] = "neutral"
-    tradability: float = Field(default=0.0, ge=0.0, le=1.0)
+    setup_quality: Literal["high", "medium", "low", "none"] = "none"
+    key_levels: list[str] = Field(default_factory=list)
+    patterns_found: list[str] = Field(default_factory=list)
+    contradictions: list[str] = Field(default_factory=list)
+    summary: str = Field(min_length=1)
+    tradability: Literal["high", "medium", "low"] = "low"
     degraded: bool = False
-    reason: str | None = None
 
     @model_validator(mode="before")
     @classmethod
-    def normalize_signals(cls, data: Any) -> Any:
+    def normalize_fields(cls, data: Any) -> Any:
         if isinstance(data, dict):
-            for field in ("signal", "structural_bias", "local_momentum"):
+            for field in ("structural_bias", "local_momentum"):
                 if field in data:
                     data[field] = _normalize_signal(data[field])
-            # Clamp score/confidence/tradability to valid ranges (reject NaN/Inf)
-            for field, lo, hi, default in [("score", -1.0, 1.0, 0.0), ("confidence", 0.0, 1.0, 0.5), ("tradability", 0.0, 1.0, 0.0)]:
-                if field in data:
-                    try:
-                        val = float(data[field])
-                        if not math.isfinite(val):
-                            raise ValueError(f"NaN/Inf in {field}")
-                        data[field] = max(lo, min(hi, val))
-                    except (TypeError, ValueError):
-                        data[field] = default
-            # Normalize setup_state
-            if "setup_state" in data:
-                ss = str(data["setup_state"]).strip().lower().replace(" ", "_").replace("-", "_")
-                valid = {"non_actionable", "conditional", "weak_actionable", "actionable", "high_conviction"}
-                if ss not in valid:
+            # Normalize setup_quality
+            if "setup_quality" in data:
+                sq = str(data["setup_quality"]).strip().lower().replace(" ", "_").replace("-", "_")
+                valid = {"high", "medium", "low", "none"}
+                if sq not in valid:
                     for v in valid:
-                        if v in ss:
-                            ss = v
+                        if v in sq:
+                            sq = v
                             break
                     else:
-                        ss = "conditional"
-                data["setup_state"] = ss
+                        sq = "none"
+                data["setup_quality"] = sq
+            # Normalize tradability
+            if "tradability" in data:
+                tv = str(data["tradability"]).strip().lower()
+                # Handle numeric tradability (legacy compat)
+                try:
+                    num = float(tv)
+                    if num >= 0.66:
+                        tv = "high"
+                    elif num >= 0.33:
+                        tv = "medium"
+                    else:
+                        tv = "low"
+                except (TypeError, ValueError):
+                    pass
+                if tv not in {"high", "medium", "low"}:
+                    tv = "low"
+                data["tradability"] = tv
+            # Normalize list fields
+            for field in ("key_levels", "patterns_found", "contradictions"):
+                if field in data and isinstance(data[field], list):
+                    data[field] = [str(item) if not isinstance(item, str) else item for item in data[field]]
         return data
 
 
 class NewsAnalysisResult(_SchemaBase):
-    signal: Literal["bullish", "bearish", "neutral"]
-    score: float = Field(ge=-1.0, le=1.0)
-    confidence: float = Field(ge=0.0, le=1.0)
-    coverage: Literal["none", "low", "medium", "high"]
-    evidence_strength: float = Field(ge=0.0, le=1.0)
+    """News analyst output — describes news sentiment and key drivers."""
+    sentiment: Literal["bullish", "bearish", "neutral"] = "neutral"
+    coverage: Literal["none", "low", "medium", "high"] = "none"
+    key_drivers: list[str] = Field(default_factory=list)
+    risk_events: list[str] = Field(default_factory=list)
     summary: str = Field(min_length=1)
     degraded: bool = False
-    reason: str | None = None
 
     @model_validator(mode="before")
     @classmethod
-    def normalize_signals(cls, data: Any) -> Any:
-        if isinstance(data, dict) and "signal" in data:
-            data["signal"] = _normalize_signal(data["signal"])
+    def normalize_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "sentiment" in data:
+                data["sentiment"] = _normalize_signal(data["sentiment"])
+            # Handle legacy "signal" field
+            if "signal" in data and "sentiment" not in data:
+                data["sentiment"] = _normalize_signal(data["signal"])
+            # Normalize list fields
+            for field in ("key_drivers", "risk_events"):
+                if field in data and isinstance(data[field], list):
+                    data[field] = [str(item) if not isinstance(item, str) else item for item in data[field]]
+            # Force neutral when no coverage
+            if "coverage" in data and str(data["coverage"]).strip().lower() == "none":
+                data["sentiment"] = "neutral"
         return data
-
-    @model_validator(mode="after")
-    def enforce_coverage_bounds(self) -> "NewsAnalysisResult":
-        """Fix 2: Hard numeric bounds on scores based on coverage level."""
-        if self.coverage == "none":
-            self.signal = "neutral"
-            self.score = 0.0
-            self.confidence = min(self.confidence, 0.10)
-        elif self.coverage == "low":
-            self.score = max(-0.45, min(0.45, self.score))
-            self.confidence = min(self.confidence, 0.65)
-        elif self.coverage == "medium":
-            self.confidence = min(self.confidence, 0.85)
-        return self
 
 
 class MarketContextResult(_SchemaBase):
-    signal: Literal["bullish", "bearish", "neutral"]
-    score: float = Field(ge=-1.0, le=1.0)
-    confidence: float = Field(ge=0.0, le=1.0)
+    """Market context analyst output — describes market regime and execution conditions."""
     regime: str = Field(min_length=1)
+    session_quality: Literal["high", "medium", "low"] = "low"
+    execution_risk: Literal["high", "medium", "low"] = "medium"
     summary: str = Field(min_length=1)
-    tradability_score: float = Field(default=1.0, ge=0.0, le=1.0)
-    execution_penalty: float = Field(default=0.0, ge=0.0, le=1.0)
-    hard_block: bool = False
     degraded: bool = False
-    reason: str | None = None
 
     @model_validator(mode="before")
     @classmethod
-    def normalize_signals(cls, data: Any) -> Any:
-        if isinstance(data, dict) and "signal" in data:
-            data["signal"] = _normalize_signal(data["signal"])
+    def normalize_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # Normalize session_quality and execution_risk
+            for field in ("session_quality", "execution_risk"):
+                if field in data:
+                    val = str(data[field]).strip().lower()
+                    # Handle numeric values (legacy compat)
+                    try:
+                        num = float(val)
+                        if num >= 0.66:
+                            val = "high"
+                        elif num >= 0.33:
+                            val = "medium"
+                        else:
+                            val = "low"
+                    except (TypeError, ValueError):
+                        pass
+                    if val not in {"high", "medium", "low"}:
+                        val = "medium"
+                    data[field] = val
         return data
 
-    @model_validator(mode="after")
-    def enforce_regime_bounds(self) -> "MarketContextResult":
-        """Fix 3: Stability bounds based on regime and tradability."""
-        regime_lower = self.regime.strip().lower()
-        if regime_lower == "calm":
-            self.confidence = max(0.40, min(0.75, self.confidence))
-            self.score = max(-0.20, min(0.20, self.score))
-        if self.tradability_score <= 0.35:
-            self.execution_penalty = max(self.execution_penalty, 0.10)
-        return self
 
+# ---------------------------------------------------------------------------
+# Phase 2-3 — Debate
+# ---------------------------------------------------------------------------
 
 class DebateThesis(_SchemaBase):
+    """Researcher thesis — arguments for one side of the debate."""
     arguments: list[str] = Field(default_factory=list)
     thesis: str = ""
     confidence: float = Field(ge=0.0, le=1.0, default=0.5)
@@ -159,13 +182,11 @@ class DebateThesis(_SchemaBase):
     @classmethod
     def normalize_thesis_fields(cls, data: Any) -> Any:
         if isinstance(data, dict):
-            # Clamp confidence
             if "confidence" in data:
                 try:
                     data["confidence"] = max(0.0, min(1.0, float(data["confidence"])))
                 except (TypeError, ValueError):
                     data["confidence"] = 0.5
-            # Normalize arguments to list of strings (LLM sometimes sends objects)
             for field in ("arguments", "invalidation_conditions"):
                 if field in data and isinstance(data[field], list):
                     normalized = []
@@ -173,7 +194,6 @@ class DebateThesis(_SchemaBase):
                         if isinstance(item, str):
                             normalized.append(item)
                         elif isinstance(item, dict):
-                            # Convert dict to string: "type: detail" or just the values
                             parts = [str(v) for v in item.values() if v]
                             normalized.append(" — ".join(parts) if parts else str(item))
                         else:
@@ -182,22 +202,66 @@ class DebateThesis(_SchemaBase):
         return data
 
 
-class DebateResult(_SchemaBase):
-    finished: bool
-    winning_side: Literal["bullish", "bearish", "neutral"] | None = None
-    confidence: float = Field(ge=0.0, le=1.0, default=0.5)
-    reason: str = ""
+_WINNER_ALIASES = {
+    "neutral": "no_edge", "hold": "no_edge", "none": "no_edge",
+    "bull": "bullish", "bear": "bearish",
+    "no edge": "no_edge", "noedge": "no_edge", "no-edge": "no_edge",
+}
 
+
+class DebateResult(_SchemaBase):
+    """Moderator verdict — must tranche a direction or declare no edge."""
+    winner: Literal["bullish", "bearish", "no_edge"]
+    conviction: Literal["strong", "moderate", "weak"] = "weak"
+    key_argument: str = ""
+    weakness: str = ""
+    rounds_completed: int = Field(default=0, ge=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_winner(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "winner" in data:
+            raw = str(data["winner"]).strip().lower()
+            data["winner"] = _WINNER_ALIASES.get(raw, raw)
+            if data["winner"] not in ("bullish", "bearish", "no_edge"):
+                data["winner"] = "no_edge"
+        # Handle legacy "winning_side" field
+        if isinstance(data, dict) and "winning_side" in data and "winner" not in data:
+            raw = str(data["winning_side"]).strip().lower()
+            data["winner"] = _WINNER_ALIASES.get(raw, raw)
+            if data["winner"] not in ("bullish", "bearish", "no_edge"):
+                data["winner"] = "no_edge"
+        # Normalize conviction
+        if isinstance(data, dict) and "conviction" in data:
+            conv = str(data["conviction"]).strip().lower()
+            # Handle numeric confidence (legacy compat)
+            try:
+                num = float(conv)
+                if num >= 0.7:
+                    conv = "strong"
+                elif num >= 0.4:
+                    conv = "moderate"
+                else:
+                    conv = "weak"
+            except (TypeError, ValueError):
+                pass
+            if conv not in ("strong", "moderate", "weak"):
+                conv = "weak"
+            data["conviction"] = conv
+        return data
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — Decision
+# ---------------------------------------------------------------------------
 
 class TraderDecisionDraft(_SchemaBase):
+    """Trader decision — free to decide direction and conviction."""
     decision: Literal["BUY", "SELL", "HOLD"]
-    confidence: float = Field(ge=0.0, le=1.0)
-    combined_score: float = Field(ge=-1.0, le=1.0)
-    execution_allowed: bool
-    reason: str = Field(min_length=1)
-    entry: float | None = None
-    stop_loss: float | None = None
-    take_profit: float | None = None
+    conviction: float = Field(ge=0.0, le=1.0)
+    reasoning: str = Field(min_length=1)
+    key_level: float | None = None
+    invalidation: str | None = None
     degraded: bool = False
 
     @model_validator(mode="before")
@@ -206,62 +270,68 @@ class TraderDecisionDraft(_SchemaBase):
         if isinstance(data, dict):
             if "decision" in data:
                 data["decision"] = _normalize_decision(data["decision"])
-            # Enforce sign convention: SELL => negative score, BUY => positive
-            if "combined_score" in data and "decision" in data:
+            if "conviction" in data:
                 try:
-                    score = float(data["combined_score"])
-                    decision = data["decision"]
-                    if decision == "SELL" and score > 0:
-                        data["combined_score"] = -abs(score)
-                    elif decision == "BUY" and score < 0:
-                        data["combined_score"] = abs(score)
+                    data["conviction"] = max(0.0, min(1.0, float(data["conviction"])))
                 except (TypeError, ValueError):
-                    pass
-            # Clamp values
-            for field, lo, hi in [("confidence", 0.0, 1.0), ("combined_score", -1.0, 1.0)]:
-                if field in data:
-                    try:
-                        data[field] = max(lo, min(hi, float(data[field])))
-                    except (TypeError, ValueError):
-                        pass
+                    data["conviction"] = 0.0
+            # Legacy compat: map confidence → conviction
+            if "confidence" in data and "conviction" not in data:
+                try:
+                    data["conviction"] = max(0.0, min(1.0, float(data["confidence"])))
+                except (TypeError, ValueError):
+                    data["conviction"] = 0.0
         return data
-
-    @model_validator(mode="after")
-    def validate_execution_levels(self) -> "TraderDecisionDraft":
-        if self.decision == "HOLD" or not self.execution_allowed:
-            return self
-        if self.entry is None or self.stop_loss is None or self.take_profit is None:
-            # Auto-correct: disable execution instead of rejecting
-            self.execution_allowed = False
-            return self
-        if self.decision == "BUY" and not (self.stop_loss < self.entry < self.take_profit):
-            raise ValueError("BUY requires stop_loss < entry < take_profit")
-        if self.decision == "SELL" and not (self.take_profit < self.entry < self.stop_loss):
-            raise ValueError("SELL requires take_profit < entry < stop_loss")
-        return self
 
 
 class RiskAssessmentResult(_SchemaBase):
-    accepted: bool
-    suggested_volume: float = Field(ge=0.0)
-    reasons: list[str] = Field(default_factory=list)
-    degraded: bool = False
-
-
-class ExecutionPlanResult(_SchemaBase):
-    decision: Literal["BUY", "SELL", "HOLD"]
-    should_execute: bool
-    side: Literal["BUY", "SELL"] | None = None
-    volume: float = Field(ge=0.0)
-    reason: str = Field(min_length=1)
+    """Risk-manager output — can only make more conservative, never more aggressive."""
+    approved: bool
+    adjusted_volume: float = Field(ge=0.0)
+    reasoning: str = Field(default="", min_length=0)
+    risk_flags: list[str] = Field(default_factory=list)
     degraded: bool = False
 
     @model_validator(mode="before")
     @classmethod
-    def normalize_decision(cls, data: Any) -> Any:
+    def normalize_fields(cls, data: Any) -> Any:
         if isinstance(data, dict):
-            if "decision" in data:
-                data["decision"] = _normalize_decision(data["decision"])
-            if "side" in data and data["side"]:
-                data["side"] = _normalize_decision(data["side"])
+            # Legacy compat: "accepted" → "approved"
+            if "accepted" in data and "approved" not in data:
+                data["approved"] = data["accepted"]
+            # Legacy compat: "suggested_volume" → "adjusted_volume"
+            if "suggested_volume" in data and "adjusted_volume" not in data:
+                data["adjusted_volume"] = data["suggested_volume"]
+            # Legacy compat: "reasons" → "risk_flags"
+            if "reasons" in data and "risk_flags" not in data:
+                data["risk_flags"] = data["reasons"]
+        return data
+
+
+class ExecutionPlanResult(_SchemaBase):
+    """Execution optimizer — timing and order type selection."""
+    order_type: Literal["market", "limit", "stop_limit"] = "market"
+    timing: Literal["immediate", "wait_pullback", "wait_session"] = "immediate"
+    reasoning: str = Field(min_length=1)
+    expected_slippage: Literal["low", "medium", "high"] = "medium"
+    degraded: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            for field, valid_set in [
+                ("order_type", {"market", "limit", "stop_limit"}),
+                ("timing", {"immediate", "wait_pullback", "wait_session"}),
+                ("expected_slippage", {"low", "medium", "high"}),
+            ]:
+                if field in data:
+                    val = str(data[field]).strip().lower().replace(" ", "_").replace("-", "_")
+                    if val not in valid_set:
+                        # Use first value as default
+                        val = next(iter(valid_set))
+                    data[field] = val
+            # Legacy compat: map old decision/should_execute/volume fields
+            if "decision" in data and "order_type" not in data:
+                pass  # Ignore legacy decision field
         return data

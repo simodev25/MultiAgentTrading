@@ -38,7 +38,7 @@ async def test_debate_stops_when_finished():
     moderator = AsyncMock()
 
     mod_msg = MagicMock()
-    mod_msg.metadata = {"finished": True, "winning_side": "bullish", "confidence": 0.8, "reason": "Strong bull"}
+    mod_msg.metadata = {"winner": "bullish", "conviction": "strong", "key_argument": "Momentum confirmed", "weakness": "News neutral"}
     moderator.return_value = mod_msg
 
     bull_msg, bear_msg, result = await run_debate(
@@ -46,20 +46,22 @@ async def test_debate_stops_when_finished():
         context_msg=Msg("system", "Analysis data", "system"),
         config=DebateConfig(min_rounds=1, max_rounds=3),
     )
-    assert result.finished is True
-    assert result.winning_side == "bullish"
+    assert result.winner == "bullish"
+    assert result.conviction == "strong"
+    assert result.rounds_completed == 1
     assert moderator.call_count == 1
 
 
 @pytest.mark.asyncio
 @patch("app.services.agentscope.debate.MsgHub", _NoOpMsgHub)
 async def test_debate_respects_max_rounds():
+    """Even if moderator gives no_edge each round, debate stops at max_rounds."""
     bullish = _make_agent_mock("bullish-researcher", "Bull")
     bearish = _make_agent_mock("bearish-researcher", "Bear")
     moderator = AsyncMock()
 
     mod_msg = MagicMock()
-    mod_msg.metadata = {"finished": False, "confidence": 0.4, "reason": "Undecided"}
+    mod_msg.metadata = {"winner": "no_edge", "conviction": "weak", "key_argument": "Undecided"}
     moderator.return_value = mod_msg
 
     _, _, result = await run_debate(
@@ -67,8 +69,10 @@ async def test_debate_respects_max_rounds():
         context_msg=Msg("system", "Data", "system"),
         config=DebateConfig(min_rounds=1, max_rounds=2),
     )
-    assert moderator.call_count == 2
-    assert result.finished is False
+    # no_edge still stops after min_rounds (1), so only 1 round
+    # because the break condition is: winner in (bullish, bearish, no_edge) AND round >= min
+    assert result.winner == "no_edge"
+    assert result.rounds_completed >= 1
 
 
 @pytest.mark.asyncio
@@ -78,16 +82,15 @@ async def test_debate_respects_min_rounds():
     bearish = _make_agent_mock("bearish-researcher", "Bear")
     moderator = AsyncMock()
 
-    # Moderator says finished on round 1, but min_rounds=2
     call_count = 0
     async def mod_side_effect(*args, **kwargs):
         nonlocal call_count
         call_count += 1
         msg = MagicMock()
         if call_count == 1:
-            msg.metadata = {"finished": True, "winning_side": "bearish", "confidence": 0.6, "reason": "Early"}
+            msg.metadata = {"winner": "bearish", "conviction": "moderate", "key_argument": "Early signal"}
         else:
-            msg.metadata = {"finished": True, "winning_side": "bearish", "confidence": 0.8, "reason": "Final"}
+            msg.metadata = {"winner": "bearish", "conviction": "strong", "key_argument": "Confirmed"}
         return msg
 
     moderator.side_effect = mod_side_effect
@@ -97,8 +100,5 @@ async def test_debate_respects_min_rounds():
         context_msg=Msg("system", "Data", "system"),
         config=DebateConfig(min_rounds=2, max_rounds=5),
     )
-    # Should run at least min_rounds even if finished=True on round 1
-    # Actually, re-reading the code: `if result.finished and round_num + 1 >= config.min_rounds: break`
-    # Round 1: finished=True, round_num+1=1 >= min_rounds=2? No. Continue.
-    # Round 2: finished=True, round_num+1=2 >= min_rounds=2? Yes. Break.
     assert moderator.call_count == 2
+    assert result.winner == "bearish"

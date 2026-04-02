@@ -2,10 +2,9 @@
 
 from app.services.agentscope.decision_helpers import (
     compute_deterministic_score,
-    compute_score_band,
-    count_aligned_sources,
     derive_trend_momentum,
     validate_tool_calls,
+    validate_risk_tool_calls,
 )
 
 
@@ -87,53 +86,7 @@ def test_empty_outputs_zero() -> None:
 
 # ── Score Band ──
 
-def test_score_band_positive() -> None:
-    band = compute_score_band(0.5)
-    assert band[0] < 0.5 < band[1]
-    assert abs((band[1] - band[0]) - 0.2) < 0.001
-
-
-def test_score_band_zero() -> None:
-    band = compute_score_band(0.0)
-    assert band == (-0.20, 0.20)
-
-
-def test_score_band_negative() -> None:
-    band = compute_score_band(-0.4)
-    assert band[0] < -0.4 < band[1]
-
-
-# ── DM-5: Aligned Sources ──
-
-def test_aligned_bullish_all_agree() -> None:
-    """All agents bullish → 3 aligned."""
-    outputs = _analysis(tech_score=0.3, tech_signal="bullish",
-                        news_score=0.2, news_signal="bullish",
-                        ctx_score=0.1, ctx_signal="bullish")
-    assert count_aligned_sources(outputs, "bullish") == 3
-
-
-def test_aligned_bearish_partial() -> None:
-    """Only tech bearish → 1 aligned."""
-    outputs = _analysis(tech_score=-0.3, tech_signal="bearish",
-                        news_score=0.0, news_signal="neutral",
-                        ctx_score=0.1, ctx_signal="neutral")
-    assert count_aligned_sources(outputs, "bearish") == 1
-
-
-def test_aligned_none() -> None:
-    """All neutral → 0 aligned."""
-    outputs = _analysis()
-    assert count_aligned_sources(outputs, "bullish") == 0
-
-
-def test_aligned_by_score_not_signal() -> None:
-    """Signal says neutral but score is positive → counted as aligned."""
-    outputs = _analysis(tech_score=0.1, tech_signal="neutral")
-    assert count_aligned_sources(outputs, "bullish") == 1
-
-
-# ── DM-6: Trend/Momentum Derivation ──
+# ── Trend/Momentum Derivation ──
 
 def test_derive_bearish_trend_bullish_momentum() -> None:
     snapshot = {"trend": "bearish", "macd_diff": 0.001}

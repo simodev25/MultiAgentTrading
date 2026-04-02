@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -169,203 +168,6 @@ def _msg_to_dict(msg: Msg | None, tool_invocations: dict | None = None) -> dict[
                 result.setdefault("tool_results", {})[tool_name] = data
 
     return result
-
-
-# ---------------------------------------------------------------------------
-# Technical-analyst output consistency helpers
-# ---------------------------------------------------------------------------
-
-# Maps technical_scoring() component short names → canonical prompt names
-# matching the sign guardrails block and the output contract.
-_COMPONENT_TO_PROMPT_KEY: dict[str, str] = {
-    "structure": "structure_score",
-    "momentum": "momentum_score",
-    "pattern": "pattern_score",
-    "divergence": "divergence_score",
-    "multi_tf": "multi_timeframe_score",
-    "level": "level_score",
-}
-
-
-def _patch_technical_analyst_output(msg_dict: dict, scoring_result: dict) -> None:
-    """Override technical-analyst output with authoritative runtime scoring.
-
-    Ensures metadata and text are mutually consistent, and both reflect
-    the deterministic scoring pipeline rather than LLM-generated values.
-
-    **Score semantics**:
-
-    * ``raw_score`` / ``final_score`` / ``score`` — all equal the deterministic
-      composite from ``technical_scoring()``.  The pipeline produces a single
-      score; there is no separate post-contradiction deterministic penalty.
-      The LLM's role is qualitative interpretation (setup_quality, tradability,
-      contradictions), not score rewriting.
-
-    * ``score_breakdown`` — component dict from ``technical_scoring().components``,
-      using short key names (structure, momentum, …) in metadata.
-
-    **Known limitation**: The pre-computed score uses only snapshot indicators
-    (trend, RSI, MACD, EMA, change_pct).  Patterns, divergences, multi-TF
-    alignment, and S/R levels discovered by agent tools during execution are
-    NOT reflected in the score.  This means pattern, divergence, multi_tf,
-    and level components will be zero unless a post-execution re-computation
-    step is added.
-    """
-    if not scoring_result:
-        return
-
-    runtime_score = scoring_result.get("score", 0.0)
-    runtime_signal = scoring_result.get("signal", "neutral")
-    runtime_confidence = scoring_result.get("confidence", 0.5)
-    runtime_setup = scoring_result.get("setup_state", "conditional")
-    components = scoring_result.get("components", {})
-
-    meta = msg_dict.setdefault("metadata", {})
-
-    # ── Authoritative runtime overrides ──
-    meta["score_breakdown"] = components
-    meta["raw_score"] = runtime_score
-    meta["final_score"] = runtime_score      # same as raw_score — see docstring
-    meta["score"] = runtime_score
-    meta["signal"] = runtime_signal
-
-    # Override confidence/setup_state only if LLM returned empty/zero
-    if not meta.get("confidence") or meta.get("confidence") == 0:
-        meta["confidence"] = runtime_confidence
-    if not meta.get("setup_state"):
-        meta["setup_state"] = runtime_setup
-
-    # Flatten component scores into metadata for direct access
-    for comp_key in ("structure", "momentum", "pattern", "divergence", "multi_tf", "level"):
-        meta[comp_key] = components.get(comp_key, 0.0)
-
-    # ── Patch text to match authoritative metadata ──
-    text = msg_dict.get("text", "")
-    if text:
-        msg_dict["text"] = _patch_technical_text(text, meta)
-
-
-def _patch_technical_text(text: str, authoritative_meta: dict) -> str:
-    """Patch the LLM's text output so score fields match authoritative runtime values.
-
-    Handles both markdown-fenced JSON (````` ```json … ``` `````) and bare JSON
-    objects.  Non-JSON text is returned unchanged — the LLM's qualitative
-    commentary (summaries, contradiction descriptions) is preserved.
-
-    This ensures downstream consumers reading the ``text`` field see values
-    consistent with ``metadata``.
-    """
-    if not text:
-        return text
-
-    # Fields to override in any JSON block found in the text
-    override_keys = ("raw_score", "final_score", "score", "signal", "score_breakdown")
-
-    def _apply_overrides(parsed: dict) -> None:
-        for key in override_keys:
-            if key in authoritative_meta:
-                parsed[key] = authoritative_meta[key]
-
-    # Try markdown-fenced JSON first
-    fence_pattern = re.compile(r"(```(?:json)?\s*\n)(\{.*?\})(\s*\n```)", re.DOTALL)
-    match = fence_pattern.search(text)
-    if match:
-        try:
-            parsed = json.loads(match.group(2))
-            if isinstance(parsed, dict):
-                _apply_overrides(parsed)
-                updated = json.dumps(parsed, indent=2, ensure_ascii=False)
-                return text[: match.start(2)] + updated + text[match.end(2) :]
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-    # Try bare JSON (no code fences)
-    start = text.find("{")
-    if start >= 0:
-        end = text.rfind("}")
-        if end > start:
-            try:
-                parsed = json.loads(text[start : end + 1])
-                if isinstance(parsed, dict):
-                    _apply_overrides(parsed)
-                    updated = json.dumps(parsed, indent=2, ensure_ascii=False)
-                    return text[:start] + updated + text[end + 1 :]
-            except (json.JSONDecodeError, ValueError):
-                pass
-
-    # ── Fallback: plain-text replacement ──
-    # When the LLM outputs free-form text (not JSON), replace the
-    # UNAVAILABLE sentinel and inject the real score breakdown so that
-    # downstream consumers (e.g. trader-agent prompt) see correct values.
-    score_breakdown = authoritative_meta.get("score_breakdown")
-    if score_breakdown and isinstance(score_breakdown, dict):
-        formatted = ", ".join(f"{k}={v}" for k, v in score_breakdown.items())
-        # Replace any occurrence of the UNAVAILABLE sentinel
-        text = text.replace("UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN", formatted)
-    # Also fix raw_score / final_score if they appear as literal "0.0" in text
-    for field in ("raw_score", "final_score"):
-        if field in authoritative_meta:
-            # Pattern: "raw_score: 0.0" or "raw_score=0.0" in free text
-            for sep in (": ", "="):
-                old_fragment = f"{field}{sep}0.0"
-                new_fragment = f"{field}{sep}{authoritative_meta[field]}"
-                text = text.replace(old_fragment, new_fragment)
-
-    return text
-
-
-def _filter_invalid_invalidations(metadata: dict, agent_name: str, snapshot: dict) -> None:
-    """Remove invalidation conditions that describe current state or reinforce the thesis.
-
-    Bearish thesis: invalidation must be BULLISH events (price up, RSI up, etc.)
-    Bullish thesis: invalidation must be BEARISH events (price down, RSI down, etc.)
-    """
-    conditions = metadata.get("invalidation_conditions", [])
-    if not conditions:
-        return
-
-    is_bearish_researcher = "bearish" in agent_name
-    trend = snapshot.get("trend", "neutral")
-    ema_fast = snapshot.get("ema_fast", 0)
-    ema_slow = snapshot.get("ema_slow", 0)
-    ema_fast_below_slow = ema_fast < ema_slow if ema_fast and ema_slow else False
-
-    filtered = []
-    for cond in conditions:
-        cond_lower = cond.lower() if isinstance(cond, str) else ""
-
-        # Bearish researcher: invalidation must be bullish (price goes UP)
-        if is_bearish_researcher:
-            # Skip conditions that REINFORCE bearishness
-            if any(phrase in cond_lower for phrase in [
-                "macd turns negative", "macd histogram negative",
-                "dxy rises", "dxy strengthens", "dxy > 99", "dxy above",
-                "dollar strengthens", "usd strengthens",
-                "price breaks below", "price falls below",
-                "rsi drops below", "rsi falls below",
-            ]):
-                continue  # This reinforces bearish — not an invalidation
-
-        # Bullish researcher: invalidation must be bearish (price goes DOWN)
-        else:
-            # Skip conditions that describe current bearish state
-            if ema_fast_below_slow and any(phrase in cond_lower for phrase in [
-                "ema20 crosses below ema50", "ema crosses below",
-                "fast ema below slow", "ema re-crosses below",
-            ]):
-                continue  # Already true — not a future invalidation
-
-            if any(phrase in cond_lower for phrase in [
-                "macd turns positive", "macd histogram positive",
-                "dollar weakens", "usd weakens",
-                "price breaks above", "price rises above",
-            ]):
-                continue  # This reinforces bullishness — not an invalidation
-
-        filtered.append(cond)
-
-    metadata["invalidation_conditions"] = filtered
-
 
 class AgentScopeRegistry:
     """Orchestrates 8 trading agents through 4 phases."""
@@ -572,11 +374,6 @@ class AgentScopeRegistry:
         ) if macro_items else "No macro events available."
 
         # Raw facts block (for technical-analyst)
-        # NOTE: These values come from the pre-execution market snapshot.  The
-        # agent's tool calls (e.g. indicator_bundle()) may return slightly
-        # different values because they recompute from OHLC arrays.  The
-        # snapshot is the source of truth for the pre-computed runtime score
-        # breakdown; tool results are the source of truth for detailed analysis.
         raw_facts_lines = []
         for key in ("trend", "rsi", "macd_diff", "atr", "last_price", "change_pct"):
             val = snapshot.get(key)
@@ -584,51 +381,12 @@ class AgentScopeRegistry:
                 raw_facts_lines.append(f"- {key.replace('_', ' ').title()}: {val} [tool:indicator_bundle]")
         raw_facts_block = "\n".join(raw_facts_lines) if raw_facts_lines else "No raw facts available."
 
-        # Pre-compute technical_scoring for score_breakdown.
-        # Uses ONLY snapshot indicators (trend, rsi, macd_diff, atr, ema, change_pct).
-        # Patterns, divergences, multi-TF alignment, and S/R levels are NOT available
-        # at this stage — they are discovered by agent tools during execution.
-        # Therefore pattern_score, divergence_score, multi_timeframe_score, and
-        # level_score will be zero in this pre-computation.  See
-        # _patch_technical_analyst_output() for the post-execution override.
-        runtime_score_breakdown_text = "UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN"
-        try:
-            from app.services.mcp.trading_server import technical_scoring
-            scoring = technical_scoring(
-                trend=snapshot.get("trend", "neutral"),
-                rsi=snapshot.get("rsi", 50.0),
-                macd_diff=snapshot.get("macd_diff", 0.0),
-                atr=snapshot.get("atr", 0.0),
-                ema_fast_above_slow=snapshot.get("ema_fast", 0) > snapshot.get("ema_slow", 0),
-                change_pct=snapshot.get("change_pct", 0.0),
-            )
-            components = scoring.get("components", {})
-            # Use canonical _score suffix names matching sign guardrails & output contract
-            score_lines = [
-                f"{_COMPONENT_TO_PROMPT_KEY.get(k, k)}={v}"
-                for k, v in components.items()
-            ]
-            score_lines.append(f"final_score={scoring.get('score', 0)}")
-            runtime_score_breakdown_text = "\n".join(score_lines)
-        except Exception as exc:
-            logger.warning("Failed to compute runtime score breakdown: %s", exc)
-
-        # Store the full scoring result for runtime injection (Fix 1)
-        _scoring_result: dict[str, Any] = {}
-        try:
-            _scoring_result = scoring  # type: ignore[possibly-undefined]
-        except NameError:
-            pass
-
         variables = {
             "pair": pair,
             "asset_class": asset_class,
             "timeframe": timeframe,
             "snapshot_block": snapshot_block,
             "raw_facts_block": raw_facts_block,
-            "tool_results_block": "Use your tools to gather additional data.",
-            "runtime_score_breakdown_block": runtime_score_breakdown_text,
-            "interpretation_rules_block": "",
             "news_count": str(len(news_items)),
             "news_items_block": news_block,
             "macro_count": str(len(macro_items)),
@@ -637,23 +395,31 @@ class AgentScopeRegistry:
             "decision_mode": "balanced",
             "mode": "simulation",
             "risk_percent": "1.0",
-            "_scoring_result": _scoring_result,
         }
 
-        # Debate variables
+        # Debate variables (LLM-First: use winner/conviction/key_argument/weakness)
         if debate_result:
-            variables["debate_winner"] = str(getattr(debate_result, "winning_side", "neutral"))
-            variables["debate_confidence"] = str(getattr(debate_result, "confidence", 0.5))
-            variables["debate_reason"] = str(getattr(debate_result, "reason", ""))
+            winner = getattr(debate_result, "winner", "no_edge")
+            variables["debate_winner"] = str(winner if winner != "no_edge" else "neutral")
+            variables["debate_conviction"] = str(getattr(debate_result, "conviction", "weak"))
+            variables["debate_key_argument"] = str(getattr(debate_result, "key_argument", ""))
+            variables["debate_weakness"] = str(getattr(debate_result, "weakness", ""))
 
         # Trader/risk variables for downstream agents
         if trader_out:
-            variables["trader_decision"] = trader_out.get("metadata", {}).get("decision", "HOLD")
-            variables["entry"] = str(trader_out.get("metadata", {}).get("entry", "N/A"))
-            variables["stop_loss"] = str(trader_out.get("metadata", {}).get("stop_loss", "N/A"))
-            variables["take_profit"] = str(trader_out.get("metadata", {}).get("take_profit", "N/A"))
+            trader_meta = trader_out.get("metadata", {})
+            variables["trader_decision"] = trader_meta.get("decision", "HOLD")
+            variables["trader_conviction"] = str(trader_meta.get("conviction", 0.0))
+            variables["trader_reasoning"] = str(trader_meta.get("reasoning", ""))
+            variables["key_level"] = str(trader_meta.get("key_level", "N/A"))
         if risk_out:
+            risk_meta = risk_out.get("metadata", {})
             variables["risk_result"] = risk_out.get("text", "")[:500]
+            variables["risk_approved"] = str(risk_meta.get("approved", False))
+            variables["risk_volume"] = str(risk_meta.get("adjusted_volume", 0.0))
+
+        # Context summary from market-context-analyst (if available from analysis_summary)
+        variables["context_summary"] = ""
 
         return variables
 
@@ -799,9 +565,9 @@ class AgentScopeRegistry:
                            session_key=name,
                            llm_enabled=llm_enabled.get(name, False))
         _add_event("debate_complete", "lifecycle", "debate",
-                    winner=debate_result.winning_side,
-                    confidence=debate_result.confidence,
-                    finished=debate_result.finished)
+                    winner=debate_result.winner,
+                    conviction=debate_result.conviction,
+                    rounds_completed=debate_result.rounds_completed)
 
         # Phase 4 decision events
         _add_event("phase4_start", "lifecycle", "decision")
@@ -1105,29 +871,15 @@ class AgentScopeRegistry:
         # Build structured metadata for trader-agent deterministic fallback
         metadata: dict = {}
         if agent_name == "trader-agent":
-            gating = results.get("decision_gating", {})
-            sizing = results.get("trade_sizing", {})
             contradiction = results.get("contradiction_detector", {})
 
-            gates_passed = gating.get("gates_passed", False)
-            # Derive direction from deterministic score
-            from app.services.agentscope.decision_helpers import compute_deterministic_score
-            _det_score = compute_deterministic_score(analysis_outputs or {})
-
-            if gates_passed and abs(_det_score) >= 0.05:
-                decision = "BUY" if _det_score > 0 else "SELL"
-            else:
-                decision = "HOLD"
-
+            # Deterministic fallback: HOLD with zero conviction
             metadata = {
-                "decision": decision,
-                "combined_score": round(_det_score, 4),
-                "confidence": gating.get("confidence", 0.0) if isinstance(gating, dict) else 0.0,
-                "execution_allowed": gates_passed and decision != "HOLD",
-                "entry": sizing.get("entry"),
-                "stop_loss": sizing.get("stop_loss"),
-                "take_profit": sizing.get("take_profit"),
-                "reason": f"deterministic: gates={'passed' if gates_passed else 'blocked'}, score={_det_score:.4f}",
+                "decision": "HOLD",
+                "conviction": 0.0,
+                "reasoning": "deterministic fallback: LLM disabled for trader-agent",
+                "key_level": None,
+                "invalidation": None,
                 "degraded": False,
             }
 
@@ -1455,36 +1207,6 @@ class AgentScopeRegistry:
                     _prompt_cache=_prompt_cache,
                 )
 
-                # Fix 1: FORCE-OVERRIDE deterministic scoring into technical-analyst
-                # metadata AND text.  The LLM may return score=0.0 or
-                # UNAVAILABLE_RUNTIME_SCORE_BREAKDOWN — runtime values always win.
-                # See _patch_technical_analyst_output() docstring for full semantics.
-                #
-                # Priority for scoring result:
-                #   1. Agent's own technical_scoring() call — includes patterns,
-                #      divergences, multi_tf, and level from tool execution.
-                #   2. Pre-computed from snapshot — only structure + momentum.
-                if name == "technical-analyst":
-                    scoring_result = base_vars.get("_scoring_result", {})
-
-                    # Check if the agent called technical_scoring() during
-                    # execution — that result includes all 6 components from
-                    # actual tool data, not just snapshot indicators.
-                    agent_ts = invocations.get("technical_scoring", {}).get("data")
-                    if (isinstance(agent_ts, dict)
-                            and "score" in agent_ts
-                            and "components" in agent_ts
-                            and agent_ts.get("components")):
-                        logger.info(
-                            "Using agent's own technical_scoring result "
-                            "(score=%.4f, 6 components) over pre-computed (score=%.4f)",
-                            agent_ts["score"], scoring_result.get("score", 0),
-                        )
-                        scoring_result = agent_ts
-
-                    if scoring_result:
-                        _patch_technical_analyst_output(msg_dict, scoring_result)
-
                 analysis_outputs[name] = msg_dict
                 self._record_step(db, run, name,
                     {"pair": pair, "timeframe": timeframe, "llm_enabled": llm_enabled.get(name, False)},
@@ -1497,11 +1219,9 @@ class AgentScopeRegistry:
                 f"Analysis results from Phase 1:\n{analysis_summary}\n\n"
                 f"Original context:\n{context_msg.get_text_content()}", "system")
 
-            # Rebuild researcher + trader-agent toolkits with Phase 1 outputs.
+            # Rebuild researcher toolkits with Phase 1 outputs.
             # Researchers need analysis_outputs for evidence_query.
-            # Trader-agent needs analysis_outputs so decision_gating gets
-            # pre-injected aligned_sources and the deterministic score (DM-5).
-            for rname in ("bullish-researcher", "bearish-researcher", "trader-agent"):
+            for rname in ("bullish-researcher", "bearish-researcher"):
                 toolkits[rname] = await build_toolkit(
                     rname, ohlc=ohlc, news=market_data.get("news", {}),
                     analysis_outputs=analysis_outputs,
@@ -1509,10 +1229,9 @@ class AgentScopeRegistry:
                     snapshot=snapshot,
                 )
                 if rname in agents:
-                    is_debate = rname in ("bullish-researcher", "bearish-researcher", "trader-agent")
                     agents[rname] = ALL_AGENT_FACTORIES[rname](
                         model=build_model(provider, agent_model_names[rname], base_url, api_key),
-                        formatter=debate_fmt if is_debate else chat_fmt,
+                        formatter=debate_fmt,
                         toolkit=toolkits[rname],
                         sys_prompt=self._get_sys_prompt(rname, db, base_vars),
                     )
@@ -1544,8 +1263,9 @@ class AgentScopeRegistry:
                     bullish_msg = await _call_agent("bullish-researcher", research_msg)
                     bearish_msg = await _call_agent("bearish-researcher", research_msg)
                     debate_result = DebateResult(
-                        finished=False, winning_side="neutral", confidence=0.3,
-                        reason=f"Debate failed: {type(exc).__name__}",
+                        winner="no_edge", conviction="weak",
+                        key_argument=f"Debate failed: {type(exc).__name__}",
+                        weakness="",
                     )
             else:
                 # Deterministic: run researchers in parallel without debate
@@ -1554,8 +1274,9 @@ class AgentScopeRegistry:
                     _call_agent("bearish-researcher", research_msg),
                 )
                 debate_result = DebateResult(
-                    finished=True, winning_side="neutral", confidence=0.5,
-                    reason="Debate skipped — LLM disabled for debate agents",
+                    winner="no_edge", conviction="weak",
+                    key_argument="Debate skipped — LLM disabled for debate agents",
+                    weakness="",
                 )
             debate_ms = (time.time() - t0) * 1000
 
@@ -1569,11 +1290,6 @@ class AgentScopeRegistry:
                 if rname in agents:
                     agent_tool_invocations[rname] = await _extract_tool_invocations(agents[rname])
 
-            # Fix 4: Get news-analyst scores for researcher confidence constraints
-            _news_meta = analysis_outputs.get("news-analyst", {}).get("metadata", {})
-            _news_score = float(_news_meta.get("score", 0))
-            _news_confidence = float(_news_meta.get("confidence", 0))
-
             for name, msg in [("bullish-researcher", bullish_msg), ("bearish-researcher", bearish_msg)]:
                 d = _msg_to_dict(msg, tool_invocations=agent_tool_invocations.get(name, {}))
                 d["llm_enabled"] = llm_enabled.get(name, False)
@@ -1585,17 +1301,6 @@ class AgentScopeRegistry:
                     variables=base_vars,
                     _prompt_cache=_prompt_cache,
                 )
-
-                # Fix 4: Constrain researcher confidence by Phase 1 news scores
-                d.setdefault("metadata", {})
-                cur_conf = float(d["metadata"].get("confidence", 0.5))
-                if name == "bullish-researcher" and _news_score < -0.50:
-                    d["metadata"]["confidence"] = min(cur_conf, 0.40)
-                elif name == "bearish-researcher" and _news_confidence > 0.70:
-                    d["metadata"]["confidence"] = max(cur_conf, 0.55)
-
-                # Fix invalidation: filter out conditions that REINFORCE the thesis
-                _filter_invalid_invalidations(d["metadata"], name, snapshot)
 
                 analysis_outputs[name] = d
                 self._record_step(db, run, name,
@@ -1644,44 +1349,30 @@ class AgentScopeRegistry:
             _set_progress(65)
             logger.info("Phase 4: Trader -> Risk -> Execution for %s/%s", pair, timeframe)
 
-            # ── Pre-compute deterministic decision inputs ──
-            from app.services.agentscope.decision_helpers import (
-                compute_deterministic_score,
-                compute_score_band,
-                count_aligned_sources,
-                derive_trend_momentum,
-            )
-
-            _det_score = compute_deterministic_score(
-                analysis_outputs,
-                debate_winner=debate_result.winning_side,
-                debate_confidence=debate_result.confidence,
-            )
-            _score_band = compute_score_band(_det_score)
-            _det_direction = "bullish" if _det_score > 0 else ("bearish" if _det_score < 0 else "neutral")
-            _det_aligned = count_aligned_sources(analysis_outputs, _det_direction)
+            # ── Derive trend/momentum for traces (advisory only) ──
+            from app.services.agentscope.decision_helpers import derive_trend_momentum
             _det_trend, _det_momentum = derive_trend_momentum(snapshot)
 
             logger.info(
-                "Deterministic inputs: score=%.4f band=[%.4f,%.4f] aligned=%d trend=%s momentum=%s",
-                _det_score, _score_band[0], _score_band[1], _det_aligned, _det_trend, _det_momentum,
+                "Trend/momentum (traces): trend=%s momentum=%s",
+                _det_trend, _det_momentum,
             )
 
             # Update vars for Phase 4 agents
-            base_vars["debate_winner"] = str(debate_result.winning_side or "neutral")
-            base_vars["debate_confidence"] = str(debate_result.confidence)
-            base_vars["debate_reason"] = str(debate_result.reason or "")
+            winner = debate_result.winner
+            base_vars["debate_winner"] = str(winner if winner != "no_edge" else "neutral")
+            base_vars["debate_conviction"] = str(debate_result.conviction)
+            base_vars["debate_key_argument"] = str(debate_result.key_argument or "")
+            base_vars["debate_weakness"] = str(debate_result.weakness or "")
             base_vars["mode"] = getattr(run, "mode", "simulation")
             base_vars["decision_mode"] = model_selector.resolve_decision_mode(db)
-            base_vars["deterministic_score"] = str(_det_score)
-            base_vars["score_band_min"] = str(_score_band[0])
-            base_vars["score_band_max"] = str(_score_band[1])
-            base_vars["deterministic_aligned_sources"] = str(_det_aligned)
 
             decision_context = (
                 f"Make a trading decision for {pair} on {timeframe}.\n\n"
-                f"Debate result: {debate_result.winning_side} "
-                f"(confidence={debate_result.confidence}, reason={debate_result.reason})\n\n"
+                f"Debate result: {debate_result.winner} "
+                f"(conviction={debate_result.conviction}, "
+                f"key_argument={debate_result.key_argument}, "
+                f"weakness={debate_result.weakness})\n\n"
                 f"Bullish thesis:\n{bullish_msg.get_text_content()}\n\n"
                 f"Bearish thesis:\n{bearish_msg.get_text_content()}\n\n"
                 f"Phase 1 analysis:\n{analysis_summary}"
@@ -1794,7 +1485,7 @@ class AgentScopeRegistry:
                 if name == "trader-agent":
                     meta = d.get("metadata", {})
 
-                    # ── DM-2: Validate required tool calls ──
+                    # Advisory: log missing tool calls as WARNING (no longer blocking)
                     from app.services.agentscope.decision_helpers import validate_tool_calls
                     _trader_tools = agent_tool_invocations.get("trader-agent", {})
                     _tools_ok, _tools_missing = validate_tool_calls(
@@ -1802,39 +1493,14 @@ class AgentScopeRegistry:
                     )
                     if not _tools_ok:
                         logger.warning(
-                            "Trader-agent missing required tool calls: %s — forcing execution_allowed=false",
+                            "Trader-agent missing tool calls (advisory): %s",
                             _tools_missing,
                         )
-                        meta["execution_allowed"] = False
-                        meta["degraded"] = True
-                        meta.setdefault("reason", "")
-                        meta["reason"] += f" [DEGRADED: missing tool calls: {_tools_missing}]"
-                        d["metadata"] = meta
-
-                    # ── DM-1: Enforce combined_score within deterministic band ──
-                    _raw_score = meta.get("combined_score", 0.0)
-                    try:
-                        _raw_score = float(_raw_score)
-                    except (TypeError, ValueError):
-                        _raw_score = 0.0
-                    if _raw_score < _score_band[0] or _raw_score > _score_band[1]:
-                        _clamped = max(_score_band[0], min(_score_band[1], _raw_score))
-                        logger.info(
-                            "Clamping combined_score %.4f to band [%.4f, %.4f] → %.4f",
-                            _raw_score, _score_band[0], _score_band[1], _clamped,
-                        )
-                        meta["combined_score"] = round(_clamped, 4)
-                        d["metadata"] = meta
-
-                    # ── DM-7: Fallback combined_score recovery ──
-                    if meta.get("combined_score") is None or meta.get("combined_score") == 0.0:
-                        meta["combined_score"] = _det_score
-                        d["metadata"] = meta
 
                     base_vars["trader_decision"] = meta.get("decision", "HOLD")
-                    base_vars["entry"] = str(meta.get("entry", "N/A"))
-                    base_vars["stop_loss"] = str(meta.get("stop_loss", "N/A"))
-                    base_vars["take_profit"] = str(meta.get("take_profit", "N/A"))
+                    base_vars["trader_conviction"] = str(meta.get("conviction", 0.0))
+                    base_vars["trader_reasoning"] = str(meta.get("reasoning", ""))
+                    base_vars["key_level"] = str(meta.get("key_level", "N/A"))
                     base_vars["risk_percent"] = str(risk_percent)
                     _trader_decision_is_hold = meta.get("decision", "HOLD") == "HOLD"
                 elif name == "risk-manager":
@@ -1928,7 +1594,10 @@ class AgentScopeRegistry:
             # ── Determine trade decision: trader-agent is authoritative, debate is advisory ──
             trader_meta = trader_out.get("metadata", {})
             trader_decision_raw = trader_meta.get("decision", "").strip().upper()
-            debate_signal = debate_result.winning_side or "neutral"
+            debate_winner = debate_result.winner or "no_edge"
+
+            # Map debate winner: "no_edge" → "neutral" for signal mapping
+            debate_signal = {"bullish": "bullish", "bearish": "bearish"}.get(debate_winner, "neutral")
 
             # Trader-agent structured output takes priority over debate
             if trader_decision_raw in ("BUY", "SELL", "HOLD"):
@@ -1946,18 +1615,8 @@ class AgentScopeRegistry:
             # Determine signal from authoritative decision
             signal = {"BUY": "bullish", "SELL": "bearish"}.get(trade_decision, "neutral")
 
-            # Use trader confidence/score if available, debate as fallback
-            trade_confidence = trader_meta.get("confidence", debate_result.confidence)
-            trade_combined_score = trader_meta.get("combined_score")
-            trade_execution_allowed = trader_meta.get("execution_allowed", trade_decision != "HOLD")
-
-            # combined_score recovery from tool invocations (only if truly absent, not 0.0)
-            if trade_combined_score is None:
-                trader_invocations = agent_tool_invocations.get("trader-agent", {})
-                gating_inv = trader_invocations.get("decision_gating", {})
-                trade_combined_score = gating_inv.get("input", {}).get("combined_score")
-                if trade_combined_score is None:
-                    trade_combined_score = gating_inv.get("data", {}).get("combined_score", 0.0)
+            # Use trader conviction as confidence
+            trade_confidence = trader_meta.get("conviction", 0.0)
 
             # Resolve active config version
             _config_version = 0
@@ -1973,24 +1632,23 @@ class AgentScopeRegistry:
                 "decision": trade_decision,
                 "signal": signal,
                 "confidence": trade_confidence,
-                "combined_score": trade_combined_score,
-                "execution_allowed": trade_execution_allowed,
                 "execution": {
                     "status": "skipped" if trade_decision == "HOLD" else "simulation",
                 },
                 # Debate details (advisory)
                 "debate": {
-                    "finished": debate_result.finished,
-                    "winning_side": debate_result.winning_side,
-                    "confidence": debate_result.confidence,
-                    "reason": debate_result.reason,
+                    "winner": debate_result.winner,
+                    "conviction": debate_result.conviction,
+                    "key_argument": debate_result.key_argument,
+                    "weakness": debate_result.weakness,
+                    "rounds_completed": debate_result.rounds_completed,
                 },
                 # Agent summaries
                 "trader_summary": trader_out.get("text", "")[:500],
                 "risk_summary": risk_out.get("text", "")[:500],
                 "execution_summary": exec_out.get("text", "")[:500],
-                # Merge remaining trader metadata (entry, stop_loss, take_profit, reason, etc.)
-                **{k: v for k, v in trader_meta.items() if k not in ("decision", "confidence", "combined_score", "execution_allowed")},
+                # Merge remaining trader metadata (conviction, reasoning, key_level, invalidation, etc.)
+                **{k: v for k, v in trader_meta.items() if k not in ("decision", "conviction")},
                 # Portfolio context
                 "portfolio": _portfolio_context,
                 # Config version used for this run
@@ -2007,9 +1665,8 @@ class AgentScopeRegistry:
                 "market_data_source": snapshot.get("market_data_source", "unknown"),
                 "market_data_bars": len(ohlc.get("closes", [])),
                 "market_snapshot": snapshot,
-                "debate_rounds": 3,
-                "debate_finished": debate_result.finished,
-                "debate_winner": debate_result.winning_side,
+                "debate_rounds": debate_result.rounds_completed,
+                "debate_winner": debate_result.winner,
                 "analysis_outputs": {
                     k: {"text": v.get("text", "")[:300]} for k, v in analysis_outputs.items()
                 },
@@ -2152,13 +1809,13 @@ class AgentScopeRegistry:
                 except Exception as exc:
                     logger.warning("validate_entry debate failed: %s", str(exc)[:100])
                     debate_result = DebateResult(
-                        finished=False, winning_side="neutral",
-                        confidence=0.0, reason="debate failed",
+                        winner="no_edge", conviction="weak",
+                        key_argument="debate failed", weakness="",
                     )
             else:
                 debate_result = DebateResult(
-                    finished=False, winning_side="neutral",
-                    confidence=0.0, reason="debate skipped (not all agents enabled)",
+                    winner="no_edge", conviction="weak",
+                    key_argument="debate skipped (not all agents enabled)", weakness="",
                 )
 
             # ── Phase 4: Trader decision ──
@@ -2176,7 +1833,8 @@ class AgentScopeRegistry:
             # Combine debate + trader for final decision
             signal = "neutral"
             if debate_result:
-                signal = debate_result.winning_side or "neutral"
+                winner = debate_result.winner or "no_edge"
+                signal = {"bullish": "bullish", "bearish": "bearish"}.get(winner, "neutral")
 
             final_decision = trader_decision
             if final_decision == "HOLD" and signal == "bullish":
@@ -2190,23 +1848,23 @@ class AgentScopeRegistry:
                 meta = output.get("metadata", {})
                 agent_details[name] = {
                     "summary": meta.get("summary", output.get("text", "")[:300]),
-                    "signal": meta.get("signal", meta.get("decision", "")),
-                    "score": meta.get("score", meta.get("combined_score", None)),
-                    "confidence": meta.get("confidence", None),
+                    "decision": meta.get("decision", ""),
+                    "conviction": meta.get("conviction", None),
                 }
 
             if debate_result:
                 agent_details["debate"] = {
-                    "winning_side": debate_result.winning_side,
-                    "confidence": debate_result.confidence,
-                    "reason": debate_result.reason,
-                    "finished": debate_result.finished,
+                    "winner": debate_result.winner,
+                    "conviction": debate_result.conviction,
+                    "key_argument": debate_result.key_argument,
+                    "weakness": debate_result.weakness,
+                    "rounds_completed": debate_result.rounds_completed,
                 }
 
             return {
                 "decision": final_decision,
                 "signal": signal,
-                "confidence": debate_result.confidence if debate_result else 0.0,
+                "conviction": debate_result.conviction if debate_result else "weak",
                 "agents_used": [n for n, v in llm_enabled.items() if v],
                 "agent_details": agent_details,
             }

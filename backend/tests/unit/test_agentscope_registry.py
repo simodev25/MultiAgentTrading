@@ -30,11 +30,11 @@ async def test_execute_runs_all_phases(mock_debate, mock_formatter, mock_model, 
     mock_debate.return_value = (
         _make_msg("bullish-researcher", "Bull thesis"),
         _make_msg("bearish-researcher", "Bear thesis"),
-        DebateResult(finished=True, winning_side="bearish", confidence=0.7, reason="Strong bear"),
+        DebateResult(winner="bearish", conviction="strong", key_argument="Momentum confirmed", weakness="News neutral"),
     )
 
     phase4_msg = _make_msg("trader-agent", "SELL decision")
-    phase4_msg.metadata = {"signal": "neutral", "decision": "HOLD", "combined_score": 0.0, "confidence": 0.3, "execution_allowed": False, "reason": "test"}
+    phase4_msg.metadata = {"decision": "HOLD", "conviction": 0.3, "reasoning": "No clear edge"}
 
     def _make_mock_agent(**kwargs):
         agent = AsyncMock(return_value=phase4_msg)
@@ -96,7 +96,7 @@ async def test_execute_runs_all_phases(mock_debate, mock_formatter, mock_model, 
     assert mock_debate.call_count == 1
     assert run.status == "completed"
     assert isinstance(run.decision, dict)
-    assert run.decision.get("debate", {}).get("winning_side") == "bearish"
+    assert run.decision.get("debate", {}).get("winner") == "bearish"
     assert db.add.call_count >= 8
 
 
