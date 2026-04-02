@@ -32,9 +32,20 @@ def _is_market_hours() -> bool:
     return True
 
 
+def _acquire_snapshot_lock() -> bool:
+    """Acquire a Redis lock to prevent parallel snapshot executions."""
+    try:
+        import redis
+        r = redis.from_url(settings.redis_url)
+        # Lock for 55s (less than 60s schedule, prevents overlap)
+        return bool(r.set("portfolio_snapshot_lock", "1", nx=True, ex=55))
+    except Exception:
+        return True  # If Redis is down, proceed anyway
+
+
 @celery_app.task(
     name='app.tasks.portfolio_tasks.snapshot_portfolio',
-    soft_time_limit=30,
+    soft_time_limit=45,
     time_limit=60,
 )
 def snapshot_portfolio() -> None:
@@ -43,11 +54,16 @@ def snapshot_portfolio() -> None:
         logger.debug("portfolio_snapshot skipped: outside market hours")
         return
 
+    if not _acquire_snapshot_lock():
+        logger.debug("portfolio_snapshot skipped: another worker is already running it")
+        return
+
     db = SessionLocal()
     try:
+        import httpx
         from app.db.models.metaapi_account import MetaApiAccount
         from app.db.models.portfolio_snapshot import PortfolioSnapshot
-        from app.services.risk.portfolio_state import PortfolioStateService
+        from app.services.connectors.runtime_settings import RuntimeConnectorSettings
 
         # Find the default/active MetaAPI account
         account = (
@@ -61,41 +77,144 @@ def snapshot_portfolio() -> None:
             return
 
         account_id = str(account.account_id)
-        region = account.region
+        region = (account.region or 'new-york').strip().lower() or 'default'
 
-        # Fetch portfolio state
-        state = asyncio.run(
-            PortfolioStateService.get_current_state(
-                account_id=account_id,
-                region=region,
-                db=db,
-            )
+        # Resolve MetaAPI token (runtime > env)
+        token = RuntimeConnectorSettings.get_string('metaapi', ('METAAPI_TOKEN',), default='')
+        if not token:
+            token = settings.metaapi_token
+        if not token:
+            logger.debug("portfolio_snapshot skipped: no MetaAPI token")
+            return
+
+        # ── Redis cache: try cache first, REST fallback, then write back ──
+        import json as _json
+        import redis
+        _r = None
+        try:
+            _r = redis.from_url(settings.redis_url)
+        except Exception:
+            pass
+
+        _acct_cache_key = f"metaapi:account-info:{account_id}:{region}"
+        _pos_cache_key = f"metaapi:positions:{account_id}:{region}"
+
+        info = None
+        positions = []
+
+        # Try cache for account info
+        if _r:
+            try:
+                _cached_acct = _r.get(_acct_cache_key)
+                if _cached_acct:
+                    _parsed = _json.loads(_cached_acct)
+                    if isinstance(_parsed, dict) and not _parsed.get("degraded"):
+                        info = _parsed.get("account_info", _parsed)
+            except Exception:
+                pass
+
+        # Try cache for positions
+        if _r:
+            try:
+                _cached_pos = _r.get(_pos_cache_key)
+                if _cached_pos:
+                    _parsed = _json.loads(_cached_pos)
+                    if isinstance(_parsed, dict) and not _parsed.get("degraded"):
+                        positions = _parsed.get("positions", [])
+            except Exception:
+                pass
+
+        # If cache miss, fetch via REST (no SDK)
+        if info is None:
+            base_url = f"https://mt-client-api-v1.{account.region or 'new-york'}.agiliumtrade.ai"
+            headers = {"auth-token": token}
+
+            async def _fetch_rest():
+                async with httpx.AsyncClient(timeout=10.0) as http:
+                    acct_resp = await http.get(
+                        f"{base_url}/users/current/accounts/{account_id}/account-information",
+                        headers=headers,
+                    )
+                    pos_resp = await http.get(
+                        f"{base_url}/users/current/accounts/{account_id}/positions",
+                        headers=headers,
+                    )
+                    return acct_resp, pos_resp
+
+            acct_resp, pos_resp = asyncio.run(_fetch_rest())
+
+            if acct_resp.status_code != 200:
+                logger.warning("portfolio_snapshot REST failed: account=%d positions=%d",
+                               acct_resp.status_code, pos_resp.status_code)
+                return
+
+            info = acct_resp.json()
+            raw_positions = pos_resp.json() if pos_resp.status_code == 200 else []
+            if isinstance(raw_positions, dict):
+                positions = raw_positions.get("positions", [])
+            else:
+                positions = raw_positions if isinstance(raw_positions, list) else []
+
+            # Write back to cache for other consumers
+            if _r:
+                try:
+                    _r.setex(_acct_cache_key, 5,
+                             _json.dumps({"degraded": False, "account_info": info, "provider": "rest"}))
+                    _r.setex(_pos_cache_key, 3,
+                             _json.dumps({"degraded": False, "positions": positions, "provider": "rest"}))
+                except Exception:
+                    pass
+
+        balance = float(info.get("balance", 0))
+        equity = float(info.get("equity", balance))
+        free_margin = float(info.get("freeMargin", 0))
+        used_margin = float(info.get("margin", 0))
+        position_count = len(positions)
+
+        # Estimate open risk using pip-based calculation
+        open_risk_total = 0.0
+        if equity > 0:
+            from app.services.risk.portfolio_state import OpenPosition, PortfolioStateService
+            for p in positions:
+                op = OpenPosition(
+                    symbol=p.get("symbol", ""),
+                    side="BUY" if "BUY" in str(p.get("type", "")).upper() else "SELL",
+                    volume=float(p.get("volume", 0)),
+                    entry_price=float(p.get("openPrice", 0)),
+                    current_price=float(p.get("currentPrice", 0)),
+                    unrealized_pnl=float(p.get("profit", 0)),
+                    stop_loss=float(p.get("stopLoss", 0)) or None,
+                )
+                open_risk_total += PortfolioStateService._estimate_position_risk(op, equity)
+
+        # Get daily high from existing snapshots
+        from sqlalchemy import func
+        today_start = datetime.combine(
+            datetime.now(timezone.utc).date(), datetime.min.time(), tzinfo=timezone.utc,
         )
-
-        if state.degraded:
-            logger.warning(
-                "portfolio_snapshot degraded: %s", state.degraded_reasons,
-            )
+        high_row = db.query(func.max(PortfolioSnapshot.daily_high_equity)).filter(
+            PortfolioSnapshot.timestamp >= today_start,
+        ).scalar()
+        daily_high = max(float(high_row or 0), equity)
 
         snapshot = PortfolioSnapshot(
             account_id=account_id,
-            balance=state.balance,
-            equity=state.equity,
-            free_margin=state.free_margin,
-            used_margin=state.used_margin,
-            open_position_count=state.open_position_count,
-            open_risk_total_pct=state.open_risk_total_pct,
-            daily_realized_pnl=state.daily_realized_pnl,
-            daily_high_equity=state.daily_high_equity,
+            balance=balance,
+            equity=equity,
+            free_margin=free_margin,
+            used_margin=used_margin,
+            open_position_count=position_count,
+            open_risk_total_pct=round(open_risk_total, 2),
+            daily_realized_pnl=0.0,
+            daily_high_equity=daily_high,
             snapshot_type="periodic",
         )
         db.add(snapshot)
         db.commit()
 
         logger.info(
-            "portfolio_snapshot saved account=%s equity=%.2f positions=%d drawdown=%.2f%%",
-            account_id, state.equity, state.open_position_count,
-            state.daily_drawdown_pct,
+            "portfolio_snapshot saved account=%s equity=%.2f positions=%d risk=%.1f%%",
+            account_id, equity, position_count, open_risk_total,
         )
     except Exception:
         logger.warning("portfolio_snapshot failed", exc_info=True)

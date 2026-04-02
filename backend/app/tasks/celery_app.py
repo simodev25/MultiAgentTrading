@@ -1,7 +1,8 @@
+import logging
 import os
 
 from celery import Celery
-from celery.signals import worker_process_shutdown, worker_ready
+from celery.signals import after_setup_logger, worker_process_shutdown, worker_ready
 
 from app.core.config import get_settings
 from app.observability.prometheus import mark_worker_process_dead, start_worker_metrics_server
@@ -33,6 +34,9 @@ celery_app.conf.broker_connection_retry_on_startup = True
 celery_app.conf.task_acks_late = settings.celery_task_acks_late
 celery_app.conf.task_reject_on_worker_lost = settings.celery_task_reject_on_worker_lost
 celery_app.conf.task_track_started = settings.celery_task_track_started
+celery_app.conf.worker_hijack_root_logger = True
+celery_app.conf.worker_redirect_stdouts_level = 'ERROR'
+
 
 # Ensure task module is imported when worker boots with "-A ...celery_app".
 import app.tasks.run_analysis_task  # noqa: E402,F401
@@ -56,6 +60,29 @@ celery_app.conf.beat_schedule = {
         'schedule': 86400.0,  # 24 hours
     },
 }
+
+
+@after_setup_logger.connect(weak=False)
+def _quiet_celery_loggers(**_: object) -> None:
+    """Suppress noisy loggers in Celery workers.
+
+    - Celery internals: WARNING (no more per-task received/succeeded)
+    - MetaAPI SDK: ERROR only (suppress connection retry spam)
+    - App loggers: INFO (our application logs)
+    """
+    # Celery noise
+    logging.getLogger('celery').setLevel(logging.WARNING)
+    logging.getLogger('celery.app.trace').setLevel(logging.WARNING)
+    logging.getLogger('celery.worker').setLevel(logging.WARNING)
+    logging.getLogger('celery.beat').setLevel(logging.WARNING)
+    logging.getLogger('celery.redirected').setLevel(logging.WARNING)
+    # MetaAPI SDK noise (reconnection loops, PING/PONG, connection errors)
+    logging.getLogger('socketio').setLevel(logging.ERROR)
+    logging.getLogger('engineio').setLevel(logging.ERROR)
+    logging.getLogger('metaapi.cloud').setLevel(logging.ERROR)
+    logging.getLogger('metaapi_cloud_sdk').setLevel(logging.ERROR)
+    # Keep our app loggers at INFO
+    logging.getLogger('app').setLevel(logging.INFO)
 
 
 @worker_ready.connect(weak=False)

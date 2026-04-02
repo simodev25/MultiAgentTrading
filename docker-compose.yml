@@ -82,7 +82,7 @@ services:
       - '${PROMETHEUS_WORKER_PORT:-9101}'
     command: >
       sh -c "mkdir -p /tmp/prometheus-worker && rm -rf /tmp/prometheus-worker/* &&
-      celery -A app.tasks.celery_app.celery_app worker --loglevel=info -B -Q $${CELERY_WORKER_QUEUES:-analysis,backtests}
+      celery -A app.tasks.celery_app.celery_app worker --loglevel=warning -B -Q $${CELERY_WORKER_QUEUES:-analysis,backtests}
       --concurrency=$${CELERY_WORKER_CONCURRENCY:-2}
       --prefetch-multiplier=$${CELERY_WORKER_PREFETCH_MULTIPLIER:-1}
       --max-tasks-per-child=$${CELERY_WORKER_MAX_TASKS_PER_CHILD:-100}"
