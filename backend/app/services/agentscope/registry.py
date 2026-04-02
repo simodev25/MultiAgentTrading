@@ -1277,9 +1277,8 @@ class AgentScopeRegistry:
             from app.services.llm.model_selector import AgentModelSelector
             model_selector = AgentModelSelector()
 
-            provider, model_name, base_url, api_key = self._resolve_provider_config(db)
-            logger.info("LLM config: provider=%s, model=%s, base_url=%s", provider, model_name, base_url)
-            model = build_model(provider, model_name, base_url, api_key)
+            provider, default_model_name, base_url, api_key = self._resolve_provider_config(db)
+            logger.info("LLM config: provider=%s, default_model=%s, base_url=%s", provider, default_model_name, base_url)
             chat_fmt = build_formatter(provider, multi_agent=False, base_url=base_url)
             debate_fmt = build_formatter(provider, multi_agent=True, base_url=base_url)
 
@@ -1304,6 +1303,11 @@ class AgentScopeRegistry:
                 if not enabled:
                     logger.info("LLM disabled for agent %s — will run deterministic", name)
 
+            agent_model_names: dict[str, str] = {
+                name: model_selector.resolve(db, name)
+                for name in ALL_AGENT_FACTORIES
+            }
+
             # Build toolkits with OHLC preset + DB skills + snapshot for trader tools
             toolkits = {}
             for name in ALL_AGENT_FACTORIES:
@@ -1324,7 +1328,7 @@ class AgentScopeRegistry:
                     continue  # Skip — will use deterministic path
                 is_debate = name in ("bullish-researcher", "bearish-researcher", "trader-agent")
                 agents[name] = factory(
-                    model=model,
+                    model=build_model(provider, agent_model_names[name], base_url, api_key),
                     formatter=debate_fmt if is_debate else chat_fmt,
                     toolkit=toolkits[name],
                     sys_prompt=self._get_sys_prompt(name, db, base_vars),
@@ -1442,7 +1446,14 @@ class AgentScopeRegistry:
                     tool_invocations=invocations,
                 )
                 msg_dict["llm_enabled"] = llm_enabled.get(name, False)
-                msg_dict["prompt_meta"] = self._build_prompt_meta(db, name, model_name, llm_enabled.get(name, False), variables=base_vars, _prompt_cache=_prompt_cache)
+                msg_dict["prompt_meta"] = self._build_prompt_meta(
+                    db,
+                    name,
+                    agent_model_names.get(name, default_model_name),
+                    msg_dict["llm_enabled"],
+                    variables=base_vars,
+                    _prompt_cache=_prompt_cache,
+                )
 
                 # Fix 1: FORCE-OVERRIDE deterministic scoring into technical-analyst
                 # metadata AND text.  The LLM may return score=0.0 or
@@ -1495,7 +1506,8 @@ class AgentScopeRegistry:
                 )
                 if rname in agents:
                     agents[rname] = ALL_AGENT_FACTORIES[rname](
-                        model=model, formatter=debate_fmt,
+                        model=build_model(provider, agent_model_names[rname], base_url, api_key),
+                        formatter=debate_fmt,
                         toolkit=toolkits[rname],
                         sys_prompt=self._get_sys_prompt(rname, db, base_vars),
                     )
@@ -1560,7 +1572,14 @@ class AgentScopeRegistry:
             for name, msg in [("bullish-researcher", bullish_msg), ("bearish-researcher", bearish_msg)]:
                 d = _msg_to_dict(msg, tool_invocations=agent_tool_invocations.get(name, {}))
                 d["llm_enabled"] = llm_enabled.get(name, False)
-                d["prompt_meta"] = self._build_prompt_meta(db, name, model_name, llm_enabled.get(name, False), variables=base_vars, _prompt_cache=_prompt_cache)
+                d["prompt_meta"] = self._build_prompt_meta(
+                    db,
+                    name,
+                    agent_model_names.get(name, default_model_name),
+                    d["llm_enabled"],
+                    variables=base_vars,
+                    _prompt_cache=_prompt_cache,
+                )
 
                 # Fix 4: Constrain researcher confidence by Phase 1 news scores
                 d.setdefault("metadata", {})
@@ -1837,7 +1856,14 @@ class AgentScopeRegistry:
                                 db.add(_post_snap)
                             except Exception as exc:
                                 logger.warning("Failed to save post_trade snapshot: %s", exc)
-                d["prompt_meta"] = self._build_prompt_meta(db, name, model_name, llm_enabled.get(name, False), variables=base_vars, _prompt_cache=_prompt_cache)
+                d["prompt_meta"] = self._build_prompt_meta(
+                    db,
+                    name,
+                    agent_model_names.get(name, default_model_name),
+                    d.get("llm_enabled", llm_enabled.get(name, False)),
+                    variables=base_vars,
+                    _prompt_cache=_prompt_cache,
+                )
                 analysis_outputs[name] = d
                 self._record_step(db, run, name,
                     {"phase": "decision", "llm_enabled": llm_enabled.get(name, False)},
@@ -2031,8 +2057,7 @@ class AgentScopeRegistry:
             from app.services.llm.model_selector import AgentModelSelector
             model_selector = AgentModelSelector()
 
-            provider, model_name, base_url, api_key = self._resolve_provider_config(db)
-            model = build_model(provider, model_name, base_url, api_key)
+            provider, default_model_name, base_url, api_key = self._resolve_provider_config(db)
             chat_fmt = build_formatter(provider, multi_agent=False, base_url=base_url)
             debate_fmt = build_formatter(provider, multi_agent=True, base_url=base_url)
 
@@ -2048,6 +2073,11 @@ class AgentScopeRegistry:
                     llm_enabled[name] = bool(agent_config[name])
                 else:
                     llm_enabled[name] = model_selector.is_enabled(db, name)
+
+            agent_model_names: dict[str, str] = {
+                name: model_selector.resolve(db, name)
+                for name in ALL_AGENT_FACTORIES
+            }
 
             base_vars = self._build_prompt_variables(pair, timeframe, snapshot, market_data.get("news", {}))
 
@@ -2065,7 +2095,7 @@ class AgentScopeRegistry:
                 )
                 is_debate = name in ("bullish-researcher", "bearish-researcher", "trader-agent")
                 agents[name] = factory(
-                    model=model,
+                    model=build_model(provider, agent_model_names.get(name, default_model_name), base_url, api_key),
                     formatter=debate_fmt if is_debate else chat_fmt,
                     toolkit=toolkits[name],
                     sys_prompt=self._get_sys_prompt(name, db, base_vars),
