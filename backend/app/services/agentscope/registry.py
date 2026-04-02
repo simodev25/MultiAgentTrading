@@ -1503,6 +1503,49 @@ class AgentScopeRegistry:
                     base_vars["key_level"] = str(meta.get("key_level", "N/A"))
                     base_vars["risk_percent"] = str(risk_percent)
                     _trader_decision_is_hold = meta.get("decision", "HOLD") == "HOLD"
+
+                    # Fill entry/SL/TP from trade_sizing tool result
+                    _sizing = agent_tool_invocations.get("trader-agent", {}).get("trade_sizing", {}).get("data", {})
+                    base_vars["entry"] = str(_sizing.get("entry", "N/A"))
+                    base_vars["stop_loss"] = str(_sizing.get("stop_loss", "N/A"))
+                    base_vars["take_profit"] = str(_sizing.get("take_profit", "N/A"))
+
+                    # Rebuild risk-manager toolkit with trader decision so
+                    # portfolio_risk_evaluation gets the trade parameters.
+                    if not _trader_decision_is_hold:
+                        # Get trade_sizing result for entry/SL/TP
+                        _sizing_data = agent_tool_invocations.get("trader-agent", {}).get("trade_sizing", {}).get("data", {})
+                        # Build complete trader decision dict from all sources:
+                        # - meta (structured metadata from LLM, may be empty)
+                        # - d top-level (flat output from _msg_to_dict)
+                        # - _sizing_data (entry/SL/TP from trade_sizing tool)
+                        _trader_decision_for_risk = {
+                            "decision": meta.get("decision") or d.get("decision", "HOLD"),
+                            "conviction": meta.get("conviction") or d.get("conviction", 0.0),
+                            "reasoning": meta.get("reasoning") or d.get("reasoning", ""),
+                            "key_level": meta.get("key_level") or d.get("key_level"),
+                            "entry": _sizing_data.get("entry") or meta.get("entry") or d.get("entry"),
+                            "stop_loss": _sizing_data.get("stop_loss") or meta.get("stop_loss") or d.get("stop_loss"),
+                            "take_profit": _sizing_data.get("take_profit") or meta.get("take_profit") or d.get("take_profit"),
+                        }
+                        d["metadata"] = _trader_decision_for_risk
+                        analysis_outputs["trader-agent"] = d
+                        _trader_out = d
+
+                        toolkits["risk-manager"] = await build_toolkit(
+                            "risk-manager", ohlc=ohlc,
+                            news=market_data.get("news", {}),
+                            analysis_outputs=analysis_outputs,
+                            skills=model_selector.resolve_skills(db, "risk-manager"),
+                            snapshot=snapshot,
+                        )
+                        if "risk-manager" in agents:
+                            agents["risk-manager"] = ALL_AGENT_FACTORIES["risk-manager"](
+                                model=build_model(provider, agent_model_names["risk-manager"], base_url, api_key),
+                                formatter=chat_fmt,
+                                toolkit=toolkits["risk-manager"],
+                                sys_prompt=self._get_sys_prompt("risk-manager", db, base_vars),
+                            )
                 elif name == "risk-manager":
                     base_vars["risk_result"] = d.get("text", "")[:500]
                 elif name == "execution-manager":
@@ -1626,6 +1669,28 @@ class AgentScopeRegistry:
             except Exception:
                 pass
 
+            # Determine real execution status from agent outputs
+            exec_meta = exec_out.get("metadata", {}) if isinstance(exec_out.get("metadata"), dict) else {}
+            risk_meta = risk_out.get("metadata", {}) if isinstance(risk_out.get("metadata"), dict) else {}
+            risk_approved = risk_meta.get("approved", risk_meta.get("accepted", False))
+            run_mode = str(getattr(run, "mode", "simulation") or "simulation").strip().lower()
+
+            if trade_decision == "HOLD":
+                execution_status = "skipped"
+                execution_reason = "HOLD — no trade requested"
+            elif not risk_approved:
+                execution_status = "refused"
+                execution_reason = f"Risk-manager rejected: {risk_meta.get('risk_flags', risk_meta.get('reasons', []))}"
+            elif exec_meta.get("status"):
+                execution_status = str(exec_meta["status"]).strip().lower()
+                execution_reason = exec_meta.get("reasoning", exec_meta.get("reason", ""))
+            elif run_mode == "simulation":
+                execution_status = "simulated"
+                execution_reason = "Simulation mode — no real execution"
+            else:
+                execution_status = exec_meta.get("status", "unknown")
+                execution_reason = exec_meta.get("reasoning", exec_meta.get("reason", ""))
+
             run.status = "completed"
             run.decision = {
                 # Frontend reads these exact fields
@@ -1633,7 +1698,8 @@ class AgentScopeRegistry:
                 "signal": signal,
                 "confidence": trade_confidence,
                 "execution": {
-                    "status": "skipped" if trade_decision == "HOLD" else "simulation",
+                    "status": execution_status,
+                    "reason": execution_reason,
                 },
                 # Debate details (advisory)
                 "debate": {

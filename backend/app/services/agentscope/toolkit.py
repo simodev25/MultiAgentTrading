@@ -202,6 +202,19 @@ async def build_toolkit(
             preset["price"] = snapshot.get("last_price", 0.0)
             preset["atr"] = snapshot.get("atr", 0.0)
 
+        # Pre-inject trader decision into risk tools so the LLM doesn't
+        # need to pass it manually (it often forgets or sends empty).
+        if tool_id == "portfolio_risk_evaluation" and analysis_outputs:
+            trader_out = analysis_outputs.get("trader-agent", {})
+            # Try metadata first, then top-level (flat output_payload)
+            trader_meta = trader_out.get("metadata", {})
+            if not trader_meta or not trader_meta.get("decision"):
+                trader_meta = {k: v for k, v in trader_out.items()
+                               if k in ("decision", "conviction", "reasoning",
+                                        "key_level", "entry", "stop_loss", "take_profit")}
+            if trader_meta and trader_meta.get("decision"):
+                preset["trader_decision"] = trader_meta
+
         toolkit.register_tool_function(wrapped, preset_kwargs=preset if preset else None)
 
     return toolkit
