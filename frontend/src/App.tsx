@@ -11,6 +11,7 @@ const RunDetailPage = lazy(() => import('./pages/RunDetailPage').then((module) =
 const OrdersPage = lazy(() => import('./pages/OrdersPage').then((module) => ({ default: module.OrdersPage })));
 const ConnectorsPage = lazy(() => import('./pages/ConnectorsPage').then((module) => ({ default: module.ConnectorsPage })));
 const StrategiesPage = lazy(() => import('./pages/StrategiesPage').then((module) => ({ default: module.StrategiesPage })));
+const PortfolioPage = lazy(() => import('./pages/PortfolioPage'));
 const LoginPage = lazy(() => import('./pages/LoginPage').then((module) => ({ default: module.LoginPage })));
 
 
@@ -73,6 +74,10 @@ function AppRoutes() {
       <Route path="/login" element={<LoginPage />} />
       <Route
         path="/"
+        element={withLayout(<PortfolioPage />)}
+      />
+      <Route
+        path="/terminal"
         element={withLayout(<TerminalPage />)}
       />
       <Route

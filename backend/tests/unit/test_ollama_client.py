@@ -42,7 +42,7 @@ def test_chat_falls_back_to_default_model_on_404(monkeypatch) -> None:
     monkeypatch.setattr(client, '_persist_log', lambda *args, **kwargs: None)
 
     def fake_call_remote(url: str, payload: dict, headers: dict, **_kwargs):
-        if payload.get('model') == 'llama3.1':
+        if payload.get('model') == 'deepseek-v3.2':
             raise _http_404_error(url)
         return {
             'message': {'content': 'OK'},
@@ -52,19 +52,19 @@ def test_chat_falls_back_to_default_model_on_404(monkeypatch) -> None:
 
     monkeypatch.setattr(client, '_call_remote', fake_call_remote)
 
-    result = client.chat('system', 'user', model='llama3.1')
+    result = client.chat('system', 'user', model='deepseek-v3.2')
 
     assert result['degraded'] is False
     assert result['text'] == 'OK'
     assert result['effective_model'] == 'gpt-oss:120b-cloud'
-    assert result['model_fallback_from'] == 'llama3.1'
+    assert result['model_fallback_from'] == 'deepseek-v3.2'
 
 
 def test_chat_normalizes_base_url_once_per_request(monkeypatch) -> None:
     client = OllamaCloudClient()
     client.settings.ollama_base_url = 'https://ollama.com'
     client.settings.ollama_api_key = 'test-key'
-    client.settings.ollama_model = 'llama3.1'
+    client.settings.ollama_model = 'deepseek-v3.2'
 
     monkeypatch.setattr(client, '_persist_log', lambda *args, **kwargs: None)
 
@@ -126,14 +126,14 @@ def test_chat_retries_read_timeout_once_with_extended_timeout(monkeypatch) -> No
 def test_build_chat_payload_applies_generation_options() -> None:
     client = OllamaCloudClient()
     payload = client._build_chat_payload(
-        'llama3.1',
+        'deepseek-v3.2',
         'system',
         'user',
         max_tokens=64,
         temperature=0.2,
     )
 
-    assert payload['model'] == 'llama3.1'
+    assert payload['model'] == 'deepseek-v3.2'
     assert payload['options']['num_predict'] == 64
     assert payload['options']['temperature'] == 0.2
 

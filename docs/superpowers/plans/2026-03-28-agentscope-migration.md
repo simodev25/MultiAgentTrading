@@ -574,13 +574,13 @@ def test_build_ollama_model(mock_cls):
     mock_cls.return_value = MagicMock()
     model = build_model(
         provider="ollama",
-        model_name="llama3.1",
+        model_name="deepseek-v3.2",
         base_url="http://localhost:11434",
         api_key="",
     )
     mock_cls.assert_called_once()
     call_kwargs = mock_cls.call_args[1]
-    assert call_kwargs["model_name"] == "llama3.1"
+    assert call_kwargs["model_name"] == "deepseek-v3.2"
     assert "v1" in call_kwargs["client_kwargs"]["base_url"]
     assert call_kwargs["stream"] is False
 
@@ -1727,7 +1727,7 @@ async def test_execute_runs_all_phases(
     with patch.object(registry, "_resolve_market_data", new_callable=AsyncMock) as mock_market:
         mock_market.return_value = ({"price": 1.1}, [], {})
         with patch.object(registry, "_resolve_provider_config") as mock_config:
-            mock_config.return_value = ("ollama", "llama3.1", "http://localhost:11434", "")
+            mock_config.return_value = ("ollama", "deepseek-v3.2", "http://localhost:11434", "")
             result = await registry.execute(
                 db=db, run=run, pair="EURUSD", timeframe="H1", risk_percent=1.0,
             )
@@ -1788,7 +1788,7 @@ class AgentScopeRegistry:
         selector = AgentModelSelector()
         provider = selector.resolve_provider(db)
         settings = selector._load_llm_settings(db)
-        model_name = settings.get("model", "llama3.1")
+        model_name = settings.get("model", "deepseek-v3.2")
         base_url = settings.get("base_url", "http://localhost:11434")
         api_key = settings.get("api_key", "")
         return provider, model_name, base_url, api_key

@@ -66,6 +66,22 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(payload),
     }, token),
+  getTradingConfigVersions: (token: string, limit?: number) =>
+    request<{ count: number; versions: Array<Record<string, unknown>> }>(
+      `/connectors/trading-config/versions?limit=${limit || 20}`, {}, token,
+    ),
+  restoreTradingConfigVersion: (token: string, versionId: number) =>
+    request(`/connectors/trading-config/versions/${versionId}/restore`, { method: 'POST' }, token),
+  getPortfolioState: (token: string) => request('/portfolio/state', {}, token),
+  getPortfolioHistory: (token: string, period?: string) =>
+    request(`/portfolio/history?period=${period || '7d'}`, {}, token),
+  getPortfolioStress: (token: string) => request('/portfolio/stress', {}, token),
+  getTradingConfig: (token: string, decisionMode?: string, executionMode?: string) =>
+    request<{ catalog: Record<string, Array<Record<string, unknown>>>; values: Record<string, Record<string, unknown>> }>(
+      `/connectors/trading-config?decision_mode=${decisionMode || 'balanced'}&execution_mode=${executionMode || 'simulation'}`,
+      {},
+      token,
+    ),
   testConnector: (token: string, connector: string) =>
     request(`/connectors/${connector}/test`, { method: 'POST' }, token),
   testNewsProvider: (token: string, provider: string, pair?: string) => {
@@ -206,6 +222,16 @@ export function wsTradingOrdersUrl(token?: string): string {
   const apiBase = BASE_URL.replace('/api/v1', '');
   const wsBase = apiBase.replace('http://', 'ws://').replace('https://', 'wss://');
   const url = `${wsBase}/ws/trading/orders`;
+  if (token) {
+    return `${url}?token=${encodeURIComponent(token)}`;
+  }
+  return url;
+}
+
+export function wsPortfolioUrl(token?: string): string {
+  const apiBase = BASE_URL.replace('/api/v1', '');
+  const wsBase = apiBase.replace('http://', 'ws://').replace('https://', 'wss://');
+  const url = `${wsBase}/ws/portfolio`;
   if (token) {
     return `${url}?token=${encodeURIComponent(token)}`;
   }

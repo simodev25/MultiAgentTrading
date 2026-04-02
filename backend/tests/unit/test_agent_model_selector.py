@@ -29,7 +29,7 @@ def test_agent_model_selector_prefers_agent_specific_and_default() -> None:
         db.commit()
 
         selector = AgentModelSelector()
-        selector.settings.ollama_model = 'llama3.1'
+        selector.settings.ollama_model = 'deepseek-v3.2'
 
         assert selector.resolve(db, 'news-analyst') == 'gpt-oss:120b'
         assert selector.resolve(db, 'bearish-researcher') == 'gpt-oss:20b'
@@ -41,9 +41,9 @@ def test_agent_model_selector_falls_back_to_env_default() -> None:
     Base.metadata.create_all(bind=engine)
 
     selector = AgentModelSelector()
-    selector.settings.ollama_model = 'llama3.1'
+    selector.settings.ollama_model = 'deepseek-v3.2'
 
-    assert selector.resolve(None, 'news-analyst') == 'llama3.1'
+    assert selector.resolve(None, 'news-analyst') == 'deepseek-v3.2'
     assert selector.is_enabled(None, 'news-analyst') is True
     assert selector.is_enabled(None, 'market-context-analyst') is False
 
@@ -56,7 +56,7 @@ def test_agent_model_selector_falls_back_to_env_default() -> None:
             )
         )
         db.commit()
-        assert selector.resolve(db, 'news-analyst') == 'llama3.1'
+        assert selector.resolve(db, 'news-analyst') == 'deepseek-v3.2'
         assert selector.is_enabled(db, 'news-analyst') is True
 
 

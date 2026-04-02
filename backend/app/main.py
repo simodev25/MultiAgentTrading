@@ -3,6 +3,7 @@ import fcntl
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from time import perf_counter
 
 from fastapi import Depends, FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -409,6 +410,80 @@ async def market_prices_socket(websocket: WebSocket) -> None:
         pass
     finally:
         manager.unsubscribe(sub_id)
+
+
+@app.websocket('/ws/portfolio')
+async def portfolio_stream_socket(websocket: WebSocket) -> None:
+    """Stream real-time portfolio state updates every 10 seconds."""
+    if not await _authorize_websocket(websocket):
+        return
+    await websocket.accept()
+
+    try:
+        while True:
+            db: Session = SessionLocal()
+            try:
+                from app.services.risk.currency_exposure import compute_currency_exposure
+                from app.services.risk.limits import get_risk_limits
+                from app.services.risk.portfolio_state import PortfolioStateService
+
+                state = await PortfolioStateService.get_current_state(db=db)
+                equity = state.equity if state.equity > 0 else 1.0
+                limits = get_risk_limits("simulation")
+
+                currency_exposure = {}
+                try:
+                    report = compute_currency_exposure(state.open_positions, equity)
+                    currency_exposure = {
+                        ce.currency: {
+                            "net_lots": ce.net_exposure_lots,
+                            "exposure_pct": ce.exposure_pct,
+                        }
+                        for ce in report.exposures.values()
+                    }
+                except Exception:
+                    pass
+
+                await websocket.send_json({
+                    "type": "portfolio_update",
+                    "state": {
+                        "balance": state.balance,
+                        "equity": state.equity,
+                        "free_margin": state.free_margin,
+                        "used_margin": state.used_margin,
+                        "open_position_count": state.open_position_count,
+                        "open_risk_total_pct": state.open_risk_total_pct,
+                        "daily_realized_pnl": state.daily_realized_pnl,
+                        "daily_unrealized_pnl": state.daily_unrealized_pnl,
+                        "daily_drawdown_pct": state.daily_drawdown_pct,
+                        "weekly_drawdown_pct": state.weekly_drawdown_pct,
+                        "daily_high_equity": state.daily_high_equity,
+                        "degraded": state.degraded,
+                    },
+                    "limits": {
+                        "max_daily_loss_pct": limits.max_daily_loss_pct,
+                        "max_weekly_loss_pct": limits.max_weekly_loss_pct,
+                        "max_open_risk_pct": limits.max_open_risk_pct,
+                        "max_positions": limits.max_positions,
+                        "min_free_margin_pct": limits.min_free_margin_pct,
+                        "max_currency_exposure_pct": limits.max_currency_exposure_pct,
+                    },
+                    "currency_exposure": currency_exposure,
+                    "open_positions": [
+                        {"symbol": p.symbol, "side": p.side, "volume": p.volume, "pnl": p.unrealized_pnl}
+                        for p in state.open_positions
+                    ],
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+            except Exception as exc:
+                logger.warning("Portfolio WS update failed: %s", exc)
+                await websocket.send_json({"type": "error", "message": str(exc)})
+            finally:
+                db.close()
+
+            await asyncio.sleep(10)
+    except WebSocketDisconnect:
+        pass
 
 
 @app.get('/')

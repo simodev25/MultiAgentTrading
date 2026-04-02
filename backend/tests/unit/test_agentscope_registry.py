@@ -58,7 +58,7 @@ async def test_execute_runs_all_phases(mock_debate, mock_formatter, mock_model, 
     with patch.object(registry, "_resolve_market_data", new_callable=AsyncMock) as mock_market:
         mock_market.return_value = {"snapshot": {"last_price": 1.1}, "news": {}, "ohlc": {}}
         with patch.object(registry, "_resolve_provider_config") as mock_config:
-            mock_config.return_value = ("ollama", "llama3.1", "http://localhost:11434", "")
+            mock_config.return_value = ("ollama", "deepseek-v3.2", "http://localhost:11434", "")
             # Mock AgentModelSelector to enable LLM for all agents
             with patch("app.services.llm.model_selector.AgentModelSelector") as mock_selector_cls:
                 mock_selector = MagicMock()

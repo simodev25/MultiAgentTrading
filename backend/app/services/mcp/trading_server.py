@@ -1259,8 +1259,12 @@ def decision_gating(
     aligned_sources: int = 0,
     mode: str = "balanced",
 ) -> dict:
-    """Apply decision gates based on policy mode."""
-    policy = DECISION_MODES.get(mode, DECISION_MODES["balanced"])
+    """Apply decision gates based on policy mode (with runtime DB overrides)."""
+    try:
+        from app.services.config.trading_config import get_effective_gating_policy
+        policy = get_effective_gating_policy(mode)
+    except Exception:
+        policy = DECISION_MODES.get(mode, DECISION_MODES["balanced"])
     blocked_by = []
     if abs(combined_score) < policy.min_combined_score:
         blocked_by.append(f"Score {abs(combined_score):.2f} < {policy.min_combined_score}")
@@ -1298,9 +1302,17 @@ def trade_sizing(
     atr: float = 0.0,
     decision_side: str = "BUY",
 ) -> dict:
-    """Compute entry, stop-loss, and take-profit from ATR."""
-    sl_dist = atr * SL_ATR_MULTIPLIER if atr > 0 else price * SL_PERCENT_FALLBACK
-    tp_dist = atr * TP_ATR_MULTIPLIER if atr > 0 else price * TP_PERCENT_FALLBACK
+    """Compute entry, stop-loss, and take-profit from ATR (with runtime DB overrides)."""
+    try:
+        from app.services.config.trading_config import get_effective_sizing
+        sizing = get_effective_sizing()
+        _sl_mult = sizing["sl_atr_multiplier"]
+        _tp_mult = sizing["tp_atr_multiplier"]
+    except Exception:
+        _sl_mult = SL_ATR_MULTIPLIER
+        _tp_mult = TP_ATR_MULTIPLIER
+    sl_dist = atr * _sl_mult if atr > 0 else price * SL_PERCENT_FALLBACK
+    tp_dist = atr * _tp_mult if atr > 0 else price * TP_PERCENT_FALLBACK
     if decision_side == "BUY":
         return {"entry": round(price, 5), "stop_loss": round(price - sl_dist, 5), "take_profit": round(price + tp_dist, 5)}
     return {"entry": round(price, 5), "stop_loss": round(price + sl_dist, 5), "take_profit": round(price - tp_dist, 5)}
@@ -1311,25 +1323,257 @@ def risk_evaluation(
     risk_percent: float = 1.0,
     account_info: dict | None = None,
 ) -> dict:
-    """Evaluate risk using RiskEngine."""
-    from app.services.risk.rules import RiskEngine
+    """Evaluate risk using RiskEngine.
+
+    Delegates to portfolio_risk_evaluation for portfolio-aware checks.
+    Falls back to single-trade evaluation if account_info is explicitly provided.
+    """
     trader_decision = trader_decision or {}
-    account_info = account_info or {}
     decision = trader_decision.get("decision", "HOLD")
     if decision == "HOLD":
         return {"accepted": False, "suggested_volume": 0.0, "reasons": ["HOLD decision"]}
-    engine = RiskEngine()
-    assessment = engine.evaluate(
-        mode=trader_decision.get("mode", "balanced"),
-        decision=decision,
+
+    if account_info:
+        # Legacy path: explicit account_info provided, use single-trade evaluation
+        from app.services.risk.rules import RiskEngine
+        engine = RiskEngine()
+        assessment = engine.evaluate(
+            mode=trader_decision.get("mode", "balanced"),
+            decision=decision,
+            risk_percent=risk_percent,
+            price=trader_decision.get("entry", 0.0),
+            stop_loss=trader_decision.get("stop_loss"),
+            pair=trader_decision.get("pair"),
+            equity=account_info.get("equity", 10000.0),
+            asset_class=trader_decision.get("asset_class"),
+        )
+        return {"accepted": assessment.accepted, "suggested_volume": assessment.suggested_volume, "reasons": assessment.reasons}
+
+    # New path: delegate to portfolio-aware evaluation
+    mode = trader_decision.get("mode", "simulation")
+    result = portfolio_risk_evaluation(
+        trader_decision=trader_decision,
         risk_percent=risk_percent,
-        price=trader_decision.get("entry", 0.0),
-        stop_loss=trader_decision.get("stop_loss"),
+        mode=mode,
+    )
+    return {
+        "accepted": result["accepted"],
+        "suggested_volume": result["suggested_volume"],
+        "reasons": result["reasons"],
+    }
+
+
+def portfolio_risk_evaluation(
+    trader_decision: dict | None = None,
+    risk_percent: float = 1.0,
+    mode: str = "simulation",
+    account_id: str | None = None,
+    region: str | None = None,
+) -> dict:
+    """Evaluate trade risk against live portfolio state and risk limits.
+
+    Returns accepted, suggested_volume, reasons, and portfolio_summary.
+    """
+    import asyncio
+    from app.services.risk.limits import get_risk_limits
+    from app.services.risk.portfolio_state import PortfolioStateService
+    from app.services.risk.rules import ProposedTrade, RiskEngine
+
+    trader_decision = trader_decision or {}
+    decision = trader_decision.get("decision", "HOLD")
+
+    if decision == "HOLD":
+        return {
+            "accepted": False,
+            "suggested_volume": 0.0,
+            "reasons": ["HOLD decision"],
+            "portfolio_summary": {},
+            "degraded": False,
+            "degraded_reasons": [],
+        }
+
+    # Fetch portfolio state
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                state = pool.submit(
+                    asyncio.run,
+                    PortfolioStateService.get_current_state(
+                        account_id=account_id, region=region,
+                    ),
+                ).result(timeout=10)
+        else:
+            state = asyncio.run(
+                PortfolioStateService.get_current_state(
+                    account_id=account_id, region=region,
+                )
+            )
+    except Exception as exc:
+        logger.warning("portfolio_risk_evaluation: state fetch failed: %s", exc)
+        state = PortfolioStateService.build_defaults()
+
+    limits = get_risk_limits(mode)
+
+    proposed = ProposedTrade(
+        decision=decision,
         pair=trader_decision.get("pair"),
-        equity=account_info.get("equity", 10000.0),
+        entry_price=trader_decision.get("entry", 0.0),
+        stop_loss=trader_decision.get("stop_loss"),
+        take_profit=trader_decision.get("take_profit"),
+        risk_percent=risk_percent,
+        mode=mode,
         asset_class=trader_decision.get("asset_class"),
     )
-    return {"accepted": assessment.accepted, "suggested_volume": assessment.suggested_volume, "reasons": assessment.reasons}
+
+    engine = RiskEngine()
+    assessment = engine.evaluate_portfolio(state, limits, proposed)
+
+    equity = state.equity if state.equity > 0 else 1.0
+    portfolio_summary = {
+        "balance": state.balance,
+        "equity": state.equity,
+        "free_margin_pct": round((state.free_margin / equity) * 100, 1),
+        "open_risk_pct": state.open_risk_total_pct,
+        "daily_drawdown_pct": state.daily_drawdown_pct,
+        "weekly_drawdown_pct": state.weekly_drawdown_pct,
+        "risk_budget_remaining_pct": round(
+            limits.max_open_risk_pct - state.open_risk_total_pct, 1,
+        ),
+        "open_positions": state.open_position_count,
+        "max_positions": limits.max_positions,
+    }
+
+    # Tier 2: currency exposure
+    currency_exposure_data: dict = {}
+    try:
+        from app.services.risk.currency_exposure import compute_currency_exposure
+        curr_report = compute_currency_exposure(state.open_positions, equity)
+        currency_exposure_data = {
+            ce.currency: {
+                "net_lots": ce.net_exposure_lots,
+                "exposure_pct": ce.exposure_pct,
+            }
+            for ce in curr_report.exposures.values()
+        }
+        portfolio_summary["currency_exposure"] = currency_exposure_data
+        if curr_report.warnings:
+            portfolio_summary["currency_warnings"] = curr_report.warnings
+    except Exception as exc:
+        logger.debug("Currency exposure enrichment failed: %s", exc)
+
+    # Tier 2: correlation alerts
+    correlation_alerts: list[dict] = []
+    try:
+        from app.services.risk.correlation_exposure import compute_correlation_exposure
+        corr_report = compute_correlation_exposure(
+            state.open_positions,
+            state.open_risk_total_pct,
+            limits.max_correlation_risk_multiplier,
+        )
+        correlation_alerts = [
+            {
+                "pair": f"{a.position_a}/{a.position_b}",
+                "correlation": a.correlation,
+                "severity": a.severity,
+                "message": a.message,
+            }
+            for a in corr_report.alerts
+        ]
+        portfolio_summary["effective_risk_multiplier"] = corr_report.effective_risk_multiplier
+    except Exception as exc:
+        logger.debug("Correlation exposure enrichment failed: %s", exc)
+
+    # Tier 3: stress test (advisory, non-blocking)
+    stress_data: dict = {}
+    try:
+        from app.services.risk.stress_test import run_stress_test
+        st_report = run_stress_test(
+            positions=state.open_positions,
+            equity=equity,
+            used_margin=state.used_margin,
+        )
+        stress_data = {
+            "worst_case_pnl_pct": st_report.worst_case_pnl_pct,
+            "scenarios_survived": f"{st_report.scenarios_surviving}/{st_report.scenarios_total}",
+            "recommendation": st_report.recommendation,
+        }
+        portfolio_summary["stress_test"] = stress_data
+    except Exception as exc:
+        logger.debug("Stress test enrichment failed: %s", exc)
+
+    return {
+        "accepted": assessment.accepted,
+        "suggested_volume": assessment.suggested_volume,
+        "reasons": assessment.reasons,
+        "portfolio_summary": portfolio_summary,
+        "currency_exposure": currency_exposure_data,
+        "correlation_alerts": correlation_alerts,
+        "stress_test": stress_data,
+        "degraded": state.degraded,
+        "degraded_reasons": state.degraded_reasons,
+    }
+
+
+def portfolio_stress_test(
+    scenarios: list[str] | None = None,
+    account_id: str | None = None,
+    region: str | None = None,
+) -> dict:
+    """Run stress tests on current portfolio.
+
+    Returns scenario-by-scenario results with PnL impact, survival, and recommendation.
+    """
+    import asyncio
+    from app.services.risk.portfolio_state import PortfolioStateService
+    from app.services.risk.stress_test import SCENARIOS, run_stress_test
+
+    # Fetch portfolio state
+    try:
+        state = asyncio.run(
+            PortfolioStateService.get_current_state(
+                account_id=account_id, region=region,
+            )
+        )
+    except Exception as exc:
+        logger.warning("portfolio_stress_test: state fetch failed: %s", exc)
+        return {"error": str(exc), "results": []}
+
+    # Filter scenarios if requested
+    test_scenarios = None
+    if scenarios:
+        test_scenarios = [s for s in SCENARIOS if s.name in scenarios]
+        if not test_scenarios:
+            test_scenarios = None  # Fall back to all
+
+    equity = state.equity if state.equity > 0 else 10000.0
+    report = run_stress_test(
+        positions=state.open_positions,
+        equity=equity,
+        used_margin=state.used_margin,
+        scenarios=test_scenarios,
+    )
+
+    return {
+        "worst_case_pnl_pct": report.worst_case_pnl_pct,
+        "scenarios_surviving": report.scenarios_surviving,
+        "scenarios_total": report.scenarios_total,
+        "recommendation": report.recommendation,
+        "results": [
+            {
+                "scenario": r.scenario,
+                "description": r.description,
+                "pnl": r.portfolio_pnl,
+                "pnl_pct": r.portfolio_pnl_pct,
+                "surviving": r.surviving,
+                "margin_call": r.margin_call,
+                "positions_affected": r.positions_affected,
+            }
+            for r in report.results
+        ],
+        "degraded": state.degraded,
+    }
 
 
 # ── Strategy Builder tool ──────────────────────────────────────────

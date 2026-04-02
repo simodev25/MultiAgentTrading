@@ -27,7 +27,7 @@ from app.services.trading.metaapi_client import MetaApiClient
 
 router = APIRouter(prefix='/connectors', tags=['connectors'])
 
-SUPPORTED_CONNECTORS = ['ollama', 'metaapi', 'news']
+SUPPORTED_CONNECTORS = ['ollama', 'metaapi', 'news', 'trading']
 CONNECTOR_SECRET_DEFAULT_FIELDS: dict[str, dict[str, str]] = {
     'ollama': {
         'OLLAMA_API_KEY': 'ollama_api_key',
@@ -312,6 +312,39 @@ def update_connector(
         conn.settings = _sanitize_ollama_settings(payload.settings)
     else:
         conn.settings = payload.settings
+
+    # Save version snapshot for trading config changes
+    if connector_name == 'trading':
+        try:
+            from app.db.models.trading_config_version import TradingConfigVersion
+            from sqlalchemy import func
+
+            max_ver = db.query(func.max(TradingConfigVersion.version)).scalar() or 0
+            new_settings = payload.settings if isinstance(payload.settings, dict) else {}
+
+            # Build changes summary
+            old_settings = (conn.settings if isinstance(conn.settings, dict) else {}) if conn.id else {}
+            changes: list[str] = []
+            for section in ('gating', 'risk_limits', 'sizing'):
+                old_sec = old_settings.get(section, {}) if isinstance(old_settings.get(section), dict) else {}
+                new_sec = new_settings.get(section, {}) if isinstance(new_settings.get(section), dict) else {}
+                for key in set(list(old_sec.keys()) + list(new_sec.keys())):
+                    old_val = old_sec.get(key)
+                    new_val = new_sec.get(key)
+                    if old_val != new_val:
+                        changes.append(f"{section}.{key}: {old_val} -> {new_val}")
+
+            version = TradingConfigVersion(
+                version=max_ver + 1,
+                changed_by="admin",
+                decision_mode=str(new_settings.get("decision_mode", "balanced")),
+                settings_snapshot=new_settings,
+                changes_summary="; ".join(changes) if changes else "initial save",
+            )
+            db.add(version)
+        except Exception:
+            pass  # Non-blocking — don't fail the save
+
     db.commit()
     db.refresh(conn)
     RuntimeConnectorSettings.clear_cache(connector_name)
@@ -323,6 +356,100 @@ def update_connector(
     if connector_name == 'ollama':
         AgentModelSelector.clear_cache()
     return ConnectorConfigOut.model_validate(conn)
+
+
+@router.get('/trading-config')
+def get_trading_config(
+    decision_mode: str = Query(default='balanced'),
+    execution_mode: str = Query(default='simulation'),
+    _=Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN)),
+) -> dict:
+    """Return the trading parameter catalog with descriptions and current effective values."""
+    from app.services.config.trading_config import get_current_values, get_param_catalog
+    return {
+        "catalog": get_param_catalog(),
+        "values": get_current_values(decision_mode, execution_mode),
+        "decision_mode": decision_mode,
+        "execution_mode": execution_mode,
+    }
+
+
+@router.get('/trading-config/versions')
+def get_trading_config_versions(
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _=Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN)),
+) -> dict:
+    """Return version history of trading config changes."""
+    from app.db.models.trading_config_version import TradingConfigVersion
+
+    rows = (
+        db.query(TradingConfigVersion)
+        .order_by(TradingConfigVersion.version.desc())
+        .limit(limit)
+        .all()
+    )
+
+    return {
+        "count": len(rows),
+        "versions": [
+            {
+                "version": row.version,
+                "changed_by": row.changed_by,
+                "changed_at": row.changed_at.isoformat() if row.changed_at else None,
+                "decision_mode": row.decision_mode,
+                "changes_summary": row.changes_summary,
+                "settings_snapshot": row.settings_snapshot,
+            }
+            for row in rows
+        ],
+    }
+
+
+@router.post('/trading-config/versions/{version_id}/restore')
+def restore_trading_config_version(
+    version_id: int,
+    db: Session = Depends(get_db),
+    _=Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN)),
+) -> dict:
+    """Restore a previous trading config version as the active config."""
+    from app.db.models.trading_config_version import TradingConfigVersion
+
+    target = db.query(TradingConfigVersion).filter(TradingConfigVersion.version == version_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail=f"Version {version_id} not found")
+
+    snapshot = target.settings_snapshot if isinstance(target.settings_snapshot, dict) else {}
+
+    # Apply to the trading connector
+    conn = db.query(ConnectorConfig).filter(ConnectorConfig.connector_name == 'trading').first()
+    if not conn:
+        conn = ConnectorConfig(connector_name='trading', enabled=True, settings={})
+        db.add(conn)
+
+    old_settings = conn.settings if isinstance(conn.settings, dict) else {}
+    conn.settings = snapshot
+
+    # Create a new version entry for the restore
+    from sqlalchemy import func
+    max_ver = db.query(func.max(TradingConfigVersion.version)).scalar() or 0
+    restore_version = TradingConfigVersion(
+        version=max_ver + 1,
+        changed_by="admin",
+        decision_mode=target.decision_mode,
+        settings_snapshot=snapshot,
+        changes_summary=f"restored from v{version_id}",
+    )
+    db.add(restore_version)
+    db.commit()
+
+    RuntimeConnectorSettings.clear_cache('trading')
+
+    return {
+        "restored_from": version_id,
+        "new_version": max_ver + 1,
+        "settings": snapshot,
+    }
 
 
 @router.post('/{connector_name}/test')

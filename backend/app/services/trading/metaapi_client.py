@@ -557,7 +557,14 @@ class MetaApiClient:
         if not self._metaapi_cls or not self._resolve_token():
             return None
         if region not in self._sdk_by_region:
-            self._sdk_by_region[region] = self._metaapi_cls(self._resolve_token(), {'region': region})
+            sdk = self._metaapi_cls(self._resolve_token(), {'region': region})
+            # Disable SDK internal console logging to prevent reconnection log spam
+            if hasattr(sdk, 'enable_logging'):
+                try:
+                    sdk.enable_logging(False)
+                except Exception:
+                    pass
+            self._sdk_by_region[region] = sdk
         return self._sdk_by_region[region]
 
     @staticmethod

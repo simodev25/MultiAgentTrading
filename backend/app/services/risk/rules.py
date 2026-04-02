@@ -10,11 +10,28 @@ import logging
 import math
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.observability.metrics import risk_evaluation_total
 
+if TYPE_CHECKING:
+    from app.services.risk.limits import RiskLimits
+    from app.services.risk.portfolio_state import PortfolioState
+
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ProposedTrade:
+    """Describes a trade proposal to be validated against portfolio limits."""
+    decision: str           # BUY | SELL | HOLD
+    pair: str | None = None
+    entry_price: float = 0.0
+    stop_loss: float | None = None
+    take_profit: float | None = None
+    risk_percent: float = 1.0
+    mode: str = "simulation"
+    asset_class: str | None = None
 
 
 @dataclass
@@ -414,3 +431,194 @@ class RiskEngine:
             pip_size=pip_size,
             asset_class=ac,
         )
+
+    def evaluate_portfolio(
+        self,
+        portfolio: PortfolioState,
+        limits: RiskLimits,
+        proposed_trade: ProposedTrade,
+    ) -> RiskAssessment:
+        """Evaluate a trade proposal against portfolio state and risk limits.
+
+        Checks are sequential — rejects on first failure:
+        1. Daily loss limit
+        2. Risk budget (open risk + new trade risk)
+        3. Max positions
+        4. Max positions per symbol
+        5. Free margin
+        6. Trade-level checks (existing evaluate()) with real equity
+        """
+        ac = self._resolve_asset_class(proposed_trade.pair, proposed_trade.asset_class)
+
+        if proposed_trade.decision == "HOLD":
+            return RiskAssessment(
+                accepted=True,
+                reasons=["No trade requested (HOLD)."],
+                suggested_volume=0.0,
+                asset_class=ac,
+            )
+
+        # Check 1: Daily loss limit
+        if portfolio.daily_drawdown_pct >= limits.max_daily_loss_pct:
+            return RiskAssessment(
+                accepted=False,
+                reasons=[
+                    f"REJECT: daily loss limit reached "
+                    f"({portfolio.daily_drawdown_pct:.1f}% >= {limits.max_daily_loss_pct:.1f}%)"
+                ],
+                suggested_volume=0.0,
+                asset_class=ac,
+            )
+
+        # Check 2: Risk budget
+        trade_risk_pct = proposed_trade.risk_percent
+        if portfolio.open_risk_total_pct + trade_risk_pct > limits.max_open_risk_pct:
+            return RiskAssessment(
+                accepted=False,
+                reasons=[
+                    f"REJECT: risk budget exceeded "
+                    f"({portfolio.open_risk_total_pct:.1f}% + {trade_risk_pct:.1f}% "
+                    f"> {limits.max_open_risk_pct:.1f}%)"
+                ],
+                suggested_volume=0.0,
+                asset_class=ac,
+            )
+
+        # Check 3: Max positions
+        if portfolio.open_position_count >= limits.max_positions:
+            return RiskAssessment(
+                accepted=False,
+                reasons=[
+                    f"REJECT: max positions reached "
+                    f"({portfolio.open_position_count}/{limits.max_positions})"
+                ],
+                suggested_volume=0.0,
+                asset_class=ac,
+            )
+
+        # Check 4: Max positions per symbol
+        symbol = proposed_trade.pair or ""
+        positions_on_symbol = sum(
+            1 for p in portfolio.open_positions if p.symbol == symbol
+        )
+        if positions_on_symbol >= limits.max_positions_per_symbol:
+            return RiskAssessment(
+                accepted=False,
+                reasons=[
+                    f"REJECT: max positions on {symbol} reached "
+                    f"({positions_on_symbol}/{limits.max_positions_per_symbol})"
+                ],
+                suggested_volume=0.0,
+                asset_class=ac,
+            )
+
+        # Check 5: Free margin
+        equity = portfolio.equity if portfolio.equity > 0 else 10000.0
+        free_margin_pct = (portfolio.free_margin / equity) * 100 if equity > 0 else 0.0
+        if free_margin_pct < limits.min_free_margin_pct:
+            return RiskAssessment(
+                accepted=False,
+                reasons=[
+                    f"REJECT: insufficient free margin "
+                    f"({free_margin_pct:.1f}% < {limits.min_free_margin_pct:.1f}%)"
+                ],
+                suggested_volume=0.0,
+                asset_class=ac,
+            )
+
+        # Check 7: Weekly loss limit (Tier 2)
+        if portfolio.weekly_drawdown_pct >= limits.max_weekly_loss_pct:
+            return RiskAssessment(
+                accepted=False,
+                reasons=[
+                    f"REJECT: weekly loss limit reached "
+                    f"({portfolio.weekly_drawdown_pct:.1f}% >= {limits.max_weekly_loss_pct:.1f}%)"
+                ],
+                suggested_volume=0.0,
+                asset_class=ac,
+            )
+
+        # Check 8: Currency exposure (Tier 2)
+        try:
+            from app.services.risk.currency_exposure import compute_currency_exposure
+            currency_report = compute_currency_exposure(portfolio.open_positions, equity)
+            for ce in currency_report.exposures.values():
+                if ce.exposure_pct >= limits.max_currency_exposure_pct:
+                    return RiskAssessment(
+                        accepted=False,
+                        reasons=[
+                            f"REJECT: {ce.currency} exposure {ce.exposure_pct:.1f}% "
+                            f">= limit {limits.max_currency_exposure_pct:.1f}% "
+                            f"(positions: {', '.join(ce.contributing_positions)})"
+                        ],
+                        suggested_volume=0.0,
+                        asset_class=ac,
+                    )
+
+            # Check 9: Gross exposure (Tier 2)
+            if currency_report.total_gross_exposure_pct >= limits.max_gross_exposure_pct:
+                return RiskAssessment(
+                    accepted=False,
+                    reasons=[
+                        f"REJECT: gross exposure {currency_report.total_gross_exposure_pct:.1f}% "
+                        f">= limit {limits.max_gross_exposure_pct:.1f}%"
+                    ],
+                    suggested_volume=0.0,
+                    asset_class=ac,
+                )
+        except Exception as exc:
+            logger.warning("Currency exposure check failed (non-blocking): %s", exc)
+
+        # Check 10: Correlation risk (Tier 2)
+        try:
+            from app.services.risk.correlation_exposure import compute_correlation_exposure
+            corr_report = compute_correlation_exposure(
+                portfolio.open_positions,
+                portfolio.open_risk_total_pct,
+                limits.max_correlation_risk_multiplier,
+            )
+            if corr_report.should_reduce:
+                return RiskAssessment(
+                    accepted=False,
+                    reasons=[
+                        f"REJECT: correlation risk multiplier {corr_report.effective_risk_multiplier:.1f}x "
+                        f">= limit {limits.max_correlation_risk_multiplier:.1f}x "
+                        f"(adjusted risk: {corr_report.adjusted_open_risk_pct:.1f}%)"
+                    ],
+                    suggested_volume=0.0,
+                    asset_class=ac,
+                )
+        except Exception as exc:
+            logger.warning("Correlation exposure check failed (non-blocking): %s", exc)
+
+        # Check 6: Trade-level checks (existing logic) with REAL equity
+        assessment = self.evaluate(
+            mode=proposed_trade.mode,
+            decision=proposed_trade.decision,
+            risk_percent=proposed_trade.risk_percent,
+            price=proposed_trade.entry_price,
+            stop_loss=proposed_trade.stop_loss,
+            pair=proposed_trade.pair,
+            equity=equity,
+            asset_class=proposed_trade.asset_class,
+            leverage=portfolio.leverage,
+        )
+
+        # Volume adjustment: if near budget limit (>80%), reduce proportionally
+        if assessment.accepted:
+            budget_remaining = limits.max_open_risk_pct - portfolio.open_risk_total_pct
+            budget_usage = trade_risk_pct / budget_remaining if budget_remaining > 0 else 1.0
+            if budget_usage > 0.8:
+                reduction = 1.0 - ((budget_usage - 0.8) / 0.2) * 0.5  # up to 50% reduction
+                reduction = max(reduction, 0.5)
+                assessment.suggested_volume = round(
+                    assessment.suggested_volume * reduction, 4,
+                )
+                min_vol, _ = self._volume_limits(proposed_trade.pair, proposed_trade.asset_class)
+                assessment.suggested_volume = max(assessment.suggested_volume, min_vol)
+                assessment.reasons.append(
+                    f"Volume reduced to {assessment.suggested_volume} "
+                    f"(risk budget {budget_usage:.0%} utilized)"
+                )
+
+        return assessment

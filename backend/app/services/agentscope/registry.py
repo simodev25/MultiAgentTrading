@@ -984,10 +984,19 @@ class AgentScopeRegistry:
                 "execution_manager": _bundle_out("execution-manager"),
             }
 
+            # Resolve config version for debug trace
+            _trace_config_version = 0
+            try:
+                from app.services.config.trading_config import get_active_config_version as _get_cv
+                _trace_config_version = _get_cv(None)
+            except Exception:
+                pass
+
             payload = {
                 "schema_version": 2,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "runtime_engine": "agentscope_v1",
+                "config_version": _trace_config_version,
                 "run": {
                     "id": run.id,
                     "pair": pair,
@@ -995,6 +1004,7 @@ class AgentScopeRegistry:
                     "mode": getattr(run, "mode", "simulation"),
                     "status": run.status,
                     "risk_percent": risk_percent,
+                    "config_version": _trace_config_version,
                     "created_at": str(getattr(run, "created_at", "")),
                     "updated_at": str(getattr(run, "updated_at", "")),
                 },
@@ -1065,7 +1075,7 @@ class AgentScopeRegistry:
         pair: str = "", timeframe: str = "", risk_percent: float = 1.0,
         analysis_outputs: dict | None = None,
         trader_out: dict | None = None, risk_out: dict | None = None,
-        news: dict | None = None,
+        news: dict | None = None, decision_mode: str = "balanced",
     ) -> Msg:
         """Run agent tools deterministically without LLM — passes proper args."""
         from app.services.agentscope.toolkit import AGENT_TOOL_MAP
@@ -1083,6 +1093,7 @@ class AgentScopeRegistry:
                     tool_id, ohlc=ohlc, snapshot=snapshot,
                     pair=pair, timeframe=timeframe, risk_percent=risk_percent,
                     trader_out=trader_out, risk_out=risk_out, news=news,
+                    analysis_outputs=analysis_outputs, decision_mode=decision_mode,
                 )
                 result = await client.call_tool(tool_id, kwargs)
                 results[tool_id] = result
@@ -1090,14 +1101,45 @@ class AgentScopeRegistry:
                 results[tool_id] = {"error": str(exc)}
 
         text = json.dumps(results, default=str)
-        return Msg(agent_name, f"[deterministic] {text}", "assistant")
+
+        # Build structured metadata for trader-agent deterministic fallback
+        metadata: dict = {}
+        if agent_name == "trader-agent":
+            gating = results.get("decision_gating", {})
+            sizing = results.get("trade_sizing", {})
+            contradiction = results.get("contradiction_detector", {})
+
+            gates_passed = gating.get("gates_passed", False)
+            # Derive direction from deterministic score
+            from app.services.agentscope.decision_helpers import compute_deterministic_score
+            _det_score = compute_deterministic_score(analysis_outputs or {})
+
+            if gates_passed and abs(_det_score) >= 0.05:
+                decision = "BUY" if _det_score > 0 else "SELL"
+            else:
+                decision = "HOLD"
+
+            metadata = {
+                "decision": decision,
+                "combined_score": round(_det_score, 4),
+                "confidence": gating.get("confidence", 0.0) if isinstance(gating, dict) else 0.0,
+                "execution_allowed": gates_passed and decision != "HOLD",
+                "entry": sizing.get("entry"),
+                "stop_loss": sizing.get("stop_loss"),
+                "take_profit": sizing.get("take_profit"),
+                "reason": f"deterministic: gates={'passed' if gates_passed else 'blocked'}, score={_det_score:.4f}",
+                "degraded": False,
+            }
+
+        return Msg(agent_name, f"[deterministic] {text}", "assistant", metadata=metadata)
 
     @staticmethod
     def _build_tool_kwargs(
         tool_id: str, ohlc: dict, snapshot: dict,
         pair: str = "", timeframe: str = "", risk_percent: float = 1.0,
         trader_out: dict | None = None, risk_out: dict | None = None,
-        news: dict | None = None,
+        news: dict | None = None, analysis_outputs: dict | None = None,
+        decision_mode: str = "balanced",
     ) -> dict:
         """Build appropriate kwargs for each MCP tool in deterministic mode."""
         closes = ohlc.get("closes", [])
@@ -1144,21 +1186,45 @@ class AgentScopeRegistry:
                 "change_pct": snapshot.get("change_pct", 0.0),
             }
         if tool_id == "decision_gating":
+            # Use pre-computed deterministic score + aligned sources
+            from app.services.agentscope.decision_helpers import (
+                compute_deterministic_score,
+                count_aligned_sources,
+            )
+            _outputs = analysis_outputs or {}
+            _det_score = compute_deterministic_score(_outputs)
+            _direction = "bullish" if _det_score > 0 else ("bearish" if _det_score < 0 else "neutral")
+            _aligned = count_aligned_sources(_outputs, _direction)
+            # Confidence: use average of Phase 1 agent confidences
+            _confs = [
+                float((_outputs.get(a, {}).get("metadata", {}) or {}).get("confidence", 0))
+                for a in ("technical-analyst", "news-analyst", "market-context-analyst")
+            ]
+            _avg_conf = sum(_confs) / len(_confs) if _confs else 0.0
             return {
-                "combined_score": 0.0, "confidence": 0.0,
-                "aligned_sources": 0, "mode": "balanced",
+                "combined_score": abs(_det_score),
+                "confidence": round(_avg_conf, 4),
+                "aligned_sources": _aligned,
+                "mode": decision_mode,
             }
         if tool_id == "contradiction_detector":
+            from app.services.agentscope.decision_helpers import derive_trend_momentum
+            _trend, _momentum = derive_trend_momentum(snapshot)
             return {
                 "macd_diff": snapshot.get("macd_diff", 0.0),
                 "atr": snapshot.get("atr", 0.001),
-                "trend": snapshot.get("trend", "neutral"),
+                "trend": _trend,
+                "momentum": _momentum,
             }
         if tool_id == "trade_sizing":
+            # Derive side from deterministic score
+            from app.services.agentscope.decision_helpers import compute_deterministic_score as _cds
+            _det = _cds(analysis_outputs or {})
+            _side = "BUY" if _det > 0 else ("SELL" if _det < 0 else "HOLD")
             return {
                 "price": snapshot.get("last_price", 0.0),
                 "atr": snapshot.get("atr", 0.0),
-                "decision_side": "HOLD",
+                "decision_side": _side,
             }
         if tool_id == "position_size_calculator":
             td = (trader_out or {}).get("metadata", {})
@@ -1277,7 +1343,7 @@ class AgentScopeRegistry:
                 name: str, msg: Msg,
                 trader_out: dict | None = None, risk_out: dict | None = None,
             ) -> Msg:
-                """Call agent via LLM (with retry on 5xx and timeout) or deterministic.
+                """Call agent via LLM when enabled, deterministic only when disabled.
 
                 AgentScope's ReActAgent catches ``asyncio.CancelledError``
                 internally in ``handle_interrupt()`` and returns a Msg with
@@ -1285,8 +1351,7 @@ class AgentScopeRegistry:
                 "I noticed that you have interrupted me".  This means
                 ``asyncio.wait_for`` will NOT raise ``TimeoutError`` — it gets
                 a normal-looking result.  We must therefore check for the
-                ``_is_interrupted`` flag explicitly and fall back to
-                deterministic execution when detected.
+                ``_is_interrupted`` flag explicitly and treat it as a timeout.
                 """
                 if name in agents:
                     schema = AGENT_STRUCTURED_MODELS.get(name)
@@ -1313,18 +1378,24 @@ class AgentScopeRegistry:
                             if isinstance(_meta, dict) and _meta.get("_is_interrupted"):
                                 logger.warning(
                                     "Agent %s was interrupted (likely timeout after %ds), "
-                                    "falling back to deterministic",
+                                    "propagating error because llm_enabled=true",
                                     name, _agent_timeout,
                                 )
                                 # Still extract partial tool invocations if any
                                 agent_tool_invocations[name] = await _extract_tool_invocations(agents[name])
-                                break
+                                raise asyncio.TimeoutError(
+                                    f"Agent {name} interrupted after timeout window"
+                                )
 
                             agent_tool_invocations[name] = await _extract_tool_invocations(agents[name])
                             return result
                         except asyncio.TimeoutError:
-                            logger.warning("Agent %s timed out after %ds, falling back to deterministic", name, _agent_timeout)
-                            break
+                            logger.warning(
+                                "Agent %s timed out after %ds (llm_enabled=true), propagating error",
+                                name,
+                                _agent_timeout,
+                            )
+                            raise
                         except Exception as exc:
                             last_err = exc
                             err_str = str(exc)
@@ -1339,13 +1410,14 @@ class AgentScopeRegistry:
                             # All retries exhausted — propagate the error
                             logger.error("Agent %s failed after 3 retries: %s", name, str(last_err)[:200])
                             raise last_err
-                # Deterministic fallback (LLM disabled, timeout, interrupted, or retry exhaustion)
+                # Deterministic path only when LLM is disabled for this agent.
                 return await self._run_deterministic(
                     name, toolkits.get(name), msg,
                     ohlc=ohlc, snapshot=snapshot, pair=pair, timeframe=timeframe,
                     risk_percent=risk_percent, analysis_outputs=analysis_outputs,
                     trader_out=trader_out, risk_out=risk_out,
                     news=market_data.get("news", {}),
+                    decision_mode=base_vars.get("decision_mode", "balanced"),
                 )
 
             # Clear run-scoped indicator cache before starting agents
@@ -1506,15 +1578,81 @@ class AgentScopeRegistry:
                     {"phase": "debate", "llm_enabled": llm_enabled.get(name, False)},
                     d, elapsed_ms=debate_ms / 2)
 
+            # ── Fetch portfolio state for Phase 4 ──
+            _portfolio_state = None
+            _portfolio_account_id: str | None = None
+            try:
+                from app.services.risk.portfolio_state import PortfolioStateService
+                from app.services.trading.account_selector import MetaApiAccountSelector as _AccSel
+                _acct = _AccSel().resolve(db, metaapi_account_ref)
+                _portfolio_account_id = str(_acct.account_id) if _acct else None
+                _acct_region = (_acct.region if _acct else None)
+                _portfolio_state = await PortfolioStateService.get_current_state(
+                    account_id=_portfolio_account_id, region=_acct_region, db=db,
+                )
+            except Exception as exc:
+                logger.warning("Failed to fetch portfolio state: %s", exc)
+                from app.services.risk.portfolio_state import PortfolioStateService
+                _portfolio_state = PortfolioStateService.build_defaults()
+
+            # Save pre_trade snapshot
+            if _portfolio_state and not _portfolio_state.degraded:
+                try:
+                    from app.db.models.portfolio_snapshot import PortfolioSnapshot as _PSnap
+                    _pre_snap = _PSnap(
+                        account_id=_portfolio_account_id or "unknown",
+                        balance=_portfolio_state.balance,
+                        equity=_portfolio_state.equity,
+                        free_margin=_portfolio_state.free_margin,
+                        used_margin=_portfolio_state.used_margin,
+                        open_position_count=_portfolio_state.open_position_count,
+                        open_risk_total_pct=_portfolio_state.open_risk_total_pct,
+                        daily_realized_pnl=_portfolio_state.daily_realized_pnl,
+                        daily_high_equity=_portfolio_state.daily_high_equity,
+                        snapshot_type="pre_trade",
+                    )
+                    db.add(_pre_snap)
+                    db.flush()
+                except Exception as exc:
+                    logger.warning("Failed to save pre_trade snapshot: %s", exc)
+
             # ── Phase 4: Sequential decision ──
             _set_progress(65)
             logger.info("Phase 4: Trader -> Risk -> Execution for %s/%s", pair, timeframe)
+
+            # ── Pre-compute deterministic decision inputs ──
+            from app.services.agentscope.decision_helpers import (
+                compute_deterministic_score,
+                compute_score_band,
+                count_aligned_sources,
+                derive_trend_momentum,
+            )
+
+            _det_score = compute_deterministic_score(
+                analysis_outputs,
+                debate_winner=debate_result.winning_side,
+                debate_confidence=debate_result.confidence,
+            )
+            _score_band = compute_score_band(_det_score)
+            _det_direction = "bullish" if _det_score > 0 else ("bearish" if _det_score < 0 else "neutral")
+            _det_aligned = count_aligned_sources(analysis_outputs, _det_direction)
+            _det_trend, _det_momentum = derive_trend_momentum(snapshot)
+
+            logger.info(
+                "Deterministic inputs: score=%.4f band=[%.4f,%.4f] aligned=%d trend=%s momentum=%s",
+                _det_score, _score_band[0], _score_band[1], _det_aligned, _det_trend, _det_momentum,
+            )
 
             # Update vars for Phase 4 agents
             base_vars["debate_winner"] = str(debate_result.winning_side or "neutral")
             base_vars["debate_confidence"] = str(debate_result.confidence)
             base_vars["debate_reason"] = str(debate_result.reason or "")
             base_vars["mode"] = getattr(run, "mode", "simulation")
+            base_vars["decision_mode"] = model_selector.resolve_decision_mode(db)
+            base_vars["deterministic_score"] = str(_det_score)
+            base_vars["score_band_min"] = str(_score_band[0])
+            base_vars["score_band_max"] = str(_score_band[1])
+            base_vars["deterministic_aligned_sources"] = str(_det_aligned)
 
             decision_context = (
                 f"Make a trading decision for {pair} on {timeframe}.\n\n"
@@ -1533,30 +1671,93 @@ class AgentScopeRegistry:
                 _set_progress(_phase4_progress.get(name, 65))
                 t0 = time.time()
 
-                # Skip LLM for risk-manager and execution-manager when trader decided HOLD
-                if _trader_decision_is_hold and name in ("risk-manager", "execution-manager"):
-                    if name == "risk-manager":
-                        hold_text = "accepted=false, suggested_volume=0, reasons=[\"HOLD decision\"]"
-                        hold_meta = {
-                            "accepted": False,
-                            "suggested_volume": 0.0,
-                            "reasons": ["HOLD decision"],
-                            "degraded": False,
-                        }
-                    else:
-                        hold_text = "decision=HOLD, should_execute=false, volume=0, reason=\"HOLD — no trade to execute\""
-                        hold_meta = {
-                            "decision": "HOLD",
-                            "should_execute": False,
-                            "side": None,
-                            "volume": 0.0,
-                            "reason": "HOLD — no trade to execute",
-                            "degraded": False,
-                        }
+                # Skip LLM for risk-manager when trader decided HOLD
+                if _trader_decision_is_hold and name == "risk-manager":
+                    hold_text = "accepted=false, suggested_volume=0, reasons=[\"HOLD decision\"]"
+                    hold_meta = {
+                        "accepted": False,
+                        "suggested_volume": 0.0,
+                        "reasons": ["HOLD decision"],
+                        "degraded": False,
+                    }
                     current_msg = Msg(name, hold_text, "assistant", metadata=hold_meta)
                     step_ms = (time.time() - t0) * 1000
                     d = _msg_to_dict(current_msg)
                     d["llm_enabled"] = False
+                elif name == "execution-manager":
+                    # ── Preflight engine (deterministic) ──
+                    from app.services.execution.preflight import ExecutionPreflightEngine
+                    _preflight = ExecutionPreflightEngine()
+                    _pf_result = _preflight.validate(
+                        trader_output=_trader_out or {},
+                        risk_output=_risk_out or {},
+                        snapshot=snapshot,
+                        pair=pair,
+                        mode=getattr(run, "mode", "simulation"),
+                    )
+
+                    # Execute if preflight passed and not simulation
+                    _exec_result: dict | None = None
+                    if _pf_result.can_execute and _pf_result.mode != "simulation":
+                        try:
+                            from app.services.execution.executor import ExecutionService
+                            _exec_svc = ExecutionService()
+                            _exec_result = await _exec_svc.execute(
+                                run_id=run.id,
+                                mode=_pf_result.mode,
+                                symbol=_pf_result.symbol,
+                                side=_pf_result.side,
+                                volume=_pf_result.volume,
+                                stop_loss=_pf_result.stop_loss,
+                                take_profit=_pf_result.take_profit,
+                                metaapi_account_ref=metaapi_account_ref,
+                            )
+                        except Exception as _exec_exc:
+                            logger.warning("Execution failed: %s", _exec_exc)
+                            from app.services.execution.preflight import ExecutionStatus
+                            _pf_result.status = ExecutionStatus.FAILED
+                            _pf_result.reason = f"Execution error: {_exec_exc}"
+
+                    # Optional LLM summary
+                    from app.core.config import get_settings as _get_s
+                    _use_llm = _get_s().execution_manager_llm_enabled
+                    if _use_llm and not _trader_decision_is_hold:
+                        base_vars["preflight_result"] = str({
+                            "status": _pf_result.status.value,
+                            "can_execute": _pf_result.can_execute,
+                            "reason": _pf_result.reason,
+                            "checks_passed": _pf_result.checks_passed,
+                            "checks_failed": _pf_result.checks_failed,
+                        })
+                        base_vars["execution_result"] = str(_exec_result or "N/A")
+                        current_msg = await _call_agent(
+                            name, current_msg,
+                            trader_out=_trader_out, risk_out=_risk_out,
+                        )
+                        step_ms = (time.time() - t0) * 1000
+                        d = _msg_to_dict(current_msg, tool_invocations=agent_tool_invocations.get(name, {}))
+                        d["llm_enabled"] = True
+                    else:
+                        # Deterministic summary
+                        _exec_status = _pf_result.status.value
+                        _exec_text = f"status={_exec_status}, reason={_pf_result.reason}"
+                        _exec_meta = {
+                            "decision": _pf_result.side or "HOLD",
+                            "should_execute": _pf_result.can_execute,
+                            "side": _pf_result.side,
+                            "volume": _pf_result.volume,
+                            "status": _exec_status,
+                            "reason": _pf_result.reason,
+                            "preflight": {
+                                "checks_passed": _pf_result.checks_passed,
+                                "checks_failed": _pf_result.checks_failed,
+                            },
+                            "degraded": False,
+                        }
+                        current_msg = Msg(name, _exec_text, "assistant", metadata=_exec_meta)
+                        step_ms = (time.time() - t0) * 1000
+                        d = _msg_to_dict(current_msg)
+                        d["llm_enabled"] = False
                 else:
                     current_msg = await _call_agent(
                         name, current_msg,
@@ -1568,6 +1769,44 @@ class AgentScopeRegistry:
                 # Update vars with trader/risk outputs for downstream agents
                 if name == "trader-agent":
                     meta = d.get("metadata", {})
+
+                    # ── DM-2: Validate required tool calls ──
+                    from app.services.agentscope.decision_helpers import validate_tool_calls
+                    _trader_tools = agent_tool_invocations.get("trader-agent", {})
+                    _tools_ok, _tools_missing = validate_tool_calls(
+                        _trader_tools, meta.get("decision", "HOLD"),
+                    )
+                    if not _tools_ok:
+                        logger.warning(
+                            "Trader-agent missing required tool calls: %s — forcing execution_allowed=false",
+                            _tools_missing,
+                        )
+                        meta["execution_allowed"] = False
+                        meta["degraded"] = True
+                        meta.setdefault("reason", "")
+                        meta["reason"] += f" [DEGRADED: missing tool calls: {_tools_missing}]"
+                        d["metadata"] = meta
+
+                    # ── DM-1: Enforce combined_score within deterministic band ──
+                    _raw_score = meta.get("combined_score", 0.0)
+                    try:
+                        _raw_score = float(_raw_score)
+                    except (TypeError, ValueError):
+                        _raw_score = 0.0
+                    if _raw_score < _score_band[0] or _raw_score > _score_band[1]:
+                        _clamped = max(_score_band[0], min(_score_band[1], _raw_score))
+                        logger.info(
+                            "Clamping combined_score %.4f to band [%.4f, %.4f] → %.4f",
+                            _raw_score, _score_band[0], _score_band[1], _clamped,
+                        )
+                        meta["combined_score"] = round(_clamped, 4)
+                        d["metadata"] = meta
+
+                    # ── DM-7: Fallback combined_score recovery ──
+                    if meta.get("combined_score") is None or meta.get("combined_score") == 0.0:
+                        meta["combined_score"] = _det_score
+                        d["metadata"] = meta
+
                     base_vars["trader_decision"] = meta.get("decision", "HOLD")
                     base_vars["entry"] = str(meta.get("entry", "N/A"))
                     base_vars["stop_loss"] = str(meta.get("stop_loss", "N/A"))
@@ -1576,6 +1815,28 @@ class AgentScopeRegistry:
                     _trader_decision_is_hold = meta.get("decision", "HOLD") == "HOLD"
                 elif name == "risk-manager":
                     base_vars["risk_result"] = d.get("text", "")[:500]
+                elif name == "execution-manager":
+                    # Save post_trade snapshot after execution
+                    if _portfolio_state and _risk_out:
+                        risk_meta = _risk_out.get("metadata", {})
+                        if risk_meta.get("accepted") and not _portfolio_state.degraded:
+                            try:
+                                from app.db.models.portfolio_snapshot import PortfolioSnapshot as _PSnap
+                                _post_snap = _PSnap(
+                                    account_id=_portfolio_account_id or "unknown",
+                                    balance=_portfolio_state.balance,
+                                    equity=_portfolio_state.equity,
+                                    free_margin=_portfolio_state.free_margin,
+                                    used_margin=_portfolio_state.used_margin,
+                                    open_position_count=_portfolio_state.open_position_count,
+                                    open_risk_total_pct=_portfolio_state.open_risk_total_pct,
+                                    daily_realized_pnl=_portfolio_state.daily_realized_pnl,
+                                    daily_high_equity=_portfolio_state.daily_high_equity,
+                                    snapshot_type="post_trade",
+                                )
+                                db.add(_post_snap)
+                            except Exception as exc:
+                                logger.warning("Failed to save post_trade snapshot: %s", exc)
                 d["prompt_meta"] = self._build_prompt_meta(db, name, model_name, llm_enabled.get(name, False), variables=base_vars, _prompt_cache=_prompt_cache)
                 analysis_outputs[name] = d
                 self._record_step(db, run, name,
@@ -1586,6 +1847,43 @@ class AgentScopeRegistry:
                     _trader_out = d
                 elif name == "risk-manager":
                     _risk_out = d
+
+            # ── Build portfolio context for traces ──
+            _portfolio_context: dict = {}
+            if _portfolio_state:
+                from app.services.risk.limits import get_risk_limits as _get_rl
+                _mode = getattr(run, "mode", "simulation")
+                _limits = _get_rl(_mode)
+                _p_eq = _portfolio_state.equity if _portfolio_state.equity > 0 else 1.0
+                _portfolio_context = {
+                    "balance": _portfolio_state.balance,
+                    "equity": _portfolio_state.equity,
+                    "free_margin_pct": round((_portfolio_state.free_margin / _p_eq) * 100, 1),
+                    "open_risk_pct": _portfolio_state.open_risk_total_pct,
+                    "daily_drawdown_pct": _portfolio_state.daily_drawdown_pct,
+                    "weekly_drawdown_pct": _portfolio_state.weekly_drawdown_pct,
+                    "risk_budget_remaining_pct": round(
+                        _limits.max_open_risk_pct - _portfolio_state.open_risk_total_pct, 1,
+                    ),
+                    "open_positions": _portfolio_state.open_position_count,
+                    "max_positions": _limits.max_positions,
+                    "degraded": _portfolio_state.degraded,
+                    "degraded_reasons": _portfolio_state.degraded_reasons,
+                }
+
+                # Tier 3: stress test summary (advisory)
+                try:
+                    from app.services.risk.stress_test import run_stress_test as _run_st
+                    _st_report = _run_st(
+                        _portfolio_state.open_positions, _p_eq, _portfolio_state.used_margin,
+                    )
+                    _portfolio_context["stress_test"] = {
+                        "worst_case_pnl_pct": _st_report.worst_case_pnl_pct,
+                        "scenarios_survived": f"{_st_report.scenarios_surviving}/{_st_report.scenarios_total}",
+                        "recommendation": _st_report.recommendation,
+                    }
+                except Exception as _st_exc:
+                    logger.debug("Stress test for traces failed: %s", _st_exc)
 
             # ── Build decision in frontend-compatible format ──
             elapsed = time.time() - start_time
@@ -1630,6 +1928,14 @@ class AgentScopeRegistry:
                 if trade_combined_score is None:
                     trade_combined_score = gating_inv.get("data", {}).get("combined_score", 0.0)
 
+            # Resolve active config version
+            _config_version = 0
+            try:
+                from app.services.config.trading_config import get_active_config_version
+                _config_version = get_active_config_version(db)
+            except Exception:
+                pass
+
             run.status = "completed"
             run.decision = {
                 # Frontend reads these exact fields
@@ -1654,6 +1960,10 @@ class AgentScopeRegistry:
                 "execution_summary": exec_out.get("text", "")[:500],
                 # Merge remaining trader metadata (entry, stop_loss, take_profit, reason, etc.)
                 **{k: v for k, v in trader_meta.items() if k not in ("decision", "confidence", "combined_score", "execution_allowed")},
+                # Portfolio context
+                "portfolio": _portfolio_context,
+                # Config version used for this run
+                "config_version": _config_version,
             }
 
             # Preserve initial trace metadata (e.g. triggered_by, strategy info)
@@ -1661,6 +1971,7 @@ class AgentScopeRegistry:
             run.trace = {
                 **initial_trace,
                 "runtime_engine": "agentscope_v1",
+                "config_version": _config_version,
                 "elapsed_seconds": round(elapsed, 1),
                 "market_data_source": snapshot.get("market_data_source", "unknown"),
                 "market_data_bars": len(ohlc.get("closes", [])),
@@ -1671,6 +1982,7 @@ class AgentScopeRegistry:
                 "analysis_outputs": {
                     k: {"text": v.get("text", "")[:300]} for k, v in analysis_outputs.items()
                 },
+                "portfolio_state": _portfolio_context,
             }
 
             # ── Build agentic_runtime for frontend panels ──
@@ -1777,6 +2089,7 @@ class AgentScopeRegistry:
                     ohlc=ohlc, snapshot=snapshot, pair=pair, timeframe=timeframe,
                     risk_percent=1.0, analysis_outputs=analysis_outputs,
                     news=market_data.get("news", {}),
+                    decision_mode=base_vars.get("decision_mode", "balanced") if 'base_vars' in dir() else "balanced",
                 )
 
             # ── Phase 1: Parallel analysts ──

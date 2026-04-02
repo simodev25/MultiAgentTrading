@@ -39,7 +39,7 @@ async function mockConnectorsApi(page: Page, options: { saveFails?: boolean } = 
           enabled: true,
           settings: {
             provider: 'ollama',
-            default_model: 'llama3.1',
+            default_model: 'deepseek-v3.2',
             decision_mode: decisionMode,
             agent_models: {},
             agent_llm_enabled: {},
@@ -74,7 +74,7 @@ async function mockConnectorsApi(page: Page, options: { saveFails?: boolean } = 
         enabled: true,
         settings: {
           provider: 'ollama',
-          default_model: 'llama3.1',
+          default_model: 'deepseek-v3.2',
           decision_mode: decisionMode,
           agent_models: {},
           agent_llm_enabled: {},
@@ -109,7 +109,7 @@ async function mockConnectorsApi(page: Page, options: { saveFails?: boolean } = 
 
     if (path.endsWith('/connectors/ollama/models') && method === 'GET') {
       return route.fulfill(asJson({
-        models: ['llama3.1'],
+        models: ['deepseek-v3.2'],
         source: 'mock',
         provider: 'ollama',
       }));

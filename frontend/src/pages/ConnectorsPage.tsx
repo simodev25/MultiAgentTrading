@@ -154,7 +154,7 @@ function normalizeBooleanSetting(value: unknown, fallback = false): boolean {
 function defaultModelForProvider(provider: LlmProvider): string {
   if (provider === 'openai') return 'gpt-4o-mini';
   if (provider === 'mistral') return 'mistral-small-latest';
-  return 'llama3.1';
+  return 'deepseek-v3.2';
 }
 
 function parseSymbolInput(value: string): string[] {
@@ -357,7 +357,7 @@ export function ConnectorsPage() {
   const [error, setError] = useState<string | null>(null);
   const [activeConfigTab, setActiveConfigTab] = useState<ConfigTabId>('models');
 
-  const [defaultLlmModel, setDefaultLlmModel] = useState('llama3.1');
+  const [defaultLlmModel, setDefaultLlmModel] = useState('deepseek-v3.2');
   const [llmProvider, setLlmProvider] = useState<LlmProvider>('ollama');
   const [decisionMode, setDecisionMode] = useState<DecisionMode>('conservative');
   const [agentModels, setAgentModels] = useState<Record<string, string>>(
@@ -411,6 +411,90 @@ export function ConnectorsPage() {
   const [cacheHistoryOrdersTtl, setCacheHistoryOrdersTtl] = useState(60);
   const [cacheAccountInfoTtl, setCacheAccountInfoTtl] = useState(5);
   const [savingCache, setSavingCache] = useState(false);
+
+  // ── Trading config (decision gating + risk limits + trade sizing) ──
+  type TradingParamCatalog = Record<string, Array<{ key: string; label: string; description: string; type: string; min?: number; max?: number; step?: number }>>;
+  type TradingParamValues = Record<string, Record<string, unknown>>;
+  const [tradingCatalog, setTradingCatalog] = useState<TradingParamCatalog>({});
+  const [tradingValues, setTradingValues] = useState<TradingParamValues>({});
+  const [tradingEdits, setTradingEdits] = useState<TradingParamValues>({});
+  const [savingTrading, setSavingTrading] = useState(false);
+  const [tradingVersions, setTradingVersions] = useState<Array<{ version: number; changed_by: string; changed_at: string; decision_mode: string; changes_summary: string }>>([]);
+  const [showVersions, setShowVersions] = useState(false);
+
+  const loadTradingVersions = async () => {
+    if (!token) return;
+    try {
+      const resp = await api.getTradingConfigVersions(token, 10);
+      setTradingVersions((resp.versions ?? []) as typeof tradingVersions);
+    } catch {
+      // ignore
+    }
+  };
+
+  const restoreTradingVersion = async (versionId: number) => {
+    if (!token) return;
+    try {
+      setSavingTrading(true);
+      await api.restoreTradingConfigVersion(token, versionId);
+      await loadAll();
+      await loadTradingConfig();
+      await loadTradingVersions();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Cannot restore version');
+    } finally {
+      setSavingTrading(false);
+    }
+  };
+
+  const loadTradingConfig = async () => {
+    if (!token) return;
+    try {
+      const resp = await api.getTradingConfig(token, decisionMode, 'simulation');
+      setTradingCatalog(resp.catalog as TradingParamCatalog);
+      setTradingValues(resp.values as TradingParamValues);
+      // Initialize edits from current values
+      setTradingEdits(resp.values as TradingParamValues);
+    } catch {
+      // ignore — trading connector may not exist yet
+    }
+  };
+
+  const saveTradingConfig = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!token) return;
+
+    const tradingConn = connectors.find((c) => c.connector_name === 'trading');
+    const existingSettings = (tradingConn?.settings ?? {}) as Record<string, unknown>;
+
+    setSavingTrading(true);
+    setError(null);
+    try {
+      await api.updateConnector(token, 'trading', {
+        enabled: tradingConn?.enabled ?? true,
+        settings: {
+          ...existingSettings,
+          gating: tradingEdits.gating ?? {},
+          risk_limits: tradingEdits.risk_limits ?? {},
+          sizing: tradingEdits.sizing ?? {},
+        },
+      });
+      await loadAll();
+      await loadTradingConfig();
+      await loadTradingVersions();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Cannot save trading config');
+    } finally {
+      setSavingTrading(false);
+    }
+  };
+
+  const updateTradingParam = (section: string, key: string, value: unknown) => {
+    setTradingEdits((prev) => ({
+      ...prev,
+      [section]: { ...(prev[section] ?? {}), [key]: value },
+    }));
+  };
 
   const hydrateAgentModels = (connectorRows: ConnectorConfig[]): LlmProvider => {
     const ollama = connectorRows.find((item) => item.connector_name === 'ollama');
@@ -659,7 +743,14 @@ export function ConnectorsPage() {
 
   useEffect(() => {
     void loadAll();
+    void loadTradingConfig();
+    void loadTradingVersions();
   }, [token]);
+
+  // Reload trading params when decision mode changes
+  useEffect(() => {
+    void loadTradingConfig();
+  }, [decisionMode]);
 
   const activePromptByAgent = useMemo(() => {
     const map = new Map<string, PromptTemplate>();
@@ -1483,6 +1574,129 @@ export function ConnectorsPage() {
                   {decisionModeSaving ? 'Saving...' : 'Save decision mode'}
                 </button>
               </form>
+            </ExpansionPanelAlt>
+
+            <ExpansionPanelAlt title="TRADING_PARAMETERS" defaultOpen={false}>
+              <p className="model-source" style={{ marginBottom: 12 }}>
+                Les valeurs ci-dessous sont les parametres effectifs pour le mode <strong>{decisionMode}</strong>.
+                Changer le Decision Mode ci-dessus recharge les valeurs par defaut du mode selectionne.
+                Vos overrides sont sauvegardes separement et s'appliquent par-dessus les defaults.
+              </p>
+              <form className="flex flex-col gap-4" onSubmit={saveTradingConfig}>
+                {Object.entries(tradingCatalog).map(([section, params]) => (
+                  <div key={section}>
+                    <h4 style={{ textTransform: 'uppercase', marginBottom: 8, fontSize: 13, fontWeight: 600, color: 'var(--text-secondary, #888)' }}>
+                      {section === 'gating' ? 'Decision Gating — Seuils de declenchement' : section === 'risk_limits' ? 'Risk Limits — Contraintes de portefeuille' : 'Trade Sizing — Calcul SL/TP'}
+                    </h4>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      {params.map((param) => {
+                        const currentVal = tradingEdits[section]?.[param.key] ?? tradingValues[section]?.[param.key] ?? '';
+                        return (
+                          <label key={param.key} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                            <span style={{ fontWeight: 500 }}>{param.label}</span>
+                            <span className="model-source" style={{ fontSize: 11, lineHeight: 1.3, marginBottom: 4 }}>{param.description}</span>
+                            {param.type === 'bool' ? (
+                              <input
+                                className="ui-switch"
+                                type="checkbox"
+                                checked={Boolean(currentVal)}
+                                onChange={(e) => updateTradingParam(section, param.key, e.target.checked)}
+                              />
+                            ) : (
+                              <input
+                                type="number"
+                                min={param.min}
+                                max={param.max}
+                                step={param.step}
+                                value={typeof currentVal === 'number' ? currentVal : Number(currentVal) || 0}
+                                onChange={(e) => updateTradingParam(section, param.key, Number(e.target.value))}
+                              />
+                            )}
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+                {Object.keys(tradingCatalog).length > 0 && (
+                  <button className="btn-primary" disabled={savingTrading}>
+                    {savingTrading ? 'Saving...' : 'Save trading parameters'}
+                  </button>
+                )}
+                {Object.keys(tradingCatalog).length === 0 && (
+                  <p className="model-source">Loading trading parameters...</p>
+                )}
+              </form>
+
+              {/* Version history */}
+              <div style={{ marginTop: 16, borderTop: '1px solid var(--color-border, #222)', paddingTop: 12 }}>
+                <button
+                  type="button"
+                  onClick={() => { setShowVersions(!showVersions); if (!showVersions) void loadTradingVersions(); }}
+                  style={{
+                    background: 'none', border: 'none', color: 'var(--color-accent, #4B7BF5)',
+                    cursor: 'pointer', fontSize: 12, fontFamily: 'var(--font-mono)', padding: 0,
+                  }}
+                >
+                  {showVersions ? '- Hide' : '+'} VERSION HISTORY ({tradingVersions.length})
+                </button>
+                {showVersions && tradingVersions.length > 0 && (
+                  <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 8, fontSize: 11 }}>
+                    <thead>
+                      <tr style={{ borderBottom: '1px solid var(--color-border, #222)' }}>
+                        <th style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--color-text-secondary)', fontWeight: 500 }}>v#</th>
+                        <th style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--color-text-secondary)', fontWeight: 500 }}>Date</th>
+                        <th style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--color-text-secondary)', fontWeight: 500 }}>Mode</th>
+                        <th style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--color-text-secondary)', fontWeight: 500 }}>Changes</th>
+                        <th style={{ textAlign: 'center', padding: '4px 8px', color: 'var(--color-text-secondary)', fontWeight: 500 }}></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {tradingVersions.map((v, idx) => (
+                        <tr key={v.version} style={{ borderBottom: '1px solid var(--color-border, #181924)' }}>
+                          <td style={{ padding: '4px 8px', fontFamily: 'var(--font-mono)', fontWeight: 600 }}>
+                            v{v.version}
+                            {idx === 0 && <span style={{ marginLeft: 6, fontSize: 9, color: 'var(--color-success)', fontWeight: 400 }}>active</span>}
+                          </td>
+                          <td style={{ padding: '4px 8px', color: 'var(--color-text-secondary)' }}>
+                            {v.changed_at ? new Date(v.changed_at).toLocaleString() : '-'}
+                          </td>
+                          <td style={{ padding: '4px 8px' }}>
+                            <span className="terminal-tag" style={{ fontSize: 9, padding: '1px 6px' }}>{v.decision_mode}</span>
+                          </td>
+                          <td style={{ padding: '4px 8px', color: 'var(--color-text-secondary)', maxWidth: 250, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {v.changes_summary || 'initial save'}
+                          </td>
+                          <td style={{ padding: '4px 8px', textAlign: 'center' }}>
+                            {idx > 0 && (
+                              <button
+                                type="button"
+                                disabled={savingTrading}
+                                onClick={() => void restoreTradingVersion(v.version)}
+                                style={{
+                                  background: 'none',
+                                  border: '1px solid var(--color-accent, #4B7BF5)',
+                                  color: 'var(--color-accent, #4B7BF5)',
+                                  padding: '2px 8px',
+                                  borderRadius: 3,
+                                  cursor: 'pointer',
+                                  fontSize: 10,
+                                  fontFamily: 'var(--font-mono)',
+                                }}
+                              >
+                                Restore
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+                {showVersions && tradingVersions.length === 0 && (
+                  <p className="model-source" style={{ marginTop: 8 }}>No version history yet. Save parameters to create the first version.</p>
+                )}
+              </div>
             </ExpansionPanelAlt>
 
             <ExpansionPanelAlt title="METAAPI_ACCOUNTS">

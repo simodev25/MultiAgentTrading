@@ -49,7 +49,7 @@ class Settings(BaseSettings):
 
     ollama_base_url: str = Field(default='https://ollama.com', alias='OLLAMA_BASE_URL')
     ollama_api_key: str = Field(default='', alias='OLLAMA_API_KEY')
-    ollama_model: str = Field(default='llama3.1', alias='OLLAMA_MODEL')
+    ollama_model: str = Field(default='deepseek-v3.2', alias='OLLAMA_MODEL')
     ollama_timeout_seconds: int = Field(default=30, alias='OLLAMA_TIMEOUT_SECONDS')
     ollama_input_cost_per_1m_tokens: float = Field(default=0.0, alias='OLLAMA_INPUT_COST_PER_1M_TOKENS')
     ollama_output_cost_per_1m_tokens: float = Field(default=0.0, alias='OLLAMA_OUTPUT_COST_PER_1M_TOKENS')
@@ -120,6 +120,7 @@ class Settings(BaseSettings):
 
     allow_live_trading: bool = Field(default=False, alias='ALLOW_LIVE_TRADING')
     enable_paper_execution: bool = Field(default=True, alias='ENABLE_PAPER_EXECUTION')
+    execution_manager_llm_enabled: bool = Field(default=False, alias='EXECUTION_MANAGER_LLM_ENABLED')
 
     default_forex_pairs: Annotated[List[str], NoDecode] = Field(
         default_factory=lambda: [

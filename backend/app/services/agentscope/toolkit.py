@@ -35,7 +35,7 @@ AGENT_TOOL_MAP: dict[str, list[str]] = {
         "scenario_validation", "decision_gating",
         "contradiction_detector", "trade_sizing",
     ],
-    "risk-manager": ["position_size_calculator", "risk_evaluation"],
+    "risk-manager": ["position_size_calculator", "portfolio_risk_evaluation", "portfolio_stress_test"],
     "execution-manager": ["market_snapshot"],
     "strategy-designer": [
         "indicator_bundle", "market_regime_detector", "technical_scoring",
@@ -198,9 +198,24 @@ async def build_toolkit(
         # the real -0.000119).  The LLM still chooses *when* to call these
         # tools and provides qualitative args (trend, momentum, decision_side),
         # but the numerical market facts come from the snapshot.
+        # DM-5: Pre-inject aligned_sources for decision_gating
+        if tool_id == "decision_gating" and analysis_outputs:
+            from app.services.agentscope.decision_helpers import (
+                compute_deterministic_score,
+                count_aligned_sources,
+            )
+            _det_score = compute_deterministic_score(analysis_outputs or {})
+            _direction = "bullish" if _det_score > 0 else ("bearish" if _det_score < 0 else "neutral")
+            preset["aligned_sources"] = count_aligned_sources(analysis_outputs or {}, _direction)
+
         if snapshot and tool_id == "contradiction_detector":
             preset["macd_diff"] = snapshot.get("macd_diff", 0.0)
             preset["atr"] = snapshot.get("atr", 0.001)
+            # DM-6: Derive trend/momentum deterministically from snapshot
+            from app.services.agentscope.decision_helpers import derive_trend_momentum
+            _trend, _momentum = derive_trend_momentum(snapshot)
+            preset["trend"] = _trend
+            preset["momentum"] = _momentum
         elif snapshot and tool_id == "trade_sizing":
             preset["price"] = snapshot.get("last_price", 0.0)
             preset["atr"] = snapshot.get("atr", 0.0)

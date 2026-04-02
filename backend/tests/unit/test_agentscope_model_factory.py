@@ -6,10 +6,10 @@ from app.services.agentscope.model_factory import build_model, _ensure_v1
 @patch("app.services.agentscope.model_factory.OllamaChatModel")
 def test_build_ollama_local_model(mock_cls):
     mock_cls.return_value = MagicMock()
-    build_model(provider="ollama", model_name="llama3.1", base_url="http://localhost:11434", api_key="")
+    build_model(provider="ollama", model_name="deepseek-v3.2", base_url="http://localhost:11434", api_key="")
     mock_cls.assert_called_once()
     call_kwargs = mock_cls.call_args[1]
-    assert call_kwargs["model_name"] == "llama3.1"
+    assert call_kwargs["model_name"] == "deepseek-v3.2"
     assert call_kwargs["host"] == "http://localhost:11434"
     assert call_kwargs["stream"] is False
     assert call_kwargs["options"]["temperature"] == 0.0

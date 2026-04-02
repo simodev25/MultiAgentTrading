@@ -133,7 +133,7 @@ All configuration is done via environment variables. See [`backend/.env.example`
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `LLM_PROVIDER` | LLM backend (`ollama`, `openai`, `mistral`) | `ollama` |
-| `OLLAMA_MODEL` | Model name for Ollama | `llama3.1` |
+| `OLLAMA_MODEL` | Model name for Ollama | `deepseek-v3.2` |
 | `DECISION_MODE` | Trading decision threshold (`conservative`, `balanced`, `permissive`) | `balanced` |
 | `ALLOW_LIVE_TRADING` | Enable real broker execution | `false` |
 | `ENABLE_PAPER_EXECUTION` | Enable paper trading | `true` |

@@ -10,14 +10,16 @@ import {
   Terminal,
   PanelLeftClose,
   PanelLeftOpen,
+  ShieldCheck,
 } from 'lucide-react';
 
 const navItems = [
-  { to: '/', label: 'TERMINAL', icon: Terminal, node: '01' },
-  { to: '/orders', label: 'ORDRES', icon: Receipt, node: '02' },
-  { to: '/backtests', label: 'BACKTESTS', icon: FlaskConical, node: '03' },
-  { to: '/strategies', label: 'STRATEGIES', icon: Cpu, node: '04' },
-  { to: '/connectors', label: 'SYSTEM_CONFIG', icon: Settings, node: '05' },
+  { to: '/', label: 'PORTFOLIO', icon: ShieldCheck, node: '01' },
+  { to: '/terminal', label: 'TERMINAL', icon: Terminal, node: '02' },
+  { to: '/orders', label: 'ORDRES', icon: Receipt, node: '03' },
+  { to: '/backtests', label: 'BACKTESTS', icon: FlaskConical, node: '04' },
+  { to: '/strategies', label: 'STRATEGIES', icon: Cpu, node: '05' },
+  { to: '/connectors', label: 'SYSTEM_CONFIG', icon: Settings, node: '06' },
 ];
 
 export function Layout({ children }: { children: React.ReactNode }) {
@@ -199,7 +201,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
             </span>
           </div>
           <span className="text-[8px] text-text-dim tracking-[0.14em] uppercase">
-            TAURIC_MARKETS // MULTI_AGENT_PLATFORM
+            TAURIC_MARKETS // MULTI_AGENT_PLATFORM // v2.0.0
           </span>
         </footer>
       </div>

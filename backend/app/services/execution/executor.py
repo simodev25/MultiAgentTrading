@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.models.execution_order import ExecutionOrder
+from app.services.execution.preflight import ExecutionStatus
 from app.services.trading.account_selector import MetaApiAccountSelector
 from app.services.trading.metaapi_client import MetaApiClient
 
@@ -236,7 +237,7 @@ class ExecutionService:
             volume=volume,
             request_payload=request_payload,
             response_payload={},
-            status='created',
+            status=ExecutionStatus.BLOCKED.value,  # initial; updated on completion
         )
         db.add(order)
         db.flush()
@@ -244,18 +245,18 @@ class ExecutionService:
         if normalized_mode == 'simulation':
             response = self._normalized_result(
                 {'simulated': True, 'fill_price': None, 'message': 'Simulation order accepted'},
-                status='simulated',
+                status=ExecutionStatus.SIMULATED.value,
                 executed=False,
                 reason='Simulation mode: order not sent to broker.',
             )
             response['idempotency_key'] = idempotency_key
-            order.status = 'simulated'
+            order.status = ExecutionStatus.SIMULATED.value
             order.response_payload = response
             self._safe_commit(db, order, 'simulation')
             return response
 
         if normalized_mode == 'paper' and not self.settings.enable_paper_execution:
-            order.status = 'blocked'
+            order.status = ExecutionStatus.BLOCKED.value
             order.error = 'Paper trading disabled by configuration.'
             response = self._normalized_result({'error': order.error}, status='blocked', executed=False, reason=order.error)
             response['idempotency_key'] = idempotency_key
@@ -264,7 +265,7 @@ class ExecutionService:
             return response
 
         if normalized_mode == 'live' and not self.settings.allow_live_trading:
-            order.status = 'blocked'
+            order.status = ExecutionStatus.BLOCKED.value
             order.error = 'Live trading is disabled by default.'
             response = self._normalized_result({'error': order.error}, status='blocked', executed=False, reason=order.error)
             response['idempotency_key'] = idempotency_key
@@ -288,12 +289,12 @@ class ExecutionService:
                 safe_metaapi_response['account_label'] = selected_account.label if selected_account else 'default'
                 response = self._normalized_result(
                     safe_metaapi_response,
-                    status='submitted',
+                    status=ExecutionStatus.EXECUTED.value,
                     executed=True,
                     reason='Order submitted to broker.',
                 )
                 response['idempotency_key'] = idempotency_key
-                order.status = 'submitted'
+                order.status = ExecutionStatus.EXECUTED.value
                 order.response_payload = response
                 self._safe_commit(db, order, 'broker_submitted')
                 return response
@@ -306,17 +307,17 @@ class ExecutionService:
                 )
                 response = self._normalized_result(
                     fallback,
-                    status='paper-simulated',
+                    status=ExecutionStatus.SIMULATED.value,
                     executed=False,
                     reason=fallback_reason,
                 )
                 response['idempotency_key'] = idempotency_key
-                order.status = 'paper-simulated'
+                order.status = ExecutionStatus.SIMULATED.value
                 order.response_payload = response
                 self._safe_commit(db, order, 'paper_simulated')
                 return response
 
-            order.status = 'failed'
+            order.status = ExecutionStatus.FAILED.value
             order.error = metaapi_response.get('reason', 'MetaApi execution failed')
             error_class = self._classify_execution_error(order.error)
             response = self._normalized_result(
@@ -327,7 +328,7 @@ class ExecutionService:
                     'retryable': self._is_retryable_error_class(error_class),
                     'idempotency_key': idempotency_key,
                 },
-                status='failed',
+                status=ExecutionStatus.FAILED.value,
                 executed=False,
                 reason=order.error,
             )
