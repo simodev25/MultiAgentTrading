@@ -16,7 +16,7 @@ from app.schemas.strategy import StrategyOut, StrategyGenerateRequest, StrategyE
 from app.services.strategy.template_catalog import (
     EXECUTABLE_STRATEGY_TEMPLATES,
     build_strategy_system_prompt,
-    sanitize_executable_strategy_params,
+    sanitize_strategy_params_for_template,
 )
 from app.services.strategy.signal_engine import compute_strategy_overlays_and_signals
 
@@ -209,7 +209,7 @@ async def generate_strategy(
                 {'role': 'assistant', 'content': f'Fallback: {template} with default params'},
             ]
 
-    params, warnings = sanitize_executable_strategy_params(template, params)
+    params, warnings = sanitize_strategy_params_for_template(template, params)
     if warnings:
         logger.info('strategy_params_sanitized template=%s warnings=%s', template, warnings)
 
@@ -317,7 +317,10 @@ async def edit_strategy(
         new_template = llm_result.get('template', strategy.template)
         if new_template in VALID_TEMPLATES:
             strategy.template = new_template
-        strategy.params, warnings = sanitize_executable_strategy_params(strategy.template, llm_result.get('params', strategy.params))
+        strategy.params, warnings = sanitize_strategy_params_for_template(
+            strategy.template,
+            llm_result.get('params', strategy.params),
+        )
         if warnings:
             logger.info('strategy_params_sanitized id=%s template=%s warnings=%s', strategy.strategy_id, strategy.template, warnings)
         if llm_result.get('name'):

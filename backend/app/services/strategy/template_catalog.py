@@ -111,3 +111,13 @@ def sanitize_executable_strategy_params(template: str, params: dict[str, Any] | 
         sanitized[key] = int(clamped) if isinstance(lo, int) and isinstance(hi, int) else round(clamped, 2)
 
     return sanitized, warnings
+
+
+def sanitize_strategy_params_for_template(template: str, params: dict[str, Any] | None) -> tuple[dict[str, Any], list[str]]:
+    """Sanitize params for executable templates and preserve legacy templates unchanged."""
+    if template in EXECUTABLE_STRATEGY_TEMPLATES:
+        return sanitize_executable_strategy_params(template, params)
+
+    preserved = dict(params or {})
+    warnings = [f'preserved params for legacy template {template}']
+    return preserved, warnings
