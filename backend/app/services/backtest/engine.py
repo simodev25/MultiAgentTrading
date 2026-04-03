@@ -169,28 +169,59 @@ class BacktestEngine:
     def _signal_series_rsi_mean_reversion(self, frame: pd.DataFrame, params: dict | None = None) -> pd.Series:
         """RSI mean reversion: buy oversold, sell overbought."""
         p = params or {}
+        rsi_period = p.get('rsi_period', 14)
         oversold = p.get('oversold', 30)
         overbought = p.get('overbought', 70)
 
-        signal = np.where(frame['rsi'] < oversold, 1, 0)
-        signal = np.where(frame['rsi'] > overbought, -1, signal)
+        rsi = RSIIndicator(close=frame['Close'], window=rsi_period).rsi()
+        signal = np.where(rsi < oversold, 1, 0)
+        signal = np.where(rsi > overbought, -1, signal)
         return pd.Series(signal, index=frame.index, dtype='int64')
 
     def _signal_series_bollinger_breakout(self, frame: pd.DataFrame, params: dict | None = None) -> pd.Series:
         """Bollinger Band breakout: buy on lower band touch, sell on upper band touch."""
-        signal = np.where(frame['Close'] <= frame['bb_lower'], 1, 0)
-        signal = np.where(frame['Close'] >= frame['bb_upper'], -1, signal)
+        p = params or {}
+        bb_period = p.get('bb_period', 20)
+        bb_std = p.get('bb_std', 2.0)
+
+        bands = BollingerBands(close=frame['Close'], window=bb_period, window_dev=bb_std)
+        upper = bands.bollinger_hband()
+        lower = bands.bollinger_lband()
+
+        signal = np.where(frame['Close'] <= lower, 1, 0)
+        signal = np.where(frame['Close'] >= upper, -1, signal)
         return pd.Series(signal, index=frame.index, dtype='int64')
 
     def _signal_series_macd_divergence(self, frame: pd.DataFrame, params: dict | None = None) -> pd.Series:
         """MACD signal line crossover."""
-        signal = np.where(
-            (frame['macd'] > frame['macd_signal']) & (frame['macd_diff'] > 0), 1, 0
-        )
-        signal = np.where(
-            (frame['macd'] < frame['macd_signal']) & (frame['macd_diff'] < 0), -1, signal
-        )
+        p = params or {}
+        fast = p.get('fast', 12)
+        slow = p.get('slow', 26)
+        signal_period = p.get('signal', 9)
+
+        macd = MACD(close=frame['Close'], window_fast=fast, window_slow=slow, window_sign=signal_period)
+        macd_line = macd.macd()
+        signal_line = macd.macd_signal()
+
+        signal = np.zeros(len(frame), dtype=int)
+        for i in range(1, len(frame)):
+            if pd.isna(macd_line.iloc[i]) or pd.isna(signal_line.iloc[i]):
+                continue
+            if macd_line.iloc[i] > signal_line.iloc[i] and macd_line.iloc[i - 1] <= signal_line.iloc[i - 1]:
+                signal[i] = 1
+            elif macd_line.iloc[i] < signal_line.iloc[i] and macd_line.iloc[i - 1] >= signal_line.iloc[i - 1]:
+                signal[i] = -1
         return pd.Series(signal, index=frame.index, dtype='int64')
+
+    @staticmethod
+    def _resolve_strategy_params(
+        agent_config: dict | None = None,
+        strategy_params: dict | None = None,
+    ) -> dict | None:
+        """Resolve the effective strategy params for a backtest run."""
+        if strategy_params is not None:
+            return strategy_params
+        return (agent_config or {}).get('strategy_params')
 
     def _generate_signals(
         self,
@@ -200,7 +231,10 @@ class BacktestEngine:
         strategy_params: dict | None = None,
     ) -> pd.Series:
         """Dispatch to the appropriate signal generator."""
-        params = strategy_params if strategy_params is not None else (agent_config or {}).get('strategy_params')
+        params = self._resolve_strategy_params(
+            agent_config=agent_config,
+            strategy_params=strategy_params,
+        )
         if strategy == 'ema_rsi':
             return self._signal_series_ema_rsi(frame)
         elif strategy == 'ema_crossover':
