@@ -14,7 +14,7 @@ from ta.volatility import AverageTrueRange, BollingerBands
 
 from app.core.config import get_settings
 from app.services.market.news_provider import MarketProvider
-from app.services.strategy.signal_engine import get_supported_strategy_templates
+from app.services.strategy.signal_engine import compute_strategy_overlays_and_signals, get_supported_strategy_templates
 
 logger = logging.getLogger(__name__)
 
@@ -152,22 +152,69 @@ class BacktestEngine:
         signal = np.where((frame['ema_fast'] < frame['ema_slow']) & (frame['rsi'] > 30), -1, signal)
         return pd.Series(signal, index=frame.index, dtype='int64')
 
+    @staticmethod
+    def _frame_to_strategy_candles(frame: pd.DataFrame) -> tuple[list[dict[str, Any]], list[str]]:
+        candles: list[dict[str, Any]] = []
+        time_keys: list[str] = []
+
+        for ts, row in frame.iterrows():
+            time_key = ts.isoformat() if hasattr(ts, 'isoformat') else str(ts)
+            close_value = float(row['Close'])
+            open_value = float(row.get('Open', close_value))
+            high_value = float(row.get('High', max(open_value, close_value)))
+            low_value = float(row.get('Low', min(open_value, close_value)))
+            candles.append(
+                {
+                    'time': time_key,
+                    'open': open_value,
+                    'high': high_value,
+                    'low': low_value,
+                    'close': close_value,
+                    'volume': float(row.get('Volume', 0.0)),
+                }
+            )
+            time_keys.append(time_key)
+
+        return candles, time_keys
+
+    @staticmethod
+    def _signal_events_to_series(
+        frame: pd.DataFrame,
+        time_keys: list[str],
+        signals: list[dict[str, Any]],
+    ) -> pd.Series:
+        signal_by_time = {
+            str(signal['time']): 1 if signal['side'] == 'BUY' else -1
+            for signal in signals
+        }
+
+        values: list[int] = []
+        current = 0
+        for time_key in time_keys:
+            event_signal = signal_by_time.get(time_key)
+            if event_signal is not None:
+                current = event_signal
+            values.append(current)
+
+        return pd.Series(values, index=frame.index, dtype='int64')
+
+    def _signal_series_for_strategy(
+        self,
+        frame: pd.DataFrame,
+        strategy: str,
+        strategy_params: dict | None = None,
+    ) -> pd.Series:
+        candles, time_keys = self._frame_to_strategy_candles(frame)
+        result = compute_strategy_overlays_and_signals(candles, strategy, strategy_params or {})
+        return self._signal_events_to_series(frame, time_keys, result['signals'])
+
     def _signal_series_ema_crossover(self, frame: pd.DataFrame, params: dict | None = None) -> pd.Series:
-        """EMA crossover with configurable periods and RSI filter."""
-        p = params or {}
-        fast_period = p.get('ema_fast', 9)
-        slow_period = p.get('ema_slow', 21)
-        rsi_filter = p.get('rsi_filter', 30)
-
-        fast = frame['Close'].ewm(span=fast_period, adjust=False).mean()
-        slow = frame['Close'].ewm(span=slow_period, adjust=False).mean()
-
-        signal = np.where((fast > slow) & (frame['rsi'] < (100 - rsi_filter)), 1, 0)
-        signal = np.where((fast < slow) & (frame['rsi'] > rsi_filter), -1, signal)
-        return pd.Series(signal, index=frame.index, dtype='int64')
+        return self._signal_series_for_strategy(frame, 'ema_crossover', params)
 
     def _signal_series_rsi_mean_reversion(self, frame: pd.DataFrame, params: dict | None = None) -> pd.Series:
-        """RSI mean reversion: buy oversold, sell overbought."""
+        if {'Open', 'High', 'Low'}.issubset(frame.columns):
+            return self._signal_series_for_strategy(frame, 'rsi_mean_reversion', params)
+
         p = params or {}
         rsi_period = p.get('rsi_period', 14)
         oversold = p.get('oversold', 30)
@@ -179,7 +226,9 @@ class BacktestEngine:
         return pd.Series(signal, index=frame.index, dtype='int64')
 
     def _signal_series_bollinger_breakout(self, frame: pd.DataFrame, params: dict | None = None) -> pd.Series:
-        """Bollinger Band breakout: buy on lower band touch, sell on upper band touch."""
+        if {'Open', 'High', 'Low'}.issubset(frame.columns):
+            return self._signal_series_for_strategy(frame, 'bollinger_breakout', params)
+
         p = params or {}
         bb_period = p.get('bb_period', 20)
         bb_std = p.get('bb_std', 2.0)
@@ -193,7 +242,9 @@ class BacktestEngine:
         return pd.Series(signal, index=frame.index, dtype='int64')
 
     def _signal_series_macd_divergence(self, frame: pd.DataFrame, params: dict | None = None) -> pd.Series:
-        """MACD signal line crossover."""
+        if {'Open', 'High', 'Low'}.issubset(frame.columns):
+            return self._signal_series_for_strategy(frame, 'macd_divergence', params)
+
         p = params or {}
         fast = p.get('fast', 12)
         slow = p.get('slow', 26)
