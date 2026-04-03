@@ -13,7 +13,10 @@ import numpy as np
 import pandas as pd
 from fastmcp import FastMCP
 
-from app.services.strategy.template_catalog import EXECUTABLE_STRATEGY_TEMPLATES
+from app.services.strategy.template_catalog import (
+    EXECUTABLE_STRATEGY_TEMPLATES,
+    sanitize_executable_strategy_params,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1603,14 +1606,6 @@ def strategy_templates_info() -> dict:
     return {"templates": STRATEGY_TEMPLATES}
 
 
-PARAM_RANGES: dict[str, dict[str, tuple]] = {
-    "ema_crossover": {"ema_fast": (5, 50), "ema_slow": (20, 200), "rsi_filter": (15, 50)},
-    "rsi_mean_reversion": {"rsi_period": (5, 30), "oversold": (10, 40), "overbought": (60, 90)},
-    "bollinger_breakout": {"bb_period": (5, 50), "bb_std": (0.5, 4.0)},
-    "macd_divergence": {"fast": (4, 20), "slow": (15, 50), "signal": (3, 15)},
-}
-
-
 def strategy_builder(
     template: str = "ema_crossover",
     name: str = "",
@@ -1627,24 +1622,7 @@ def strategy_builder(
 
     params = params or {}
     tmpl = STRATEGY_TEMPLATES[template]
-
-    # Validate and clamp params to allowed ranges
-    warnings: list[str] = []
-    validated_params = dict(params)
-    ranges = PARAM_RANGES.get(template, {})
-    for key, (lo, hi) in ranges.items():
-        if key in validated_params:
-            try:
-                val = float(validated_params[key])
-                if val < lo:
-                    warnings.append(f"{key}={val} below min {lo}, clamped")
-                    val = lo
-                elif val > hi:
-                    warnings.append(f"{key}={val} above max {hi}, clamped")
-                    val = hi
-                validated_params[key] = int(val) if isinstance(lo, int) and isinstance(hi, int) else round(val, 2)
-            except (TypeError, ValueError):
-                pass
+    validated_params, warnings = sanitize_executable_strategy_params(template, params)
 
     return {
         "status": "ok",

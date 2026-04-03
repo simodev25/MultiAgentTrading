@@ -13,51 +13,19 @@ from app.db.models.strategy import Strategy
 from app.db.models.user import User
 from app.db.session import get_db
 from app.schemas.strategy import StrategyOut, StrategyGenerateRequest, StrategyEditRequest, StrategyPromoteRequest, StrategyStartMonitoringRequest
+from app.services.strategy.template_catalog import (
+    EXECUTABLE_STRATEGY_TEMPLATES,
+    build_strategy_system_prompt,
+    sanitize_executable_strategy_params,
+)
 from app.services.strategy.signal_engine import compute_strategy_overlays_and_signals
 
 router = APIRouter(prefix='/strategies', tags=['strategies'])
 logger = logging.getLogger(__name__)
 
-from app.services.mcp.trading_server import STRATEGY_TEMPLATES
-VALID_TEMPLATES = list(STRATEGY_TEMPLATES.keys())
+VALID_TEMPLATES = list(EXECUTABLE_STRATEGY_TEMPLATES.keys())
 
-STRATEGY_SYSTEM_PROMPT = """You are a quantitative trading strategy designer. You create trading strategies based on user descriptions.
-
-Available strategy templates and their configurable parameters:
-
-1. ema_crossover: EMA crossover with RSI filter
-   - ema_fast: int (5-20, default 9)
-   - ema_slow: int (20-100, default 21)
-   - rsi_filter: int (25-45, default 30)
-
-2. rsi_mean_reversion: RSI mean reversion (buy oversold, sell overbought)
-   - rsi_period: int (7-21, default 14)
-   - oversold: int (15-35, default 30)
-   - overbought: int (65-85, default 70)
-
-3. bollinger_breakout: Bollinger Band breakout
-   - bb_period: int (10-30, default 20)
-   - bb_std: float (1.0-3.0, default 2.0)
-
-4. macd_divergence: MACD signal line crossover
-   - fast: int (6-15, default 12)
-   - slow: int (18-30, default 26)
-   - signal: int (5-12, default 9)
-
-Available symbols: EURUSD.PRO, GBPUSD.PRO, USDJPY.PRO, AUDUSD.PRO, USDCAD.PRO, NZDUSD.PRO, USDCHF.PRO, EURGBP.PRO, EURJPY.PRO, GBPJPY.PRO, BTCUSD, ETHUSD, ADAUSD, XRPUSD, SOLUSD, DOTUSD, LINKUSD, AVAXUSD, MATICUSD, UNIUSD, AAVEUSD, LTCUSD, ATOMUSD
-Available timeframes: M5, M15, H1, H4, D1
-
-Choose the symbol and timeframe that best match the user's description. If unspecified, default to EURUSD.PRO and H1.
-
-RESPOND ONLY WITH VALID JSON (no markdown, no explanation):
-{
-  "template": "<one of the 4 template names>",
-  "name": "<short strategy name using underscores, max 30 chars>",
-  "symbol": "<symbol>",
-  "timeframe": "<timeframe>",
-  "params": { <template-specific params> },
-  "description": "<one sentence describing the strategy logic>"
-}"""
+STRATEGY_SYSTEM_PROMPT = build_strategy_system_prompt()
 
 
 async def _llm_generate(prompt: str) -> dict | None:
@@ -241,6 +209,10 @@ async def generate_strategy(
                 {'role': 'assistant', 'content': f'Fallback: {template} with default params'},
             ]
 
+    params, warnings = sanitize_executable_strategy_params(template, params)
+    if warnings:
+        logger.info('strategy_params_sanitized template=%s warnings=%s', template, warnings)
+
     strategy = Strategy(
         strategy_id=_next_strategy_id(db),
         name=name or f'{template}_{random.randint(100, 999)}',
@@ -345,7 +317,9 @@ async def edit_strategy(
         new_template = llm_result.get('template', strategy.template)
         if new_template in VALID_TEMPLATES:
             strategy.template = new_template
-        strategy.params = llm_result.get('params', strategy.params)
+        strategy.params, warnings = sanitize_executable_strategy_params(strategy.template, llm_result.get('params', strategy.params))
+        if warnings:
+            logger.info('strategy_params_sanitized id=%s template=%s warnings=%s', strategy.strategy_id, strategy.template, warnings)
         if llm_result.get('name'):
             strategy.name = llm_result['name']
         if llm_result.get('description'):

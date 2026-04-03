@@ -4,7 +4,11 @@ from app.services.strategy.signal_engine import (
     compute_strategy_overlays_and_signals,
     get_supported_strategy_templates,
 )
-from app.services.strategy.template_catalog import EXECUTABLE_STRATEGY_TEMPLATES
+from app.services.strategy.template_catalog import (
+    EXECUTABLE_STRATEGY_TEMPLATES,
+    build_strategy_system_prompt,
+    sanitize_executable_strategy_params,
+)
 
 
 def _candles(close_values: list[float]) -> list[dict]:
@@ -39,6 +43,29 @@ def test_executable_template_params_match_the_engine_contract() -> None:
     assert set(EXECUTABLE_STRATEGY_TEMPLATES['rsi_mean_reversion'].params) == {'rsi_period', 'oversold', 'overbought'}
     assert set(EXECUTABLE_STRATEGY_TEMPLATES['bollinger_breakout'].params) == {'bb_period', 'bb_std'}
     assert set(EXECUTABLE_STRATEGY_TEMPLATES['macd_divergence'].params) == {'fast', 'slow', 'signal'}
+
+
+def test_strategy_system_prompt_is_derived_from_executable_catalog() -> None:
+    prompt = build_strategy_system_prompt()
+
+    assert '5-50' in prompt
+    assert '20-200' in prompt
+    assert 'rsi_period: int (5-30)' in prompt
+    assert 'bb_period: int (5-50)' in prompt
+    assert 'bb_std: float (0.5-4.0)' in prompt
+    assert 'atr_multiplier' not in prompt
+    assert 'volume_filter' not in prompt
+
+
+def test_sanitize_executable_strategy_params_drops_unknown_keys() -> None:
+    params, warnings = sanitize_executable_strategy_params(
+        'bollinger_breakout',
+        {'bb_period': 20, 'bb_std': 2.0, 'volume_filter': True, 'noise': 'ignored'},
+    )
+
+    assert params == {'bb_period': 20, 'bb_std': 2.0}
+    assert any('volume_filter' in warning for warning in warnings)
+    assert any('noise' in warning for warning in warnings)
 
 
 @pytest.mark.parametrize(
@@ -90,7 +117,8 @@ def test_trend_and_breakout_templates_emit_expected_signal_direction(
 ) -> None:
     result = compute_strategy_overlays_and_signals(_candles(close_values), template, params)
 
-    assert expected_side in _signal_sides(result)
+    assert len(result['signals']) == 1
+    assert _signal_sides(result) == [expected_side]
 
 
 def test_rsi_mean_reversion_emits_both_sides_when_price_stretches_and_reverts() -> None:
