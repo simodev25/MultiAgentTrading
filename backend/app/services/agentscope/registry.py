@@ -645,6 +645,7 @@ class AgentScopeRegistry:
     def _write_debug_trace(
         self, run, pair: str, timeframe: str, risk_percent: float,
         market_data: dict, analysis_outputs: dict, elapsed: float,
+        decision_mode: str = "balanced",
     ) -> None:
         """Write debug trace JSON file compatible with schema v1 format."""
         from app.core.config import get_settings
@@ -762,11 +763,30 @@ class AgentScopeRegistry:
             # Resolve effective trading params for debug trace
             _trace_trading_params = {}
             try:
-                from app.services.config.trading_config import get_effective_gating_policy as _tgp, get_effective_sizing as _ts
-                _tg = _tgp(base_vars.get("decision_mode", "balanced"))
+                from app.services.config.trading_config import get_effective_gating_policy as _tgp, get_effective_sizing as _ts, get_effective_risk_limits as _trl
+                _tg = _tgp(decision_mode)
+                _run_mode = str(getattr(run, "mode", "simulation") or "simulation").strip().lower()
+                _tl = _trl(_run_mode)
                 _trace_trading_params = {
-                    "decision_mode": base_vars.get("decision_mode", "balanced"),
-                    "gating": {"min_combined_score": _tg.min_combined_score, "min_confidence": _tg.min_confidence, "min_aligned_sources": _tg.min_aligned_sources},
+                    "decision_mode": decision_mode,
+                    "execution_mode": _run_mode,
+                    "gating": {
+                        "min_combined_score": _tg.min_combined_score,
+                        "min_confidence": _tg.min_confidence,
+                        "min_aligned_sources": _tg.min_aligned_sources,
+                        "allow_technical_single_source_override": _tg.allow_technical_single_source_override,
+                        "block_major_contradiction": _tg.block_major_contradiction,
+                    },
+                    "risk_limits": {
+                        "max_risk_per_trade_pct": _tl.max_risk_per_trade_pct,
+                        "max_daily_loss_pct": _tl.max_daily_loss_pct,
+                        "max_weekly_loss_pct": _tl.max_weekly_loss_pct,
+                        "max_open_risk_pct": _tl.max_open_risk_pct,
+                        "max_positions": _tl.max_positions,
+                        "max_positions_per_symbol": _tl.max_positions_per_symbol,
+                        "min_free_margin_pct": _tl.min_free_margin_pct,
+                        "max_currency_exposure_pct": _tl.max_currency_exposure_pct,
+                    },
                     "sizing": _ts(),
                 }
             except Exception:
@@ -1756,9 +1776,16 @@ class AgentScopeRegistry:
                 pass
 
             # Determine real execution status from agent outputs
+            # Check both metadata (nested) and top-level (flat) for compatibility
             exec_meta = exec_out.get("metadata", {}) if isinstance(exec_out.get("metadata"), dict) else {}
             risk_meta = risk_out.get("metadata", {}) if isinstance(risk_out.get("metadata"), dict) else {}
-            risk_approved = risk_meta.get("approved", risk_meta.get("accepted", False))
+            risk_approved = (
+                risk_meta.get("approved")
+                or risk_meta.get("accepted")
+                or risk_out.get("approved")
+                or risk_out.get("accepted")
+                or False
+            )
             run_mode = str(getattr(run, "mode", "simulation") or "simulation").strip().lower()
 
             if trade_decision == "HOLD":
@@ -1766,7 +1793,8 @@ class AgentScopeRegistry:
                 execution_reason = "HOLD — no trade requested"
             elif not risk_approved:
                 execution_status = "refused"
-                execution_reason = f"Risk-manager rejected: {risk_meta.get('risk_flags', risk_meta.get('reasons', []))}"
+                _flags = risk_meta.get('risk_flags') or risk_meta.get('reasons') or risk_out.get('risk_flags') or risk_out.get('reasons') or []
+                execution_reason = f"Risk-manager rejected: {_flags}"
             elif exec_meta.get("status"):
                 execution_status = str(exec_meta["status"]).strip().lower()
                 execution_reason = exec_meta.get("reasoning", exec_meta.get("reason", ""))
@@ -1812,19 +1840,27 @@ class AgentScopeRegistry:
             try:
                 from app.services.config.trading_config import get_effective_gating_policy, get_effective_risk_limits, get_effective_sizing
                 _eff_gating = get_effective_gating_policy(_resolved_decision_mode)
-                _eff_limits = get_effective_risk_limits(str(getattr(run, "mode", "simulation")))
+                _run_mode_str = str(getattr(run, "mode", "simulation") or "simulation").strip().lower()
+                _eff_limits = get_effective_risk_limits(_run_mode_str)
                 _effective_trading_params = {
                     "decision_mode": _resolved_decision_mode,
+                    "execution_mode": _run_mode_str,
                     "gating": {
                         "min_combined_score": _eff_gating.min_combined_score,
                         "min_confidence": _eff_gating.min_confidence,
                         "min_aligned_sources": _eff_gating.min_aligned_sources,
+                        "allow_technical_single_source_override": _eff_gating.allow_technical_single_source_override,
                         "block_major_contradiction": _eff_gating.block_major_contradiction,
                     },
                     "risk_limits": {
                         "max_risk_per_trade_pct": _eff_limits.max_risk_per_trade_pct,
                         "max_daily_loss_pct": _eff_limits.max_daily_loss_pct,
+                        "max_weekly_loss_pct": _eff_limits.max_weekly_loss_pct,
+                        "max_open_risk_pct": _eff_limits.max_open_risk_pct,
                         "max_positions": _eff_limits.max_positions,
+                        "max_positions_per_symbol": _eff_limits.max_positions_per_symbol,
+                        "min_free_margin_pct": _eff_limits.min_free_margin_pct,
+                        "max_currency_exposure_pct": _eff_limits.max_currency_exposure_pct,
                     },
                     "sizing": get_effective_sizing(),
                 }
@@ -1863,7 +1899,8 @@ class AgentScopeRegistry:
 
             # ── Debug trace JSON file ──
             self._write_debug_trace(run, pair, timeframe, risk_percent,
-                                    market_data, analysis_outputs, elapsed)
+                                    market_data, analysis_outputs, elapsed,
+                                    decision_mode=_resolved_decision_mode)
 
             # Batch-commit all pending agent steps + final run update in one DB round-trip
             self._flush_pending_steps(db)
