@@ -192,9 +192,15 @@ class BacktestEngine:
         )
         return pd.Series(signal, index=frame.index, dtype='int64')
 
-    def _generate_signals(self, frame: pd.DataFrame, strategy: str, agent_config: dict | None = None) -> pd.Series:
+    def _generate_signals(
+        self,
+        frame: pd.DataFrame,
+        strategy: str,
+        agent_config: dict | None = None,
+        strategy_params: dict | None = None,
+    ) -> pd.Series:
         """Dispatch to the appropriate signal generator."""
-        params = (agent_config or {}).get('strategy_params')
+        params = strategy_params if strategy_params is not None else (agent_config or {}).get('strategy_params')
         if strategy == 'ema_rsi':
             return self._signal_series_ema_rsi(frame)
         elif strategy == 'ema_crossover':
@@ -461,6 +467,7 @@ class BacktestEngine:
         db: Session | None = None,
         llm_enabled: bool = False,
         agent_config: dict | None = None,
+        strategy_params: dict | None = None,
         run_id: int | None = None,
     ) -> BacktestResult:
         normalized_strategy = self.normalize_strategy(strategy)
@@ -505,7 +512,12 @@ class BacktestEngine:
         self._update_progress(db, run_id, 20)
 
         # ── Phase 3: Strategy signals (20→40%)
-        signal_series = self._generate_signals(frame, normalized_strategy, agent_config)
+        signal_series = self._generate_signals(
+            frame,
+            normalized_strategy,
+            agent_config,
+            strategy_params=strategy_params,
+        )
         self._update_progress(db, run_id, 40)
 
         # ── Phase 4: Agent validation (40→90%) — only if llm_enabled

@@ -36,6 +36,7 @@ def execute(strategy_db_id: int) -> None:
                 start_date, end_date,
                 strategy=strategy.template,
                 db=db,
+                strategy_params=strategy.params or {},
                 run_id=None,
             )
 
@@ -59,6 +60,8 @@ def execute(strategy_db_id: int) -> None:
                 'max_drawdown': round(max_dd, 2),
                 'total_return': round(total_return, 2),
                 'trades': metrics.get('total_trades', 0),
+                'validated_template': strategy.template,
+                'validated_params': strategy.params or {},
             }
             strategy.status = 'VALIDATED' if score >= 50 else 'REJECTED'
             db.commit()
