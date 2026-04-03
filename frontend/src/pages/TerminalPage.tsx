@@ -590,7 +590,7 @@ export function TerminalPage() {
                 const decision = asRecord(run.decision);
                 const confidence = decision?.confidence != null ? `${Math.round(Number(decision.confidence) * 100)}%` : '--';
                 return (
-                  <tr key={run.id}>
+                  <tr key={run.id} className={run.status === 'cancelled' ? 'opacity-40' : ''}>
                     <td className="font-mono text-text-muted">{run.id}</td>
                     <td>
                       {isStrategy ? (
@@ -637,10 +637,27 @@ export function TerminalPage() {
                     <td className="font-mono">{runElapsed(run, nowMs)}</td>
                     <td>{formatRunDecisionSummary(run)}</td>
                     <td className="font-mono">{confidence}</td>
-                    <td>
+                    <td className="flex items-center gap-1">
                       <Link to={`/runs/${run.id}`} className="btn-ghost btn-small inline-flex items-center gap-1">
                         Detail
                       </Link>
+                      {!['completed', 'failed', 'cancelled'].includes(run.status) && <button
+                        type="button"
+                        className="btn-ghost btn-small text-red-400 hover:text-red-300 hover:bg-red-500/10"
+                        title="Cancel this run"
+                        onClick={async () => {
+                          try {
+                            console.log('Cancelling run', run.id, 'token:', token ? 'present' : 'MISSING');
+                            await api.cancelRun(token || '', run.id);
+                            console.log('Cancel success, refreshing');
+                            loadRuns();
+                          } catch (err) {
+                            console.error('Cancel failed:', err);
+                          }
+                        }}
+                      >
+                        ✕
+                      </button>}
                     </td>
                   </tr>
                 );

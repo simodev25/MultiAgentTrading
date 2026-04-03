@@ -475,9 +475,14 @@ async def portfolio_stream_socket(websocket: WebSocket) -> None:
                     ],
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 })
+            except WebSocketDisconnect:
+                raise
             except Exception as exc:
                 logger.warning("Portfolio WS update failed: %s", exc)
-                await websocket.send_json({"type": "error", "message": str(exc)})
+                try:
+                    await websocket.send_json({"type": "error", "message": str(exc)})
+                except Exception:
+                    break
             finally:
                 db.close()
 

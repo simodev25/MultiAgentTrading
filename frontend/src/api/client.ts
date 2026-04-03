@@ -50,6 +50,7 @@ export const api = {
       body: JSON.stringify(payload),
     }, token),
   getRun: (token: string, runId: string) => request(`/runs/${runId}`, {}, token),
+  cancelRun: (token: string, runId: number) => request(`/runs/${runId}/cancel`, { method: 'POST' }, token),
   listOrders: (token: string) => request('/trading/orders', {}, token),
   listConnectors: (token: string) => request('/connectors', {}, token),
   getMarketSymbols: (token: string) => request('/connectors/market-symbols', {}, token),

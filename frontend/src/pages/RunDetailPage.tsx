@@ -846,6 +846,23 @@ export function RunDetailPage() {
           {run.progress != null && run.progress > 0 && run.progress < 100 && !TERMINAL_RUN_STATUSES.has(run.status) && (
             <span className="text-[9px] font-mono text-accent">{run.progress}%</span>
           )}
+          {!['completed', 'failed', 'cancelled'].includes(run.status) && (
+            <button
+              type="button"
+              className="btn-ghost btn-small text-red-400 hover:text-red-300 hover:bg-red-500/10 ml-2"
+              onClick={async () => {
+                try {
+                  await api.cancelRun(token || '', run.id);
+                  const data = (await api.getRun(token || '', String(run.id))) as RunDetail;
+                  setRun(data);
+                } catch (err) {
+                  console.error('Cancel failed:', err);
+                }
+              }}
+            >
+              Cancel run
+            </button>
+          )}
         </div>
 
         {/* Pipeline progress — shows agent-by-agent status */}

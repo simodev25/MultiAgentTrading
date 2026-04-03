@@ -394,6 +394,13 @@ tbody tr:hover {
   border: 1px solid rgba(255, 71, 87, 0.25);
 }
 
+.badge.cancelled {
+  color: #888;
+  background: rgba(136, 136, 136, 0.1);
+  border: 1px solid rgba(136, 136, 136, 0.25);
+  text-decoration: line-through;
+}
+
 .badge.role {
   color: var(--color-accent);
   background: var(--color-accent-glow);

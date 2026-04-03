@@ -114,12 +114,14 @@ async def create_run(
 
     if async_execution:
         try:
-            run_analysis_task.apply_async(
+            _task_result = run_analysis_task.apply_async(
                 args=[run.id, payload.risk_percent, payload.metaapi_account_ref],
                 queue=settings.celery_analysis_queue,
                 ignore_result=True,
             )
             run.status = 'queued'
+            # Store Celery task ID for cancel/revoke
+            run.trace = {**(run.trace or {}), 'celery_task_id': _task_result.id}
             db.commit()
             db.refresh(run)
             return _serialize_run(run, hydrate_runtime=True)
@@ -147,3 +149,41 @@ def get_run(
     if not run:
         raise HTTPException(status_code=404, detail='Run not found')
     return _serialize_run(run, include_steps=True, hydrate_runtime=True)
+
+
+@router.post('/{run_id}/cancel')
+def cancel_run(
+    run_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles(Role.SUPER_ADMIN, Role.ADMIN, Role.TRADER_OPERATOR)),
+) -> dict:
+    """Cancel a running or queued analysis run.
+
+    - If running/queued: revokes the Celery task and marks as cancelled
+    - If completed/failed: marks as cancelled (soft delete from history)
+    """
+    run = db.get(AnalysisRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail='Run not found')
+
+    # Try to revoke Celery task if still running
+    if run.status in ('running', 'queued', 'pending'):
+        try:
+            from app.tasks.celery_app import celery_app
+            trace = run.trace if isinstance(run.trace, dict) else {}
+            task_id = trace.get('celery_task_id')
+            if task_id:
+                celery_app.control.revoke(task_id, terminate=True, signal='SIGTERM')
+                logger.info('Revoked Celery task %s for run %d', task_id, run_id)
+            else:
+                logger.warning('No celery_task_id found for run %d, cannot revoke', run_id)
+        except Exception as exc:
+            logger.warning('Failed to revoke Celery task for run %d: %s', run_id, exc)
+
+    prev_status = run.status
+    run.status = 'cancelled'
+    run.error = f'Cancelled by {user.email} (was {prev_status})'
+    db.commit()
+
+    logger.info('Run %d cancelled by user %s (was %s)', run_id, user.email, prev_status)
+    return {'id': run_id, 'status': 'cancelled', 'previous_status': prev_status}

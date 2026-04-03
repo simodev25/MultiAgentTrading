@@ -759,11 +759,25 @@ class AgentScopeRegistry:
             except Exception:
                 pass
 
+            # Resolve effective trading params for debug trace
+            _trace_trading_params = {}
+            try:
+                from app.services.config.trading_config import get_effective_gating_policy as _tgp, get_effective_sizing as _ts
+                _tg = _tgp(base_vars.get("decision_mode", "balanced"))
+                _trace_trading_params = {
+                    "decision_mode": base_vars.get("decision_mode", "balanced"),
+                    "gating": {"min_combined_score": _tg.min_combined_score, "min_confidence": _tg.min_confidence, "min_aligned_sources": _tg.min_aligned_sources},
+                    "sizing": _ts(),
+                }
+            except Exception:
+                pass
+
             payload = {
                 "schema_version": 2,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "runtime_engine": "agentscope_v1",
-                "config_version": _trace_config_version,
+                "trading_params_version": _trace_config_version,
+                "trading_params": _trace_trading_params,
                 "run": {
                     "id": run.id,
                     "pair": pair,
@@ -771,7 +785,7 @@ class AgentScopeRegistry:
                     "mode": getattr(run, "mode", "simulation"),
                     "status": run.status,
                     "risk_percent": risk_percent,
-                    "config_version": _trace_config_version,
+                    "trading_params_version": _trace_config_version,
                     "created_at": str(getattr(run, "created_at", "")),
                     "updated_at": str(getattr(run, "updated_at", "")),
                 },
@@ -1013,10 +1027,19 @@ class AgentScopeRegistry:
                       metaapi_account_ref: str | None = None):
         start_time = time.time()
 
+        class _RunCancelled(Exception):
+            pass
+
         def _set_progress(pct: int) -> None:
             try:
+                db.refresh(run)
+                if run.status == "cancelled":
+                    logger.info("Run %d cancelled by user, aborting pipeline at %d%%", run.id, pct)
+                    raise _RunCancelled(f"Run {run.id} cancelled at {pct}%")
                 run.progress = pct
                 db.commit()
+            except _RunCancelled:
+                raise
             except Exception as exc:
                 logger.warning("Failed to update run progress to %d%%: %s", pct, exc)
 
@@ -1781,15 +1804,40 @@ class AgentScopeRegistry:
                 # Portfolio context
                 "portfolio": _portfolio_context,
                 # Config version used for this run
-                "config_version": _config_version,
+                "trading_params_version": _config_version,
             }
+
+            # Resolve effective trading params for trace
+            _effective_trading_params = {}
+            try:
+                from app.services.config.trading_config import get_effective_gating_policy, get_effective_risk_limits, get_effective_sizing
+                _eff_gating = get_effective_gating_policy(_resolved_decision_mode)
+                _eff_limits = get_effective_risk_limits(str(getattr(run, "mode", "simulation")))
+                _effective_trading_params = {
+                    "decision_mode": _resolved_decision_mode,
+                    "gating": {
+                        "min_combined_score": _eff_gating.min_combined_score,
+                        "min_confidence": _eff_gating.min_confidence,
+                        "min_aligned_sources": _eff_gating.min_aligned_sources,
+                        "block_major_contradiction": _eff_gating.block_major_contradiction,
+                    },
+                    "risk_limits": {
+                        "max_risk_per_trade_pct": _eff_limits.max_risk_per_trade_pct,
+                        "max_daily_loss_pct": _eff_limits.max_daily_loss_pct,
+                        "max_positions": _eff_limits.max_positions,
+                    },
+                    "sizing": get_effective_sizing(),
+                }
+            except Exception:
+                pass
 
             # Preserve initial trace metadata (e.g. triggered_by, strategy info)
             initial_trace = dict(run.trace) if run.trace else {}
             run.trace = {
                 **initial_trace,
                 "runtime_engine": "agentscope_v1",
-                "config_version": _config_version,
+                "trading_params_version": _config_version,
+                "trading_params": _effective_trading_params,
                 "elapsed_seconds": round(elapsed, 1),
                 "market_data_source": snapshot.get("market_data_source", "unknown"),
                 "market_data_bars": len(ohlc.get("closes", [])),
@@ -1820,6 +1868,10 @@ class AgentScopeRegistry:
             # Batch-commit all pending agent steps + final run update in one DB round-trip
             self._flush_pending_steps(db)
 
+        except _RunCancelled:
+            logger.info("Pipeline cancelled for %s/%s (run %d)", pair, timeframe, run.id)
+            # Status already set to 'cancelled' by the user — don't overwrite
+            return run
         except Exception as exc:
             logger.exception("Pipeline failed for %s/%s: %s", pair, timeframe, exc)
             run.status = "failed"
