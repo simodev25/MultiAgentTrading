@@ -393,6 +393,7 @@ class AgentScopeRegistry:
             "macro_items_block": macro_block,
             "analysis_summary": analysis_summary or "No analysis yet.",
             "decision_mode": "balanced",
+            "decision_mode_description": "",
             "mode": "simulation",
             "risk_percent": "1.0",
         }
@@ -831,8 +832,8 @@ class AgentScopeRegistry:
             "skills_count": len(rendered.get("skills", [])),
             "enabled_tools_count": len(enabled_tools),
             "skills": rendered.get("skills", []),
-            "system_prompt": (rendered.get("system_prompt") or "")[:3000],
-            "user_prompt": (rendered.get("user_prompt") or "")[:3000],
+            "system_prompt": (rendered.get("system_prompt") or "")[:8000],
+            "user_prompt": (rendered.get("user_prompt") or "")[:8000],
         }
 
     async def _run_deterministic(
@@ -1060,6 +1061,9 @@ class AgentScopeRegistry:
                 for name in ALL_AGENT_FACTORIES
             }
 
+            # Resolve decision mode early so toolkits get it
+            _resolved_decision_mode = model_selector.resolve_decision_mode(db)
+
             # Build toolkits with OHLC preset + DB skills + snapshot for trader tools
             toolkits = {}
             for name in ALL_AGENT_FACTORIES:
@@ -1068,10 +1072,18 @@ class AgentScopeRegistry:
                     name, ohlc=ohlc, news=market_data.get("news", {}),
                     skills=agent_skills,
                     snapshot=snapshot,
+                    decision_mode=_resolved_decision_mode,
                 )
 
             # Build prompt variables for context injection
             base_vars = self._build_prompt_variables(pair, timeframe, snapshot, market_data.get("news", {}))
+            base_vars["decision_mode"] = _resolved_decision_mode
+            _mode_descriptions_early = {
+                "conservative": "CONSERVATIVE: Strict mode. Only trade when strong convergence exists. Require multiple confirming sources. Block marginal setups. If in doubt, HOLD.",
+                "balanced": "BALANCED: Intermediate mode. Trade when a reasonable edge exists. One confirming source with technical alignment is enough. Accept moderate uncertainty but block major contradictions.",
+                "permissive": "PERMISSIVE: Opportunistic mode. Take trades on weak-but-aligned signals. If the debate picked a direction and there are no major contradictions, TRADE. A slight directional bias IS a trade — do not HOLD unless evidence is truly flat. Maximize opportunities. Low conviction trades are acceptable.",
+            }
+            base_vars["decision_mode_description"] = _mode_descriptions_early.get(_resolved_decision_mode, _mode_descriptions_early["balanced"])
 
             # Build agents (only for LLM-enabled agents)
             agents: dict[str, Any] = {}
@@ -1227,6 +1239,7 @@ class AgentScopeRegistry:
                     analysis_outputs=analysis_outputs,
                     skills=model_selector.resolve_skills(db, rname),
                     snapshot=snapshot,
+                    decision_mode=_resolved_decision_mode,
                 )
                 if rname in agents:
                     agents[rname] = ALL_AGENT_FACTORIES[rname](
@@ -1367,6 +1380,33 @@ class AgentScopeRegistry:
             base_vars["mode"] = getattr(run, "mode", "simulation")
             base_vars["decision_mode"] = model_selector.resolve_decision_mode(db)
 
+            # Decision mode descriptions for the trader LLM
+            _mode_descriptions = {
+                "conservative": (
+                    "CONSERVATIVE: Strict mode. Only trade when strong convergence exists. "
+                    "Require multiple confirming sources. Block marginal setups. "
+                    "If in doubt, HOLD. Prefer missing a trade over taking a bad one."
+                ),
+                "balanced": (
+                    "BALANCED: Intermediate mode. Trade when a reasonable edge exists. "
+                    "One confirming source with technical alignment is enough. "
+                    "Accept moderate uncertainty but block major contradictions."
+                ),
+                "permissive": (
+                    "PERMISSIVE: Opportunistic mode. Take trades on weak-but-aligned signals. "
+                    "If the debate picked a direction and there are no major contradictions, TRADE. "
+                    "A slight directional bias IS a trade — do not HOLD unless evidence is truly flat. "
+                    "Maximize opportunities. Low conviction trades are acceptable."
+                ),
+            }
+            base_vars["decision_mode_description"] = _mode_descriptions.get(
+                base_vars["decision_mode"], _mode_descriptions["balanced"],
+            )
+            # Invalidate prompt cache for Phase 4 agents so they get
+            # the updated variables (decision_mode_description, debate, etc.)
+            for _phase4_name in ("trader-agent", "risk-manager", "execution-manager"):
+                _prompt_cache.pop(_phase4_name, None)
+
             decision_context = (
                 f"Make a trading decision for {pair} on {timeframe}.\n\n"
                 f"Debate result: {debate_result.winner} "
@@ -1497,7 +1537,29 @@ class AgentScopeRegistry:
                             _tools_missing,
                         )
 
-                    base_vars["trader_decision"] = meta.get("decision", "HOLD")
+                    # Auto-call trade_sizing if trader said BUY/SELL but didn't call it
+                    _trader_decision = meta.get("decision") or d.get("decision", "HOLD")
+                    if _trader_decision in ("BUY", "SELL") and "trade_sizing" not in _trader_tools:
+                        logger.info("Auto-calling trade_sizing for %s (trader didn't call it)", _trader_decision)
+                        try:
+                            from app.services.mcp.client import get_mcp_client
+                            _auto_sizing = await get_mcp_client().call_tool("trade_sizing", {
+                                "price": snapshot.get("last_price", 0.0),
+                                "atr": snapshot.get("atr", 0.0),
+                                "decision_side": _trader_decision,
+                            })
+                            if isinstance(_auto_sizing, dict) and "entry" in _auto_sizing:
+                                agent_tool_invocations.setdefault("trader-agent", {})["trade_sizing"] = {
+                                    "tool_id": "trade_sizing", "status": "ok",
+                                    "input": {"price": snapshot.get("last_price"), "atr": snapshot.get("atr"), "decision_side": _trader_decision},
+                                    "data": _auto_sizing,
+                                }
+                                logger.info("Auto trade_sizing: entry=%s SL=%s TP=%s",
+                                            _auto_sizing.get("entry"), _auto_sizing.get("stop_loss"), _auto_sizing.get("take_profit"))
+                        except Exception as _sizing_exc:
+                            logger.warning("Auto trade_sizing failed: %s", _sizing_exc)
+
+                    base_vars["trader_decision"] = _trader_decision
                     base_vars["trader_conviction"] = str(meta.get("conviction", 0.0))
                     base_vars["trader_reasoning"] = str(meta.get("reasoning", ""))
                     base_vars["key_level"] = str(meta.get("key_level", "N/A"))
@@ -1538,6 +1600,7 @@ class AgentScopeRegistry:
                             analysis_outputs=analysis_outputs,
                             skills=model_selector.resolve_skills(db, "risk-manager"),
                             snapshot=snapshot,
+                            decision_mode=_resolved_decision_mode,
                         )
                         if "risk-manager" in agents:
                             agents["risk-manager"] = ALL_AGENT_FACTORIES["risk-manager"](
@@ -1820,6 +1883,7 @@ class AgentScopeRegistry:
                     name, ohlc=ohlc, news=market_data.get("news", {}),
                     skills=agent_skills,
                     snapshot=snapshot,
+                    decision_mode=base_vars.get("decision_mode", "balanced"),
                 )
                 is_debate = name in ("bullish-researcher", "bearish-researcher", "trader-agent")
                 agents[name] = factory(

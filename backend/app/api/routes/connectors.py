@@ -334,10 +334,18 @@ def update_connector(
                     if old_val != new_val:
                         changes.append(f"{section}.{key}: {old_val} -> {new_val}")
 
+            # decision_mode lives in the ollama connector, not trading
+            _ollama_conn = db.query(ConnectorConfig).filter(
+                ConnectorConfig.connector_name == "ollama"
+            ).first()
+            _effective_mode = "balanced"
+            if _ollama_conn and isinstance(_ollama_conn.settings, dict):
+                _effective_mode = _ollama_conn.settings.get("decision_mode", "balanced")
+
             version = TradingConfigVersion(
                 version=max_ver + 1,
                 changed_by="admin",
-                decision_mode=str(new_settings.get("decision_mode", "balanced")),
+                decision_mode=str(_effective_mode),
                 settings_snapshot=new_settings,
                 changes_summary="; ".join(changes) if changes else "initial save",
             )

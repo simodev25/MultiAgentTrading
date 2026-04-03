@@ -197,6 +197,8 @@ AGENT_PROMPTS: dict[str, dict[str, str]] = {
             "Debate key argument: {debate_key_argument}\n"
             "Debate weakness: {debate_weakness}\n\n"
             "Phase 1 analysis:\n{analysis_summary}\n\n"
+            "DECISION MODE: {decision_mode}\n"
+            "{decision_mode_description}\n\n"
             "Make your decision. Your output must include:\n"
             "- decision: BUY|SELL|HOLD\n"
             "- conviction: 0.0 to 1.0 (how confident are you?)\n"

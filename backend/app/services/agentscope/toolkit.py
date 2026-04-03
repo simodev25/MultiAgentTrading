@@ -111,6 +111,7 @@ async def build_toolkit(
     analysis_outputs: dict | None = None,
     skills: list[str] | None = None,
     snapshot: dict | None = None,
+    decision_mode: str | None = None,
 ) -> Toolkit:
     """Build a Toolkit with the MCP tools assigned to the given agent.
 
@@ -132,20 +133,9 @@ async def build_toolkit(
         agent_skill_template="## {name}\n{description}",
     )
 
-    # Try loading skills from SKILL.md file first (AgentScope native)
-    import os
-    # backend/config/skills/{agent_name}/SKILL.md
-    _backend_root = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-    skill_dir = os.path.join(_backend_root, "config", "skills", agent_name)
-    if os.path.isfile(os.path.join(skill_dir, "SKILL.md")):
-        try:
-            toolkit.register_agent_skill(skill_dir)
-            logger.info("Loaded SKILL.md for %s from %s", agent_name, skill_dir)
-        except Exception as exc:
-            logger.warning("Failed to load SKILL.md for %s: %s", agent_name, exc)
-
-    # Also inject DB skills as additional rules (if not already loaded from file)
-    if skills and not toolkit.skills:
+    # Skills priority: DB > SKILL.md file
+    # If DB has skills (even empty list), use them. File is fallback only.
+    if skills is not None:
         for i, skill_text in enumerate(skills):
             skill_name = f"{agent_name}-rule-{i + 1}"
             toolkit.skills[skill_name] = AgentSkill(
@@ -153,6 +143,17 @@ async def build_toolkit(
                 description=skill_text,
                 dir="",
             )
+    else:
+        # Fallback to local SKILL.md when DB has no config for this agent
+        import os
+        _backend_root = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+        skill_dir = os.path.join(_backend_root, "config", "skills", agent_name)
+        if os.path.isfile(os.path.join(skill_dir, "SKILL.md")):
+            try:
+                toolkit.register_agent_skill(skill_dir)
+                logger.info("Loaded SKILL.md for %s from %s", agent_name, skill_dir)
+            except Exception as exc:
+                logger.warning("Failed to load SKILL.md for %s: %s", agent_name, exc)
 
     tool_ids = AGENT_TOOL_MAP.get(agent_name, [])
     ohlc = ohlc or {}
@@ -192,6 +193,10 @@ async def build_toolkit(
                 preset["news_items"] = news["news"]
             if news.get("macro_events"):
                 preset["macro_items"] = news["macro_events"]
+
+        # Pre-inject decision_mode so the LLM doesn't send wrong mode.
+        if tool_id == "decision_gating" and decision_mode:
+            preset["mode"] = decision_mode
 
         # Pre-inject factual market DATA into tools (not opinions/scores).
         # The LLM decides freely, but gets accurate numbers from the snapshot.
