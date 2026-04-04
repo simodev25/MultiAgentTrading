@@ -18,6 +18,7 @@ from app.services.strategy.template_catalog import (
     build_strategy_system_prompt,
     sanitize_strategy_params_for_template,
 )
+from app.services.strategy.template_selection import apply_template_selection_policy
 from app.services.strategy.signal_engine import compute_strategy_overlays_and_signals
 
 router = APIRouter(prefix='/strategies', tags=['strategies'])
@@ -175,6 +176,7 @@ async def generate_strategy(
     symbol = agent_result.get('symbol', _pair)
     timeframe_val = agent_result.get('timeframe', _timeframe)
     prompt_history = agent_result.get('prompt_history', [])
+    market_regime = agent_result.get('market_regime')
 
     if not template or template not in VALID_TEMPLATES:
         # Agent fallback: use simple LLM call
@@ -209,9 +211,38 @@ async def generate_strategy(
                 {'role': 'assistant', 'content': f'Fallback: {template} with default params'},
             ]
 
+    selection = apply_template_selection_policy(
+        user_prompt=payload.prompt,
+        proposed_template=template,
+        market_regime=market_regime,
+        available_templates=VALID_TEMPLATES,
+    )
+    selected_template = selection.get('selected_template')
+    if not selected_template or selected_template not in VALID_TEMPLATES:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                'error': 'custom_strategy_required',
+                'selection': selection,
+            },
+        )
+    template = selected_template
+
+    if not isinstance(prompt_history, list):
+        prompt_history = []
+    prompt_history.append({
+        'role': 'system',
+        'content': json.dumps({'template_selection': selection}, ensure_ascii=False),
+    })
+
+    selection_warnings = [str(w) for w in selection.get('warnings', [])]
+    if selection_warnings:
+        logger.info('strategy_template_selection_warnings template=%s warnings=%s', template, selection_warnings)
+
     params, warnings = sanitize_strategy_params_for_template(template, params)
-    if warnings:
-        logger.info('strategy_params_sanitized template=%s warnings=%s', template, warnings)
+    all_warnings = [*selection_warnings, *warnings]
+    if all_warnings:
+        logger.info('strategy_params_sanitized template=%s warnings=%s', template, all_warnings)
 
     strategy = Strategy(
         strategy_id=_next_strategy_id(db),
@@ -223,7 +254,7 @@ async def generate_strategy(
         symbol=symbol or 'EURUSD.PRO',
         timeframe=timeframe_val or 'H1',
         params=params,
-        metrics={},
+        metrics={'template_selection': selection, 'selection_warnings': all_warnings},
         prompt_history=prompt_history,
         created_by_id=user.id,
     )

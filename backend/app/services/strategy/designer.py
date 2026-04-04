@@ -25,13 +25,18 @@ DEFAULT_PROMPTS = {
     "system": (
         "You are a quantitative strategy designer agent. Your job is to analyze current market conditions "
         "and design an optimal trading strategy.\n\n"
+        "TEMPLATE SELECTION POLICY (mandatory):\n"
+        "1. If the user explicitly requests a strategy archetype/template and it exists, keep it.\n"
+        "2. Do NOT silently override explicit user intent because of market regime.\n"
+        "3. You may adapt parameters prudently, qualify market fit, and add warnings when fit is poor.\n"
+        "4. Use 'best current fit' substitution ONLY when the user explicitly asks for best current fit.\n\n"
         "WORKFLOW (follow these steps IN ORDER):\n"
         "1. Call indicator_bundle() to get current technical indicators\n"
         "2. Call market_regime_detector() to identify the market regime\n"
         "3. Call technical_scoring() to score current conditions\n"
         "4. Call volatility_analyzer() to understand volatility context\n"
         "5. Call strategy_templates_info() to see available templates\n"
-        "6. Choose the best template and params based on your analysis\n"
+        "6. Choose template and params using the policy above (explicit request first, then market fit)\n"
         "7. Call strategy_builder() with your chosen template, name, description, and params\n\n"
         "AVAILABLE TOOLS (use ONLY these):\n"
         "- indicator_bundle(), market_regime_detector(), technical_scoring()\n"
@@ -226,6 +231,7 @@ async def run_strategy_designer(
                 "params": strategy_data.get("params", {}),
                 "prompt_history": prompt_history,
                 "agent_analysis": _extract_agent_text(result_msg),
+                "market_regime": _extract_market_regime(_tool_invocations),
             }
             _write_strategy_trace(pair, timeframe, user_prompt, result, "agent_success",
                                   time.time() - _start_time, provider, model_name,
@@ -244,6 +250,7 @@ async def run_strategy_designer(
             "params": {},
             "prompt_history": prompt_history,
             "agent_analysis": text,
+            "market_regime": _extract_market_regime(_tool_invocations),
         }
         _write_strategy_trace(pair, timeframe, user_prompt, result, "text_fallback",
                               time.time() - _start_time, provider, model_name,
@@ -264,6 +271,7 @@ async def run_strategy_designer(
                     "params": strategy_data.get("params", {}),
                     "prompt_history": prompt_history,
                     "agent_analysis": f"Agent recovered from error: {str(exc)[:100]}",
+                    "market_regime": _extract_market_regime(_tool_invocations),
                 }
         except Exception:
             pass
@@ -275,6 +283,7 @@ async def run_strategy_designer(
             "params": {},
             "prompt_history": prompt_history,
             "agent_analysis": "",
+            "market_regime": _extract_market_regime(_tool_invocations),
         }
         _write_strategy_trace(pair, timeframe, user_prompt, result, f"error: {type(exc).__name__}",
                               time.time() - _start_time, provider, model_name,
@@ -375,6 +384,16 @@ async def _extract_all_tool_invocations(agent) -> dict:
             "data": output_data,
         }
     return invocations
+
+
+def _extract_market_regime(tool_invocations: dict) -> str | None:
+    data = tool_invocations.get("market_regime_detector", {}).get("data", {})
+    if not isinstance(data, dict):
+        return None
+    regime = data.get("regime")
+    if isinstance(regime, str) and regime.strip():
+        return regime.strip()
+    return None
 
 
 def _write_strategy_trace(
