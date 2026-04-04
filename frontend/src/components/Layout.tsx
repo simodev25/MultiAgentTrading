@@ -17,8 +17,8 @@ const navItems = [
   { to: '/', label: 'PORTFOLIO', icon: ShieldCheck, node: '01' },
   { to: '/terminal', label: 'TERMINAL', icon: Terminal, node: '02' },
   { to: '/orders', label: 'ORDRES', icon: Receipt, node: '03' },
-  { to: '/backtests', label: 'BACKTESTS', icon: FlaskConical, node: '04' },
-  { to: '/strategies', label: 'STRATEGIES', icon: Cpu, node: '05' },
+  { to: '/strategies', label: 'STRATEGY_ENGINE', icon: Cpu, node: '04' },
+  { to: '/backtests', label: 'BACKTEST_ENGINE', icon: FlaskConical, node: '05' },
   { to: '/connectors', label: 'SYSTEM_CONFIG', icon: Settings, node: '06' },
 ];
 

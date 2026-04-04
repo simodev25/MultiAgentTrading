@@ -3,18 +3,9 @@ import { api } from '../api/client';
 import { ButtonSpinner } from '../components/LoadingIndicators';
 import { DEFAULT_PAIR, DEFAULT_TIMEFRAMES } from '../constants/markets';
 import { useAuth } from '../hooks/useAuth';
-import { useMarketSymbols } from '../hooks/useMarketSymbols';
 import { FlaskConical, Play, TrendingUp, TrendingDown, Target, BarChart3, Activity, Brain, CheckCircle, XCircle, ChevronDown, ChevronRight } from 'lucide-react';
 import { ExpansionPanel } from '../components/ExpansionPanel';
 import type { BacktestRun, AgentValidationDetail } from '../types';
-
-const DEFAULT_STRATEGIES = [
-  { value: 'ema_rsi', label: 'Trend Following (EMA + RSI)' },
-  { value: 'ema_crossover', label: 'EMA Crossover' },
-  { value: 'rsi_mean_reversion', label: 'RSI Mean Reversion' },
-  { value: 'bollinger_breakout', label: 'Bollinger Breakout' },
-  { value: 'macd_divergence', label: 'MACD Divergence' },
-];
 
 const AGENTS = [
   { key: 'technical-analyst', label: 'Technical Analyst' },
@@ -130,6 +121,17 @@ function TradeRow({ trade, idx }: { trade: { side: string; entry_price: number; 
 
 
 const TRADES_PER_PAGE = 10;
+
+interface GeneratedStrategyOption {
+  id: number;
+  strategy_id: string;
+  name: string;
+  status: string;
+  template: string;
+  symbol: string;
+  timeframe: string;
+  params: Record<string, unknown>;
+}
 
 // ── Drawdown Chart ──
 function DrawdownChart({ data }: { data: number[] }) {
@@ -643,10 +645,8 @@ function AgentAnalysisPanel({ validations }: { validations: BacktestRun['agent_v
 
 export function BacktestsPage() {
   const { token } = useAuth();
-  const { instruments } = useMarketSymbols(token);
-  const [pair, setPair] = useState(DEFAULT_PAIR);
-  const [timeframe, setTimeframe] = useState('H1');
-  const [strategy, setStrategy] = useState('ema_rsi');
+  const [generatedStrategies, setGeneratedStrategies] = useState<GeneratedStrategyOption[]>([]);
+  const [selectedStrategyId, setSelectedStrategyId] = useState<number | null>(null);
   const [rangeDays, setRangeDays] = useState(90);
   const [useAgentPipeline, setUseAgentPipeline] = useState(false);
   const [maxEntries, setMaxEntries] = useState(51); // 51 = ALL
@@ -659,8 +659,6 @@ export function BacktestsPage() {
     ? agentConfig
     : Object.fromEntries(AGENTS.map(a => [a.key, false]));
 
-  // Strategy is always the selected one; agent pipeline is a validation layer on top
-  const effectiveStrategy = strategy;
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -686,9 +684,48 @@ export function BacktestsPage() {
     return () => window.clearInterval(interval);
   }, [token]);
 
+  useEffect(() => {
+    if (!token) return;
+    const loadGeneratedStrategies = async () => {
+      try {
+        const data = (await api.listStrategies(token)) as GeneratedStrategyOption[];
+        const items = Array.isArray(data)
+          ? data.filter((item) => item && item.status !== 'BACKTESTING')
+          : [];
+        setGeneratedStrategies(items);
+      } catch {
+        setGeneratedStrategies([]);
+      }
+    };
+    void loadGeneratedStrategies();
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'hidden') return;
+      void loadGeneratedStrategies();
+    }, 15000);
+    return () => window.clearInterval(interval);
+  }, [token]);
+
+  useEffect(() => {
+    if (generatedStrategies.length === 0) {
+      setSelectedStrategyId(null);
+      return;
+    }
+    if (!generatedStrategies.some((item) => item.id === selectedStrategyId)) {
+      setSelectedStrategyId(generatedStrategies[0].id);
+    }
+  }, [generatedStrategies, selectedStrategyId]);
+
+  const selectedStrategy = useMemo(
+    () => generatedStrategies.find((item) => item.id === selectedStrategyId) ?? null,
+    [generatedStrategies, selectedStrategyId],
+  );
+  const effectivePair = selectedStrategy?.symbol ?? DEFAULT_PAIR;
+  const effectiveTimeframe = selectedStrategy?.timeframe ?? 'H1';
+  const effectiveStrategy = selectedStrategy?.template ?? '';
+
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!token || running) return;
+    if (!token || running || !selectedStrategy) return;
     setRunning(true);
     setProgress(0);
     setError(null);
@@ -703,13 +740,17 @@ export function BacktestsPage() {
 
     try {
       const result = (await api.createBacktest(token, {
-        pair,
-        timeframe,
+        pair: effectivePair,
+        timeframe: effectiveTimeframe,
         strategy: effectiveStrategy,
         start_date: daysAgo(rangeDays),
         end_date: todayStr(),
         llm_enabled: useAgentPipeline,
-        agent_config: { ...effectiveAgentConfig, max_entries: maxEntries >= 51 ? undefined : maxEntries },
+        agent_config: {
+          ...effectiveAgentConfig,
+          max_entries: maxEntries >= 51 ? undefined : maxEntries,
+          strategy_params: selectedStrategy.params,
+        },
       })) as BacktestRun;
 
       // Poll until completed or failed
@@ -776,27 +817,31 @@ export function BacktestsPage() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div>
               <label className="micro-label block mb-1.5">Asset</label>
-              <select value={pair} onChange={(e) => setPair(e.target.value)}>
-                {instruments.map((item) => (
-                  <option key={item}>{item}</option>
-                ))}
-              </select>
+              <div className="h-[38px] px-3 rounded-lg border border-border bg-surface-alt text-[11px] font-mono text-text-dim flex items-center">
+                {selectedStrategy ? effectivePair : '--'}
+              </div>
             </div>
             <div>
               <label className="micro-label block mb-1.5">Timeframe</label>
-              <select value={timeframe} onChange={(e) => setTimeframe(e.target.value)}>
-                {DEFAULT_TIMEFRAMES.map((item) => (
-                  <option key={item}>{item}</option>
-                ))}
-              </select>
+              <div className="h-[38px] px-3 rounded-lg border border-border bg-surface-alt text-[11px] font-mono text-text-dim flex items-center">
+                {selectedStrategy ? effectiveTimeframe : '--'}
+              </div>
             </div>
             <div>
               <label className="micro-label block mb-1.5">Strategy</label>
-              <select value={strategy} onChange={(e) => setStrategy(e.target.value)}>
-                {DEFAULT_STRATEGIES.map((s) => (
-                  <option key={s.value} value={s.value}>{s.label}</option>
+              <select value={selectedStrategyId ?? ''} onChange={(e) => setSelectedStrategyId(e.target.value ? Number(e.target.value) : null)}>
+                {generatedStrategies.length === 0 && <option value="">-- No generated strategy --</option>}
+                {generatedStrategies.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} — {s.symbol} {s.timeframe} [{s.status}]
+                  </option>
                 ))}
               </select>
+              {selectedStrategy && (
+                <div className="mt-1 text-[8px] font-mono text-text-dim">
+                  template={selectedStrategy.template} · params={Object.keys(selectedStrategy.params || {}).length}
+                </div>
+              )}
             </div>
             <div>
               <label className="micro-label block mb-1.5">Agent Pipeline</label>
@@ -899,9 +944,15 @@ export function BacktestsPage() {
 
           {/* Run button */}
           {!running && (
-            <button className="btn-primary w-full md:w-auto md:self-start flex items-center gap-2" disabled={running}>
+            <button className="btn-primary w-full md:w-auto md:self-start flex items-center gap-2" disabled={running || !selectedStrategy}>
               <Play className="w-3.5 h-3.5" /> RUN_BACKTEST
             </button>
+          )}
+
+          {!selectedStrategy && (
+            <p className="text-[10px] font-mono text-text-dim">
+              Generate a strategy first in `Strategies`, then select it here for backtesting.
+            </p>
           )}
 
           {error && <p className="alert">{error}</p>}
@@ -943,7 +994,7 @@ export function BacktestsPage() {
                 <TrendingUp className="w-3.5 h-3.5 text-accent" />
                 <span className="text-[11px] font-bold tracking-[0.12em] text-accent uppercase">EQUITY_CURVE</span>
                 <span className="text-[10px] text-text-dim">|</span>
-                <span className="text-[10px] text-text-dim">{pair} • {strategy} • {rangeDays}D</span>
+                <span className="text-[10px] text-text-dim">{effectivePair} • {effectiveStrategy || '--'} • {rangeDays}D</span>
                 <span className="text-[10px] font-mono text-text-dim ml-auto">{equityCurve.length} data points</span>
               </div>
               <div className="p-4">

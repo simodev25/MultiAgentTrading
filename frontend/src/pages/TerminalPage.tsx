@@ -114,7 +114,7 @@ export function TerminalPage() {
   const [riskPercent, setRiskPercent] = useState(1);
   const [metaapiAccountRef, setMetaapiAccountRef] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
-  const [actionInProgress, setActionInProgress] = useState(false);
+  const [monitoringBusy, setMonitoringBusy] = useState<{ id: number; action: 'start' | 'stop' } | null>(null);
   const busyRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(Date.now());
@@ -198,22 +198,23 @@ export function TerminalPage() {
     setRunsPage((currentPage) => Math.min(currentPage, runsTotalPages));
   }, [runsTotalPages]);
 
+  const loadStrategies = useCallback(async () => {
+    if (!token) return;
+    try {
+      const data = (await api.listStrategies(token)) as StrategyBrief[];
+      setStrategies(Array.isArray(data) ? data : []);
+    } catch { /* ignore */ }
+  }, [token]);
+
   // Load strategies list
   useEffect(() => {
-    if (!token) return;
-    const load = async () => {
-      try {
-        const data = (await api.listStrategies(token)) as StrategyBrief[];
-        setStrategies(Array.isArray(data) ? data : []);
-      } catch { /* ignore */ }
-    };
-    void load();
+    void loadStrategies();
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'hidden') return;
-      void load();
+      void loadStrategies();
     }, 15000);
     return () => window.clearInterval(interval);
-  }, [token]);
+  }, [loadStrategies]);
 
   // Handle ?strategy= URL param (from StrategiesPage "VIEW_ON_CHART")
   useEffect(() => {
@@ -274,31 +275,41 @@ export function TerminalPage() {
 
   const monitoredStrategies = useMemo(() => strategies.filter((s) => s.is_monitoring), [strategies]);
 
+  const replaceStrategy = useCallback((updated: StrategyBrief) => {
+    setStrategies((current) => current.map((item) => (item.id === updated.id ? { ...item, ...updated } : item)));
+  }, []);
+
   const startMonitoring = async (id: number) => {
     if (!token || busyRef.current) return;
     busyRef.current = true;
-    setActionInProgress(true);
+    setMonitoringBusy({ id, action: 'start' });
+    setError(null);
     try {
-      await api.startMonitoring(token, id, mode, riskPercent);
+      const updated = (await api.startMonitoring(token, id, mode, riskPercent)) as StrategyBrief;
+      replaceStrategy(updated);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to start monitoring');
     } finally {
-      setActionInProgress(false);
+      setMonitoringBusy(null);
       busyRef.current = false;
+      void loadStrategies();
     }
   };
 
   const stopMonitoring = async (id: number) => {
     if (!token || busyRef.current) return;
     busyRef.current = true;
-    setActionInProgress(true);
+    setMonitoringBusy({ id, action: 'stop' });
+    setError(null);
     try {
-      await api.stopMonitoring(token, id);
+      const updated = (await api.stopMonitoring(token, id)) as StrategyBrief;
+      replaceStrategy(updated);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to stop monitoring');
     } finally {
-      setActionInProgress(false);
+      setMonitoringBusy(null);
       busyRef.current = false;
+      void loadStrategies();
     }
   };
 
@@ -306,7 +317,6 @@ export function TerminalPage() {
     e.preventDefault();
     if (!token || busyRef.current) return;
     busyRef.current = true;
-    setActionInProgress(true);
     setLoading(true);
     setError(null);
     try {
@@ -322,7 +332,6 @@ export function TerminalPage() {
       setError(err instanceof Error ? err.message : 'Cannot create run');
     } finally {
       setLoading(false);
-      setActionInProgress(false);
       busyRef.current = false;
     }
   };
@@ -404,7 +413,7 @@ export function TerminalPage() {
             </select>
           </div>
           <div>
-            <button type="submit" className="btn-primary w-full" disabled={loading || actionInProgress}>
+            <button type="submit" className="btn-primary w-full" disabled={loading || monitoringBusy != null}>
               {loading ? <ButtonSpinner /> : <Zap className="w-3.5 h-3.5" />}
               {loading ? 'Analysis running' : 'Start'}
             </button>
@@ -438,26 +447,30 @@ export function TerminalPage() {
             {selectedStrategyId && (() => {
               const s = strategies.find((st) => st.id === selectedStrategyId);
               if (!s) return null;
+              const isBusy = monitoringBusy?.id === s.id;
+              const busyAction = isBusy ? monitoringBusy?.action : null;
               return (
                 <>
                   {!s.is_monitoring && (
                     <button
                       type="button"
                       className="btn-primary flex items-center gap-1 mt-5"
-                      disabled={actionInProgress}
+                      disabled={isBusy}
                       onClick={() => startMonitoring(s.id)}
                     >
-                      <Play className="w-3 h-3" /> {actionInProgress ? 'Starting...' : 'Start'}
+                      {busyAction === 'start' ? <ButtonSpinner /> : <Play className="w-3 h-3" />}
+                      {busyAction === 'start' ? 'Starting monitoring...' : 'Start monitoring'}
                     </button>
                   )}
                   {s.is_monitoring && (
                     <button
                       type="button"
                       className="flex items-center gap-1 mt-5 px-3 py-1.5 text-[9px] font-bold tracking-widest rounded bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20 transition-colors"
-                      disabled={actionInProgress}
+                      disabled={isBusy}
                       onClick={() => stopMonitoring(s.id)}
                     >
-                      <XCircle className="w-3 h-3" /> {actionInProgress ? 'Stopping...' : 'Stop'}
+                      {busyAction === 'stop' ? <ButtonSpinner /> : <XCircle className="w-3 h-3" />}
+                      {busyAction === 'stop' ? 'Stopping monitoring...' : 'Stop monitoring'}
                     </button>
                   )}
                   <button
@@ -476,6 +489,8 @@ export function TerminalPage() {
           {selectedStrategyId && (() => {
             const s = strategies.find((st) => st.id === selectedStrategyId);
             if (!s) return null;
+            const isBusy = monitoringBusy?.id === s.id;
+            const busyAction = isBusy ? monitoringBusy?.action : null;
             return (
               <div className="flex items-center gap-3 flex-wrap">
                 <span className="text-[8px] font-mono px-1.5 py-0.5 rounded bg-accent/10 text-accent">{s.template}</span>
@@ -487,6 +502,11 @@ export function TerminalPage() {
                 {s.is_monitoring && (
                   <span className="text-[9px] font-mono text-green-400 flex items-center gap-1">
                     <Loader2 className="w-3 h-3 animate-spin" /> MONITORING ({s.monitoring_mode})
+                  </span>
+                )}
+                {isBusy && (
+                  <span className="text-[9px] font-mono text-accent flex items-center gap-1">
+                    <Loader2 className="w-3 h-3 animate-spin" /> {busyAction === 'start' ? 'Starting monitoring...' : 'Stopping monitoring...'}
                   </span>
                 )}
                 {strategyLoading && (
@@ -550,13 +570,19 @@ export function TerminalPage() {
                           )}
                         </td>
                         <td>
+                          {(() => {
+                            const isBusy = monitoringBusy?.id === s.id;
+                            const busyAction = isBusy ? monitoringBusy?.action : null;
+                            return (
                           <button
                             className="text-[8px] font-mono px-2 py-1 rounded bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20"
-                            disabled={actionInProgress}
+                            disabled={isBusy}
                             onClick={() => stopMonitoring(s.id)}
                           >
-                            {actionInProgress ? 'Stopping...' : 'Stop'}
+                            {busyAction === 'stop' ? 'Stopping monitoring...' : 'Stop monitoring'}
                           </button>
+                            );
+                          })()}
                         </td>
                       </tr>
                     ))}

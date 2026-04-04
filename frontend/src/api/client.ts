@@ -179,7 +179,15 @@ export const api = {
   getBacktest: (token: string, id: number) => request(`/backtests/${id}`, {}, token),
   createBacktest: (
     token: string,
-    payload: { pair: string; timeframe: string; start_date: string; end_date: string; strategy: string },
+    payload: {
+      pair: string;
+      timeframe: string;
+      start_date: string;
+      end_date: string;
+      strategy: string;
+      llm_enabled?: boolean;
+      agent_config?: Record<string, unknown>;
+    },
   ) =>
     request('/backtests', {
       method: 'POST',
