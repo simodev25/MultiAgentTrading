@@ -51,6 +51,7 @@ services:
       PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus-backend
     volumes:
       - ./backend/debug-traces:/app/debug-traces
+      - ./backend/debug-strategy:/app/debug-strategy
     command: >
       sh -c "mkdir -p /tmp/prometheus-backend && rm -rf /tmp/prometheus-backend/* &&
       uvicorn app.main:app --host 0.0.0.0 --port 8000"
@@ -76,8 +77,10 @@ services:
       CELERY_IGNORE_RESULT: 'true'
       PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus-worker
       PROMETHEUS_WORKER_PORT: ${PROMETHEUS_WORKER_PORT:-9101}
+      AGENTSCOPE_TRACING_URL: http://tempo:4318/v1/traces
     volumes:
       - ./backend/debug-traces:/app/debug-traces
+      - ./backend/debug-strategy:/app/debug-strategy
     expose:
       - '${PROMETHEUS_WORKER_PORT:-9101}'
     command: >
@@ -105,6 +108,17 @@ services:
       backend:
         condition: service_started
 
+  tempo:
+    image: grafana/tempo:2.6.1
+    command: ["-config.file=/etc/tempo.yml"]
+    expose:
+      - '4317'
+      - '4318'
+    ports:
+      - '3200:3200'    # Tempo HTTP API
+    volumes:
+      - ./infra/docker/tempo.yml:/etc/tempo.yml:ro
+
   prometheus:
     image: prom/prometheus:v2.55.1
     ports:
@@ -128,6 +142,7 @@ services:
       - ./infra/docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
+      - tempo
 
 volumes:
   postgres_data:

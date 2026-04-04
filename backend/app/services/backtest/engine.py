@@ -14,6 +14,7 @@ from ta.volatility import AverageTrueRange, BollingerBands
 
 from app.core.config import get_settings
 from app.services.market.news_provider import MarketProvider
+from app.services.strategy.signal_engine import compute_strategy_overlays_and_signals, get_supported_strategy_templates
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ class BacktestResult:
 
 
 class BacktestEngine:
-    SUPPORTED_STRATEGIES = {'ema_rsi', 'ema_crossover', 'rsi_mean_reversion', 'bollinger_breakout', 'macd_divergence'}
+    SUPPORTED_STRATEGIES = {'ema_rsi', *get_supported_strategy_templates()}
     STRATEGY_ALIASES = {
         'ema-rsi': 'ema_rsi',
         'legacy_ema_rsi': 'ema_rsi',
@@ -151,51 +152,105 @@ class BacktestEngine:
         signal = np.where((frame['ema_fast'] < frame['ema_slow']) & (frame['rsi'] > 30), -1, signal)
         return pd.Series(signal, index=frame.index, dtype='int64')
 
+    @staticmethod
+    def _frame_to_strategy_candles(frame: pd.DataFrame) -> tuple[list[dict[str, Any]], list[str]]:
+        candles: list[dict[str, Any]] = []
+        time_keys: list[str] = []
+
+        for ts, row in frame.iterrows():
+            time_key = ts.isoformat() if hasattr(ts, 'isoformat') else str(ts)
+            close_value = float(row['Close'])
+            open_value = float(row.get('Open', close_value))
+            high_value = float(row.get('High', max(open_value, close_value)))
+            low_value = float(row.get('Low', min(open_value, close_value)))
+            candles.append(
+                {
+                    'time': time_key,
+                    'open': open_value,
+                    'high': high_value,
+                    'low': low_value,
+                    'close': close_value,
+                    'volume': float(row.get('Volume', 0.0)),
+                }
+            )
+            time_keys.append(time_key)
+
+        return candles, time_keys
+
+    @staticmethod
+    def _signal_events_to_series(
+        frame: pd.DataFrame,
+        time_keys: list[str],
+        signals: list[dict[str, Any]],
+    ) -> pd.Series:
+        signal_by_time = {
+            str(signal['time']): 1 if signal['side'] == 'BUY' else -1
+            for signal in signals
+        }
+
+        values: list[int] = []
+        current = 0
+        for time_key in time_keys:
+            event_signal = signal_by_time.get(time_key)
+            if event_signal is not None:
+                current = event_signal
+            values.append(current)
+
+        return pd.Series(values, index=frame.index, dtype='int64')
+
+    def _signal_series_for_strategy(
+        self,
+        frame: pd.DataFrame,
+        strategy: str,
+        strategy_params: dict | None = None,
+        target_index: pd.Index | None = None,
+    ) -> pd.Series:
+        candles, time_keys = self._frame_to_strategy_candles(frame)
+        result = compute_strategy_overlays_and_signals(candles, strategy, strategy_params or {})
+        series = self._signal_events_to_series(frame, time_keys, result['signals'])
+        if target_index is None:
+            return series
+        return series.loc[target_index]
+
     def _signal_series_ema_crossover(self, frame: pd.DataFrame, params: dict | None = None) -> pd.Series:
-        """EMA crossover with configurable periods and RSI filter."""
-        p = params or {}
-        fast_period = p.get('ema_fast', 9)
-        slow_period = p.get('ema_slow', 21)
-        rsi_filter = p.get('rsi_filter', 30)
-
-        fast = frame['Close'].ewm(span=fast_period, adjust=False).mean()
-        slow = frame['Close'].ewm(span=slow_period, adjust=False).mean()
-
-        signal = np.where((fast > slow) & (frame['rsi'] < (100 - rsi_filter)), 1, 0)
-        signal = np.where((fast < slow) & (frame['rsi'] > rsi_filter), -1, signal)
-        return pd.Series(signal, index=frame.index, dtype='int64')
+        return self._signal_series_for_strategy(frame, 'ema_crossover', params)
 
     def _signal_series_rsi_mean_reversion(self, frame: pd.DataFrame, params: dict | None = None) -> pd.Series:
-        """RSI mean reversion: buy oversold, sell overbought."""
-        p = params or {}
-        oversold = p.get('oversold', 30)
-        overbought = p.get('overbought', 70)
-
-        signal = np.where(frame['rsi'] < oversold, 1, 0)
-        signal = np.where(frame['rsi'] > overbought, -1, signal)
-        return pd.Series(signal, index=frame.index, dtype='int64')
+        return self._signal_series_for_strategy(frame, 'rsi_mean_reversion', params)
 
     def _signal_series_bollinger_breakout(self, frame: pd.DataFrame, params: dict | None = None) -> pd.Series:
-        """Bollinger Band breakout: buy on lower band touch, sell on upper band touch."""
-        signal = np.where(frame['Close'] <= frame['bb_lower'], 1, 0)
-        signal = np.where(frame['Close'] >= frame['bb_upper'], -1, signal)
-        return pd.Series(signal, index=frame.index, dtype='int64')
+        return self._signal_series_for_strategy(frame, 'bollinger_breakout', params)
 
     def _signal_series_macd_divergence(self, frame: pd.DataFrame, params: dict | None = None) -> pd.Series:
-        """MACD signal line crossover."""
-        signal = np.where(
-            (frame['macd'] > frame['macd_signal']) & (frame['macd_diff'] > 0), 1, 0
-        )
-        signal = np.where(
-            (frame['macd'] < frame['macd_signal']) & (frame['macd_diff'] < 0), -1, signal
-        )
-        return pd.Series(signal, index=frame.index, dtype='int64')
+        return self._signal_series_for_strategy(frame, 'macd_divergence', params)
 
-    def _generate_signals(self, frame: pd.DataFrame, strategy: str, agent_config: dict | None = None) -> pd.Series:
+    @staticmethod
+    def _resolve_strategy_params(
+        agent_config: dict | None = None,
+        strategy_params: dict | None = None,
+    ) -> dict | None:
+        """Resolve the effective strategy params for a backtest run."""
+        if strategy_params is not None:
+            return strategy_params
+        return (agent_config or {}).get('strategy_params')
+
+    def _generate_signals(
+        self,
+        frame: pd.DataFrame,
+        strategy: str,
+        agent_config: dict | None = None,
+        strategy_params: dict | None = None,
+        target_index: pd.Index | None = None,
+    ) -> pd.Series:
         """Dispatch to the appropriate signal generator."""
-        params = (agent_config or {}).get('strategy_params')
+        params = self._resolve_strategy_params(
+            agent_config=agent_config,
+            strategy_params=strategy_params,
+        )
         if strategy == 'ema_rsi':
             return self._signal_series_ema_rsi(frame)
+        elif target_index is not None and strategy in get_supported_strategy_templates():
+            return self._signal_series_for_strategy(frame, strategy, params, target_index=target_index)
         elif strategy == 'ema_crossover':
             return self._signal_series_ema_crossover(frame, params)
         elif strategy == 'rsi_mean_reversion':
@@ -460,6 +515,7 @@ class BacktestEngine:
         db: Session | None = None,
         llm_enabled: bool = False,
         agent_config: dict | None = None,
+        strategy_params: dict | None = None,
         run_id: int | None = None,
     ) -> BacktestResult:
         normalized_strategy = self.normalize_strategy(strategy)
@@ -488,23 +544,29 @@ class BacktestEngine:
 
         # ── Phase 1: Fetch data (0→10%)
         self._update_progress(db, run_id, 5)
-        frame = self._fetch_backtest_candles(pair, timeframe, warmup_start, end_date, run_id=run_id)
-        logger.info('backtest_frame rows=%d empty=%s', len(frame) if not frame.empty else 0, frame.empty)
-        if frame.empty or len(frame) < 30:
+        raw_frame = self._fetch_backtest_candles(pair, timeframe, warmup_start, end_date, run_id=run_id)
+        logger.info('backtest_frame rows=%d empty=%s', len(raw_frame) if not raw_frame.empty else 0, raw_frame.empty)
+        if raw_frame.empty or len(raw_frame) < 30:
             raise ValueError(
-                f'Insufficient historical candles for backtesting (got {len(frame) if not frame.empty else 0}). '
+                f'Insufficient historical candles for backtesting (got {len(raw_frame) if not raw_frame.empty else 0}). '
                 f'Try a longer date range or check that the instrument is available.'
             )
         self._update_progress(db, run_id, 10)
 
         # ── Phase 2: Indicators (10→20%)
-        frame = self._prepare_indicator_frame(frame)
+        frame = self._prepare_indicator_frame(raw_frame)
         if frame.empty or len(frame) < 30:
             raise ValueError('Insufficient indicator-ready candles for backtesting')
         self._update_progress(db, run_id, 20)
 
         # ── Phase 3: Strategy signals (20→40%)
-        signal_series = self._generate_signals(frame, normalized_strategy, agent_config)
+        signal_series = self._generate_signals(
+            raw_frame if normalized_strategy in get_supported_strategy_templates() else frame,
+            normalized_strategy,
+            agent_config,
+            strategy_params=strategy_params,
+            target_index=frame.index if normalized_strategy in get_supported_strategy_templates() else None,
+        )
         self._update_progress(db, run_id, 40)
 
         # ── Phase 4: Agent validation (40→90%) — only if llm_enabled

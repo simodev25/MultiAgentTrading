@@ -13,6 +13,7 @@ from app.core.config import get_settings
 from app.db.models.run import AnalysisRun
 from app.db.models.strategy import Strategy
 from app.db.session import SessionLocal
+from app.services.strategy.signal_engine import compute_strategy_overlays_and_signals
 from app.tasks.celery_app import celery_app
 
 settings = get_settings()
@@ -23,76 +24,13 @@ def _compute_latest_signal(candles: list[dict], template: str, params: dict) -> 
     """Compute the most recent signal from candle data. Returns {'time', 'price', 'side'} or None."""
     if not candles or len(candles) < 30:
         return None
+    try:
+        result = compute_strategy_overlays_and_signals(candles, template, params)
+    except ValueError:
+        logger.warning('strategy_monitor_unsupported_template template=%s', template)
+        return None
 
-    import numpy as np
-    import pandas as pd
-    from ta.momentum import RSIIndicator
-    from ta.trend import MACD
-    from ta.volatility import BollingerBands
-
-    df = pd.DataFrame(candles)
-    close = df['close'].astype(float)
-    times = df['time'].tolist()
-
-    signals: list[dict] = []
-
-    if template == 'ema_crossover':
-        fast_period = params.get('ema_fast', 9)
-        slow_period = params.get('ema_slow', 21)
-        rsi_filter = params.get('rsi_filter', 30)
-        ema_fast = close.ewm(span=fast_period, adjust=False).mean()
-        ema_slow = close.ewm(span=slow_period, adjust=False).mean()
-        rsi = RSIIndicator(close=close, window=14).rsi()
-        for i in range(1, len(df)):
-            if pd.isna(ema_fast.iloc[i]) or pd.isna(rsi.iloc[i]):
-                continue
-            if ema_fast.iloc[i] > ema_slow.iloc[i] and ema_fast.iloc[i - 1] <= ema_slow.iloc[i - 1] and rsi.iloc[i] < (100 - rsi_filter):
-                signals.append({'time': times[i], 'price': float(close.iloc[i]), 'side': 'BUY'})
-            elif ema_fast.iloc[i] < ema_slow.iloc[i] and ema_fast.iloc[i - 1] >= ema_slow.iloc[i - 1] and rsi.iloc[i] > rsi_filter:
-                signals.append({'time': times[i], 'price': float(close.iloc[i]), 'side': 'SELL'})
-
-    elif template == 'rsi_mean_reversion':
-        rsi_period = params.get('rsi_period', 14)
-        oversold = params.get('oversold', 30)
-        overbought = params.get('overbought', 70)
-        rsi = RSIIndicator(close=close, window=rsi_period).rsi()
-        for i in range(1, len(df)):
-            if pd.isna(rsi.iloc[i]):
-                continue
-            if rsi.iloc[i] < oversold and rsi.iloc[i - 1] >= oversold:
-                signals.append({'time': times[i], 'price': float(close.iloc[i]), 'side': 'BUY'})
-            elif rsi.iloc[i] > overbought and rsi.iloc[i - 1] <= overbought:
-                signals.append({'time': times[i], 'price': float(close.iloc[i]), 'side': 'SELL'})
-
-    elif template == 'bollinger_breakout':
-        bb_period = params.get('bb_period', 20)
-        bb_std = params.get('bb_std', 2.0)
-        bb = BollingerBands(close=close, window=bb_period, window_dev=bb_std)
-        upper = bb.bollinger_hband()
-        lower = bb.bollinger_lband()
-        for i in range(1, len(df)):
-            if pd.isna(lower.iloc[i]):
-                continue
-            if close.iloc[i] <= lower.iloc[i] and close.iloc[i - 1] > lower.iloc[i - 1]:
-                signals.append({'time': times[i], 'price': float(close.iloc[i]), 'side': 'BUY'})
-            elif close.iloc[i] >= upper.iloc[i] and close.iloc[i - 1] < upper.iloc[i - 1]:
-                signals.append({'time': times[i], 'price': float(close.iloc[i]), 'side': 'SELL'})
-
-    elif template == 'macd_divergence':
-        fast = params.get('fast', 12)
-        slow = params.get('slow', 26)
-        signal_period = params.get('signal', 9)
-        macd_ind = MACD(close=close, window_fast=fast, window_slow=slow, window_sign=signal_period)
-        macd_line = macd_ind.macd()
-        signal_line = macd_ind.macd_signal()
-        for i in range(1, len(df)):
-            if pd.isna(macd_line.iloc[i]) or pd.isna(signal_line.iloc[i]):
-                continue
-            if macd_line.iloc[i] > signal_line.iloc[i] and macd_line.iloc[i - 1] <= signal_line.iloc[i - 1]:
-                signals.append({'time': times[i], 'price': float(close.iloc[i]), 'side': 'BUY'})
-            elif macd_line.iloc[i] < signal_line.iloc[i] and macd_line.iloc[i - 1] >= signal_line.iloc[i - 1]:
-                signals.append({'time': times[i], 'price': float(close.iloc[i]), 'side': 'SELL'})
-
+    signals = result['signals']
     if signals:
         logger.info('strategy_monitor_signals_computed template=%s total=%d last=%s', template, len(signals), signals[-1]['side'])
     return signals[-1] if signals else None

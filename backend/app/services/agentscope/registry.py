@@ -1581,8 +1581,21 @@ class AgentScopeRegistry:
                             _tools_missing,
                         )
 
-                    # Auto-call trade_sizing if trader said BUY/SELL but didn't call it
+                    # Validate or auto-call trade_sizing
                     _trader_decision = meta.get("decision") or d.get("decision", "HOLD")
+                    # Check if LLM called trade_sizing with wrong side
+                    if _trader_decision in ("BUY", "SELL") and "trade_sizing" in _trader_tools:
+                        _existing_sizing = _trader_tools["trade_sizing"].get("data", {})
+                        _existing_input = _trader_tools["trade_sizing"].get("input", {})
+                        _called_side = str(_existing_input.get("decision_side", "")).upper()
+                        if _called_side != _trader_decision:
+                            logger.warning(
+                                "trade_sizing called with wrong side %s (trader decided %s), re-calling",
+                                _called_side, _trader_decision,
+                            )
+                            # Remove wrong sizing, will be re-called below
+                            del _trader_tools["trade_sizing"]
+
                     if _trader_decision in ("BUY", "SELL") and "trade_sizing" not in _trader_tools:
                         logger.info("Auto-calling trade_sizing for %s (trader didn't call it)", _trader_decision)
                         try:
@@ -1645,6 +1658,7 @@ class AgentScopeRegistry:
                             skills=model_selector.resolve_skills(db, "risk-manager"),
                             snapshot=snapshot,
                             decision_mode=_resolved_decision_mode,
+                            portfolio_state=_portfolio_state,
                         )
                         if "risk-manager" in agents:
                             agents["risk-manager"] = ALL_AGENT_FACTORIES["risk-manager"](
@@ -1654,6 +1668,28 @@ class AgentScopeRegistry:
                                 sys_prompt=self._get_sys_prompt("risk-manager", db, base_vars),
                             )
                 elif name == "risk-manager":
+                    # If the tool returned accepted=true but the LLM overrode with
+                    # "missing params", trust the tool — it has the real data via force_kwargs.
+                    _risk_tool_inv = agent_tool_invocations.get("risk-manager", {}).get("portfolio_risk_evaluation", {})
+                    _risk_tool_result = _risk_tool_inv.get("data", {}) if isinstance(_risk_tool_inv, dict) else {}
+                    _risk_tool_accepted = _risk_tool_result.get("accepted", False)
+                    _llm_approved = d.get("approved") or d.get("accepted") or (d.get("metadata", {}) or {}).get("approved") or (d.get("metadata", {}) or {}).get("accepted") or False
+                    if _risk_tool_accepted and not _llm_approved and _trader_decision != "HOLD":
+                        _tool_vol = _risk_tool_result.get("suggested_volume", 0)
+                        logger.warning(
+                            "Risk-manager LLM rejected but tool accepted (vol=%.2f) — overriding LLM with tool result",
+                            _tool_vol,
+                        )
+                        d["approved"] = True
+                        d["accepted"] = True
+                        d["adjusted_volume"] = _tool_vol
+                        d["suggested_volume"] = _tool_vol
+                        d.setdefault("metadata", {})["approved"] = True
+                        d.setdefault("metadata", {})["accepted"] = True
+                        d.setdefault("metadata", {})["suggested_volume"] = _tool_vol
+                        d.setdefault("metadata", {})["adjusted_volume"] = _tool_vol
+                        d["risk_flags"] = _risk_tool_result.get("reasons", []) + ["LLM_OVERRIDDEN_BY_TOOL"]
+
                     base_vars["risk_result"] = d.get("text", "")[:500]
                 elif name == "execution-manager":
                     # Save post_trade snapshot after execution

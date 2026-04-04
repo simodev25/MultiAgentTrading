@@ -92,6 +92,23 @@ def _start_prometheus_worker_metrics_server(**_: object) -> None:
     start_worker_metrics_server(settings.prometheus_worker_port)
 
 
+@worker_ready.connect(weak=False)
+def _init_agentscope_tracing(**_: object) -> None:
+    """Initialize AgentScope tracing with OpenTelemetry → Tempo."""
+    tracing_url = os.environ.get('AGENTSCOPE_TRACING_URL', 'http://tempo:4318/v1/traces')
+    try:
+        import agentscope
+        agentscope.init(
+            project="MultiAgentTrading",
+            name="trading_worker",
+            logging_level="INFO",
+            tracing_url=tracing_url,
+        )
+        logging.getLogger('app').info("AgentScope tracing enabled → %s", tracing_url)
+    except Exception as exc:
+        logging.getLogger('app').warning("AgentScope tracing init failed: %s", exc)
+
+
 @worker_process_shutdown.connect(weak=False)
 def _mark_prometheus_worker_process_dead(pid: int | None = None, **_: object) -> None:
     mark_worker_process_dead(pid)

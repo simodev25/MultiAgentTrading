@@ -23,3 +23,5 @@ coverage/
 .vscode/
 .agents/skills/architecture-designer/references/adr-template.md
 backend/mock_run/*
+backend/config/skills/strategy-designer/SKILL.md
+backend/debug-strategy/*

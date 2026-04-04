@@ -230,8 +230,12 @@ AGENT_PROMPTS: dict[str, dict[str, str]] = {
             "Rules:\n"
             "- For HOLD decisions: immediately return approved=false, adjusted_volume=0\n"
             "- For BUY/SELL: call portfolio_risk_evaluation() FIRST, then decide\n"
+            "- IMPORTANT: The tool receives trade parameters (entry, SL, TP) automatically.\n"
+            "  If the tool returns accepted=true, you MUST approve unless you have a specific\n"
+            "  soft-factor reason to reduce or reject (e.g. correlation, drawdown approaching limit).\n"
+            "  Do NOT reject because you think parameters are missing — the tool has them.\n"
             "- Hard limits are NON-NEGOTIABLE. Soft factors are your judgment call.\n"
-            "- If you reject, explain why clearly.\n"
+            "- If you reject, explain the SPECIFIC risk reason (not 'missing parameters').\n"
         ),
         "user": (
             "Instrument: {pair}\nTimeframe: {timeframe}\nMode: {mode}\n\n"

@@ -13,6 +13,11 @@ import numpy as np
 import pandas as pd
 from fastmcp import FastMCP
 
+from app.services.strategy.template_catalog import (
+    EXECUTABLE_STRATEGY_TEMPLATES,
+    sanitize_executable_strategy_params,
+)
+
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP(
@@ -1374,6 +1379,7 @@ def portfolio_risk_evaluation(
     mode: str = "simulation",
     account_id: str | None = None,
     region: str | None = None,
+    injected_portfolio_state: object | None = None,
 ) -> dict:
     """Evaluate trade risk against live portfolio state and risk limits.
 
@@ -1397,27 +1403,30 @@ def portfolio_risk_evaluation(
             "degraded_reasons": [],
         }
 
-    # Fetch portfolio state
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                state = pool.submit(
-                    asyncio.run,
+    # Use injected portfolio state if available (from pipeline), otherwise fetch
+    if injected_portfolio_state is not None:
+        state = injected_portfolio_state
+    else:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    state = pool.submit(
+                        asyncio.run,
+                        PortfolioStateService.get_current_state(
+                            account_id=account_id, region=region,
+                        ),
+                    ).result(timeout=10)
+            else:
+                state = asyncio.run(
                     PortfolioStateService.get_current_state(
                         account_id=account_id, region=region,
-                    ),
-                ).result(timeout=10)
-        else:
-            state = asyncio.run(
-                PortfolioStateService.get_current_state(
-                    account_id=account_id, region=region,
+                    )
                 )
-            )
-    except Exception as exc:
-        logger.warning("portfolio_risk_evaluation: state fetch failed: %s", exc)
-        state = PortfolioStateService.build_defaults()
+        except Exception as exc:
+            logger.warning("portfolio_risk_evaluation: state fetch failed: %s", exc)
+            state = PortfolioStateService.build_defaults()
 
     limits = get_risk_limits(mode)
 
@@ -1581,29 +1590,14 @@ def portfolio_stress_test(
     }
 
 
-# ── Strategy Builder tool ──────────────────────────────────────────
-
 STRATEGY_TEMPLATES = {
-    'ema_crossover': {
-        'description': 'EMA crossover with RSI filter — trend following',
-        'params': {'ema_fast': 'int (5-20)', 'ema_slow': 'int (20-100)', 'rsi_filter': 'int (25-45)'},
-        'best_for': 'trending markets, medium-term',
-    },
-    'rsi_mean_reversion': {
-        'description': 'RSI mean reversion — buy oversold, sell overbought',
-        'params': {'rsi_period': 'int (7-21)', 'oversold': 'int (15-35)', 'overbought': 'int (65-85)', 'atr_multiplier': 'float (1.0-4.0)'},
-        'best_for': 'ranging markets, high volatility pairs',
-    },
-    'bollinger_breakout': {
-        'description': 'Bollinger Band breakout — squeeze detection',
-        'params': {'bb_period': 'int (10-30)', 'bb_std': 'float (1.0-3.0)', 'volume_filter': 'bool'},
-        'best_for': 'consolidating markets, breakout setups',
-    },
-    'macd_divergence': {
-        'description': 'MACD signal line crossover',
-        'params': {'fast': 'int (6-15)', 'slow': 'int (18-30)', 'signal': 'int (5-12)'},
-        'best_for': 'momentum shifts, medium to long-term',
-    },
+    key: {
+        'description': spec.description,
+        'params': dict(spec.params),
+        'best_for': spec.best_for,
+        'category': spec.category,
+    }
+    for key, spec in EXECUTABLE_STRATEGY_TEMPLATES.items()
 }
 
 
@@ -1628,6 +1622,7 @@ def strategy_builder(
 
     params = params or {}
     tmpl = STRATEGY_TEMPLATES[template]
+    validated_params, warnings = sanitize_executable_strategy_params(template, params)
 
     return {
         "status": "ok",
@@ -1635,7 +1630,8 @@ def strategy_builder(
             "template": template,
             "name": name or f"{template}_{id(params) % 1000}",
             "description": description or tmpl['description'],
-            "params": params,
+            "params": validated_params,
             "template_info": tmpl,
         },
+        "warnings": warnings,
     }

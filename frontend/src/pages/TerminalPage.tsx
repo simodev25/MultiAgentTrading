@@ -114,6 +114,8 @@ export function TerminalPage() {
   const [riskPercent, setRiskPercent] = useState(1);
   const [metaapiAccountRef, setMetaapiAccountRef] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
+  const [actionInProgress, setActionInProgress] = useState(false);
+  const busyRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(Date.now());
   const [runsPage, setRunsPage] = useState(1);
@@ -273,26 +275,38 @@ export function TerminalPage() {
   const monitoredStrategies = useMemo(() => strategies.filter((s) => s.is_monitoring), [strategies]);
 
   const startMonitoring = async (id: number) => {
-    if (!token) return;
+    if (!token || busyRef.current) return;
+    busyRef.current = true;
+    setActionInProgress(true);
     try {
       await api.startMonitoring(token, id, mode, riskPercent);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to start monitoring');
+    } finally {
+      setActionInProgress(false);
+      busyRef.current = false;
     }
   };
 
   const stopMonitoring = async (id: number) => {
-    if (!token) return;
+    if (!token || busyRef.current) return;
+    busyRef.current = true;
+    setActionInProgress(true);
     try {
       await api.stopMonitoring(token, id);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to stop monitoring');
+    } finally {
+      setActionInProgress(false);
+      busyRef.current = false;
     }
   };
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!token) return;
+    if (!token || busyRef.current) return;
+    busyRef.current = true;
+    setActionInProgress(true);
     setLoading(true);
     setError(null);
     try {
@@ -308,6 +322,8 @@ export function TerminalPage() {
       setError(err instanceof Error ? err.message : 'Cannot create run');
     } finally {
       setLoading(false);
+      setActionInProgress(false);
+      busyRef.current = false;
     }
   };
 
@@ -347,7 +363,7 @@ export function TerminalPage() {
 
       {/* ── Launch card ──────────────────────────────────── */}
       <ExpansionPanel title="EXECUTE_ANALYSIS" icon={Play}>
-        <form onSubmit={onSubmit} className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 items-end">
+        <form onSubmit={onSubmit} className={`grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 items-end ${loading ? 'pointer-events-none opacity-60' : ''}`}>
           <div>
             <label className="micro-label block mb-1.5">Instrument</label>
             <select value={pair} onChange={(e) => setPair(e.target.value)}>
@@ -388,7 +404,7 @@ export function TerminalPage() {
             </select>
           </div>
           <div>
-            <button className="btn-primary w-full" disabled={loading}>
+            <button type="submit" className="btn-primary w-full" disabled={loading || actionInProgress}>
               {loading ? <ButtonSpinner /> : <Zap className="w-3.5 h-3.5" />}
               {loading ? 'Analysis running' : 'Start'}
             </button>
@@ -428,18 +444,20 @@ export function TerminalPage() {
                     <button
                       type="button"
                       className="btn-primary flex items-center gap-1 mt-5"
+                      disabled={actionInProgress}
                       onClick={() => startMonitoring(s.id)}
                     >
-                      <Play className="w-3 h-3" /> Start
+                      <Play className="w-3 h-3" /> {actionInProgress ? 'Starting...' : 'Start'}
                     </button>
                   )}
                   {s.is_monitoring && (
                     <button
                       type="button"
                       className="flex items-center gap-1 mt-5 px-3 py-1.5 text-[9px] font-bold tracking-widest rounded bg-red-500/10 text-red-400 border border-red-500/30 hover:bg-red-500/20 transition-colors"
+                      disabled={actionInProgress}
                       onClick={() => stopMonitoring(s.id)}
                     >
-                      <XCircle className="w-3 h-3" /> Stop
+                      <XCircle className="w-3 h-3" /> {actionInProgress ? 'Stopping...' : 'Stop'}
                     </button>
                   )}
                   <button
@@ -534,9 +552,10 @@ export function TerminalPage() {
                         <td>
                           <button
                             className="text-[8px] font-mono px-2 py-1 rounded bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20"
+                            disabled={actionInProgress}
                             onClick={() => stopMonitoring(s.id)}
                           >
-                            Stop
+                            {actionInProgress ? 'Stopping...' : 'Stop'}
                           </button>
                         </td>
                       </tr>

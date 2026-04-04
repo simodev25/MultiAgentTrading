@@ -29,6 +29,8 @@ class StrategyOut(BaseModel):
 
 class StrategyGenerateRequest(BaseModel):
     prompt: str = Field(min_length=1, description="What kind of strategy to generate")
+    pair: str | None = Field(default=None, description="Trading pair (e.g. EURUSD.PRO, BTCUSD)")
+    timeframe: str | None = Field(default=None, description="Timeframe (M5, M15, H1, H4, D1)")
 
 
 class StrategyEditRequest(BaseModel):

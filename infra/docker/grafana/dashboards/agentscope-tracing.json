@@ -1,0 +1,113 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": true,
+      "title": "Open Tempo Explore (full trace details + prompts)",
+      "tooltip": "View full traces with prompts, completions, and tool calls",
+      "type": "link",
+      "url": "/explore?schemaVersion=1&panes=%7B%22lud%22:%7B%22datasource%22:%22tempo%22,%22queries%22:%5B%7B%22refId%22:%22A%22,%22datasource%22:%7B%22type%22:%22tempo%22,%22uid%22:%22tempo%22%7D,%22queryType%22:%22nativeSearch%22,%22limit%22:20%7D%5D,%22range%22:%7B%22from%22:%22now-1h%22,%22to%22:%22now%22%7D%7D%7D&orgId=1"
+    }
+  ],
+  "panels": [
+    {
+      "title": "How to view prompts",
+      "type": "text",
+      "gridPos": { "h": 3, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "### View prompts & completions\n1. Click **\"Open Tempo Explore\"** link above (or go to Explore → Tempo)\n2. Click **Search** to see all traces\n3. Click a **trace** to expand it\n4. Click a **\"chat\" span** to see: `gen_ai.prompt.0.content` (prompt sent) and `gen_ai.completion.0.content` (LLM response)\n5. Click a **\"execute_tool\" span** to see tool arguments and results"
+      }
+    },
+    {
+      "title": "Recent Traces",
+      "type": "table",
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 3 },
+      "targets": [
+        {
+          "datasource": { "type": "tempo", "uid": "tempo" },
+          "queryType": "nativeSearch",
+          "limit": 50
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": { "type": "auto" },
+            "inspect": true
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "traceID" },
+            "properties": [
+              { "id": "links", "value": [{ "title": "View trace", "url": "/explore?schemaVersion=1&panes=%7B%22lud%22:%7B%22datasource%22:%22tempo%22,%22queries%22:%5B%7B%22refId%22:%22A%22,%22datasource%22:%7B%22type%22:%22tempo%22,%22uid%22:%22tempo%22%7D,%22queryType%22:%22traceqlSearch%22,%22query%22:%22${__value.raw}%22%7D%5D%7D%7D", "targetBlank": true }] }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "title": "LLM Calls (chat)",
+      "type": "table",
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "targets": [
+        {
+          "datasource": { "type": "tempo", "uid": "tempo" },
+          "queryType": "nativeSearch",
+          "limit": 30,
+          "spanName": "chat"
+        }
+      ]
+    },
+    {
+      "title": "Tool Calls (execute_tool)",
+      "type": "table",
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "targets": [
+        {
+          "datasource": { "type": "tempo", "uid": "tempo" },
+          "queryType": "nativeSearch",
+          "limit": 30,
+          "spanName": "execute_tool"
+        }
+      ]
+    },
+    {
+      "title": "Agent Replies (invoke_agent)",
+      "type": "table",
+      "datasource": { "type": "tempo", "uid": "tempo" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 21 },
+      "targets": [
+        {
+          "datasource": { "type": "tempo", "uid": "tempo" },
+          "queryType": "nativeSearch",
+          "limit": 30,
+          "spanName": "invoke_agent"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["agentscope", "tracing", "llm", "prompts"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "AgentScope Tracing",
+  "uid": "agentscope-tracing",
+  "version": 2
+}

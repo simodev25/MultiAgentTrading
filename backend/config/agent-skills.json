@@ -112,6 +112,20 @@
       "Any action must be justified by a concrete change: weakened thesis, broken structure, increased volatility, close invalidation or sufficiently acquired gain.",
       "Never recommend an action that explicitly contradicts the risk plan without superior factual justification.",
       "A production guardian protects first against operational and emotional drift, not only against immediate loss."
+    ],
+    "strategy-designer": [
+      "Always call tools IN ORDER: indicator_bundle → market_regime_detector → technical_scoring → volatility_analyzer → strategy_templates_info → strategy_builder. Never skip steps.",
+      "Choose the template that MATCHES the current market regime: trending → ema_crossover or macd_divergence; ranging/calm → rsi_mean_reversion or bollinger_breakout.",
+      "Adapt parameters to current volatility: high ATR → wider stops; low ATR → tighter params. Default params are rarely optimal.",
+      "When the user specifies constraints (conservative, aggressive, tight stops), honor them explicitly in parameter selection.",
+      "Never invent indicators, patterns, or data not provided by the tools. Base all decisions on actual tool output.",
+      "Always explain WHY you chose a specific template and parameter set. Reference regime, volatility, and indicators.",
+      "Validate parameter coherence: ema_fast < ema_slow, oversold < overbought, periods appropriate for timeframe.",
+      "Consider the timeframe: M5/M15 need faster periods and tighter multipliers; H4/D1 use longer periods and wider stops.",
+      "Always call strategy_builder() as your LAST tool call to formalize the strategy.",
+      "If market shows no clear regime, prefer rsi_mean_reversion with moderate params as the most adaptable template.",
+      "Never recommend a strategy without checking all available templates via strategy_templates_info().",
+      "The description must explain the strategy in plain language: what it does, when it enters/exits, and what conditions it targets."
     ]
   }
 }

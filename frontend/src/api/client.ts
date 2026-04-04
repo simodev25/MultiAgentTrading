@@ -188,8 +188,8 @@ export const api = {
   // Strategies
   listStrategies: (token: string) => request('/strategies', {}, token),
   getStrategy: (token: string, id: number) => request(`/strategies/${id}`, {}, token),
-  generateStrategy: (token: string, prompt: string) =>
-    request('/strategies/generate', { method: 'POST', body: JSON.stringify({ prompt }) }, token),
+  generateStrategy: (token: string, prompt: string, pair?: string, timeframe?: string) =>
+    request('/strategies/generate', { method: 'POST', body: JSON.stringify({ prompt, pair: pair || undefined, timeframe: timeframe || undefined }) }, token),
   validateStrategy: (token: string, id: number) =>
     request(`/strategies/${id}/validate`, { method: 'POST' }, token),
   promoteStrategy: (token: string, id: number, target: string) =>

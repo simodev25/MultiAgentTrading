@@ -119,6 +119,7 @@ async def build_toolkit(
     ohlc: dict[str, list[float]] | None = None,
     news: dict | None = None,
     analysis_outputs: dict | None = None,
+    portfolio_state: object | None = None,
     skills: list[str] | None = None,
     snapshot: dict | None = None,
     decision_mode: str | None = None,
@@ -186,8 +187,14 @@ async def build_toolkit(
                                         "key_level", "entry", "stop_loss", "take_profit")}
             if trader_meta and trader_meta.get("decision"):
                 _force_kwargs = {"trader_decision": trader_meta}
-                logger.info("portfolio_risk_evaluation force_kwargs: decision=%s entry=%s",
-                            trader_meta.get("decision"), trader_meta.get("entry"))
+                if portfolio_state is not None:
+                    _force_kwargs["injected_portfolio_state"] = portfolio_state
+                    logger.info("portfolio_risk_evaluation force_kwargs: decision=%s entry=%s equity=%s",
+                                trader_meta.get("decision"), trader_meta.get("entry"),
+                                getattr(portfolio_state, "equity", "?"))
+                else:
+                    logger.info("portfolio_risk_evaluation force_kwargs: decision=%s entry=%s (no portfolio_state)",
+                                trader_meta.get("decision"), trader_meta.get("entry"))
             else:
                 logger.warning("portfolio_risk_evaluation: no trader_decision found in analysis_outputs (keys=%s)",
                                list(trader_out.keys()) if trader_out else "empty")
