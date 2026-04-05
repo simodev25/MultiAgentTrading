@@ -18,6 +18,48 @@ from app.services.risk.limits import RISK_LIMITS, RiskLimits
 
 CONNECTOR_NAME = "trading"
 
+DECISION_MODE_RISK_PRESETS: dict[str, dict[str, float | int]] = {
+    "conservative": {
+        "max_risk_per_trade_pct": 1.5,
+        "max_daily_loss_pct": 2.0,
+        "max_open_risk_pct": 4.5,
+        "max_positions": 2,
+        "max_positions_per_symbol": 1,
+        "min_free_margin_pct": 60.0,
+        "max_currency_notional_exposure_pct_warn": 10.0,
+        "max_currency_notional_exposure_pct_block": 12.0,
+        "max_currency_open_risk_pct": 5.0,
+        "max_weekly_loss_pct": 4.0,
+    },
+    "balanced": {},
+    "permissive": {
+        "max_risk_per_trade_pct": 2.5,
+        "max_daily_loss_pct": 4.0,
+        "max_open_risk_pct": 8.0,
+        "max_positions": 4,
+        "max_positions_per_symbol": 2,
+        "min_free_margin_pct": 40.0,
+        "max_currency_notional_exposure_pct_warn": 18.0,
+        "max_currency_notional_exposure_pct_block": 22.0,
+        "max_currency_open_risk_pct": 7.0,
+        "max_weekly_loss_pct": 6.0,
+    },
+}
+
+DECISION_MODE_SIZING_PRESETS: dict[str, dict[str, float]] = {
+    "conservative": {
+        "sl_atr_multiplier": 1.8,
+        "tp_atr_multiplier": 3.0,
+        "min_sl_distance_pct": 0.07,
+    },
+    "balanced": {},
+    "permissive": {
+        "sl_atr_multiplier": 1.2,
+        "tp_atr_multiplier": 2.0,
+        "min_sl_distance_pct": 0.03,
+    },
+}
+
 # ── Parameter catalog with descriptions ──
 # Each entry: (key, description, type, default_per_mode)
 
@@ -118,7 +160,7 @@ RISK_PARAMS: list[dict[str, Any]] = [
         "description": "Seuil d'alerte de concentration notionnelle par devise. Mesure de concentration, pas de risque stop-based.",
         "type": "float",
         "min": 5.0,
-        "max": 300.0,
+        "max": 2000.0,
         "step": 5.0,
     },
     {
@@ -127,7 +169,7 @@ RISK_PARAMS: list[dict[str, Any]] = [
         "description": "Seuil de blocage dur de concentration notionnelle par devise. A utiliser avec prudence pendant la transition.",
         "type": "float",
         "min": 5.0,
-        "max": 500.0,
+        "max": 2000.0,
         "step": 5.0,
     },
     {
@@ -234,16 +276,19 @@ def get_effective_gating_policy(mode: str) -> DecisionGatingPolicy:
     return DecisionGatingPolicy(**base_dict)
 
 
-def get_effective_risk_limits(mode: str) -> RiskLimits:
-    """Resolve RiskLimits: DB overrides > code defaults for the given execution mode."""
+def get_effective_risk_limits(mode: str, decision_mode: str = "balanced") -> RiskLimits:
+    """Resolve RiskLimits: execution defaults > decision preset > DB overrides."""
     base = RISK_LIMITS.get(mode, RISK_LIMITS["live"])
+    decision_overrides = DECISION_MODE_RISK_PRESETS.get(decision_mode, DECISION_MODE_RISK_PRESETS["balanced"])
     runtime = _get_runtime_settings()
 
     risk_overrides = runtime.get("risk_limits", {})
     if not isinstance(risk_overrides, dict):
-        return base
+        base_dict = asdict(base)
+        base_dict.update(decision_overrides)
+        return RiskLimits(**base_dict)
 
-    overrides: dict[str, Any] = {}
+    overrides: dict[str, Any] = dict(decision_overrides)
     for param in RISK_PARAMS:
         key = param["key"]
         if key in risk_overrides:
@@ -255,17 +300,14 @@ def get_effective_risk_limits(mode: str) -> RiskLimits:
             except (TypeError, ValueError):
                 pass
 
-    if not overrides:
-        return base
-
     base_dict = asdict(base)
     base_dict.update(overrides)
     # frozen dataclass — rebuild
     return RiskLimits(**base_dict)
 
 
-def get_effective_sizing() -> dict[str, float]:
-    """Resolve trade sizing ATR multipliers: DB overrides > code defaults."""
+def get_effective_sizing(decision_mode: str = "balanced") -> dict[str, float]:
+    """Resolve trade sizing ATR multipliers: defaults > decision preset > DB overrides."""
     from app.services.agentscope.constants import SL_ATR_MULTIPLIER, TP_ATR_MULTIPLIER
 
     defaults: dict[str, float] = {
@@ -273,6 +315,7 @@ def get_effective_sizing() -> dict[str, float]:
         "tp_atr_multiplier": TP_ATR_MULTIPLIER,
         "min_sl_distance_pct": 0.05,
     }
+    defaults.update(DECISION_MODE_SIZING_PRESETS.get(decision_mode, DECISION_MODE_SIZING_PRESETS["balanced"]))
     runtime = _get_runtime_settings()
     sizing_overrides = runtime.get("sizing", {})
     if not isinstance(sizing_overrides, dict):
@@ -325,8 +368,8 @@ def _query_max_version(db: Any) -> int:
 def get_current_values(decision_mode: str, execution_mode: str) -> dict[str, dict[str, Any]]:
     """Return current effective values for all configurable parameters."""
     gating = get_effective_gating_policy(decision_mode)
-    limits = get_effective_risk_limits(execution_mode)
-    sizing = get_effective_sizing()
+    limits = get_effective_risk_limits(execution_mode, decision_mode)
+    sizing = get_effective_sizing(decision_mode)
 
     return {
         "gating": {

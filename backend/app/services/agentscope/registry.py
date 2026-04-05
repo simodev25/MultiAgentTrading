@@ -1606,11 +1606,17 @@ class AgentScopeRegistry:
                                 "price": snapshot.get("last_price", 0.0),
                                 "atr": snapshot.get("atr", 0.0),
                                 "decision_side": _trader_decision,
+                                "decision_mode": _resolved_decision_mode,
                             })
                             if isinstance(_auto_sizing, dict) and "entry" in _auto_sizing:
                                 agent_tool_invocations.setdefault("trader-agent", {})["trade_sizing"] = {
                                     "tool_id": "trade_sizing", "status": "ok",
-                                    "input": {"price": snapshot.get("last_price"), "atr": snapshot.get("atr"), "decision_side": _trader_decision},
+                                    "input": {
+                                        "price": snapshot.get("last_price"),
+                                        "atr": snapshot.get("atr"),
+                                        "decision_side": _trader_decision,
+                                        "decision_mode": _resolved_decision_mode,
+                                    },
                                     "data": _auto_sizing,
                                 }
                                 logger.info("Auto trade_sizing: entry=%s SL=%s TP=%s",
@@ -1646,6 +1652,7 @@ class AgentScopeRegistry:
                             "reasoning": meta.get("reasoning") or d.get("reasoning", ""),
                             "pair": pair,
                             "mode": getattr(run, "mode", "simulation"),
+                            "decision_mode": _resolved_decision_mode,
                             "asset_class": base_vars.get("asset_class"),
                             "key_level": meta.get("key_level") or d.get("key_level"),
                             "entry": _sizing_data.get("entry") or meta.get("entry") or d.get("entry"),
@@ -1883,7 +1890,7 @@ class AgentScopeRegistry:
                 from app.services.config.trading_config import get_effective_gating_policy, get_effective_risk_limits, get_effective_sizing
                 _eff_gating = get_effective_gating_policy(_resolved_decision_mode)
                 _run_mode_str = str(getattr(run, "mode", "simulation") or "simulation").strip().lower()
-                _eff_limits = get_effective_risk_limits(_run_mode_str)
+                _eff_limits = get_effective_risk_limits(_run_mode_str, _resolved_decision_mode)
                 _effective_trading_params = {
                     "decision_mode": _resolved_decision_mode,
                     "execution_mode": _run_mode_str,
@@ -1906,7 +1913,7 @@ class AgentScopeRegistry:
                         "max_currency_notional_exposure_pct_block": _eff_limits.max_currency_notional_exposure_pct_block,
                         "max_currency_open_risk_pct": _eff_limits.max_currency_open_risk_pct,
                     },
-                    "sizing": get_effective_sizing(),
+                    "sizing": get_effective_sizing(_resolved_decision_mode),
                 }
             except Exception:
                 pass

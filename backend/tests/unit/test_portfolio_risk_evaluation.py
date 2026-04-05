@@ -54,7 +54,7 @@ def test_portfolio_risk_evaluation_exposes_canonical_and_legacy_currency_metrics
             "max_gross_exposure_pct": 500.0,
         }
     )
-    monkeypatch.setattr("app.services.risk.limits.get_risk_limits", lambda mode: limits)
+    monkeypatch.setattr("app.services.risk.limits.get_risk_limits", lambda mode, decision_mode="balanced": limits)
 
     result = portfolio_risk_evaluation(
         trader_decision={
@@ -84,10 +84,10 @@ def test_portfolio_risk_evaluation_exposes_canonical_and_legacy_currency_metrics
 
 def test_portfolio_risk_evaluation_uses_trader_decision_mode_when_tool_mode_is_missing(monkeypatch) -> None:
     base = get_risk_limits("live")
-    seen_modes: list[str] = []
+    seen_calls: list[tuple[str, str]] = []
 
-    def _fake_get_risk_limits(mode: str):
-        seen_modes.append(mode)
+    def _fake_get_risk_limits(mode: str, decision_mode: str = "balanced"):
+        seen_calls.append((mode, decision_mode))
         return base
 
     monkeypatch.setattr("app.services.risk.limits.get_risk_limits", _fake_get_risk_limits)
@@ -97,6 +97,7 @@ def test_portfolio_risk_evaluation_uses_trader_decision_mode_when_tool_mode_is_m
             "decision": "BUY",
             "pair": "BTCUSD",
             "mode": "live",
+            "decision_mode": "permissive",
             "entry": 2500.0,
             "stop_loss": 2400.0,
             "take_profit": 2800.0,
@@ -107,7 +108,7 @@ def test_portfolio_risk_evaluation_uses_trader_decision_mode_when_tool_mode_is_m
         injected_portfolio_state=_state(),
     )
 
-    assert seen_modes[0] == "live"
+    assert seen_calls[0] == ("live", "permissive")
 
 
 def test_portfolio_risk_evaluation_stress_summary_uses_same_required_scenarios_as_risk_engine(monkeypatch) -> None:
@@ -115,7 +116,7 @@ def test_portfolio_risk_evaluation_stress_summary_uses_same_required_scenarios_a
     limits = RiskLimits(**{**base.__dict__, "stress_test_survival_required": ("risk_off", "usd_crash")})
     scenario_calls: list[tuple[str, ...]] = []
 
-    monkeypatch.setattr("app.services.risk.limits.get_risk_limits", lambda mode: limits)
+    monkeypatch.setattr("app.services.risk.limits.get_risk_limits", lambda mode, decision_mode="balanced": limits)
 
     def _fake_stress_test(*args, **kwargs):
         scenarios = kwargs.get("scenarios") or []

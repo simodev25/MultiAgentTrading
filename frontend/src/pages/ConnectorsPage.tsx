@@ -1590,7 +1590,8 @@ export function ConnectorsPage() {
               <p className="model-source" style={{ marginBottom: 12 }}>
                 Les valeurs ci-dessous sont les parametres effectifs pour le mode de decision <strong>{decisionMode}</strong>
                 {' '}et le mode d'execution <strong>{executionMode}</strong>.
-                Changer le Decision Mode ou le Execution Mode recharge les valeurs par defaut du mode selectionne.
+                Le Decision Mode influence maintenant le gating, les risk limits et le sizing.
+                Changer le Decision Mode ou le Execution Mode recharge les valeurs effectives du profil selectionne.
                 Vos overrides sont sauvegardes separement et s'appliquent par-dessus les defaults.
               </p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3" style={{ marginBottom: 12 }}>

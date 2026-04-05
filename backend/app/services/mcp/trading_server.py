@@ -883,6 +883,7 @@ def scenario_validation(
     stop_loss: float | None = None,
     take_profit: float | None = None,
     entry_price: float | None = None,
+    decision_mode: str = "balanced",
 ) -> dict[str, Any]:
     """Validate a trading scenario against invalidation conditions.
 
@@ -908,7 +909,7 @@ def scenario_validation(
     if stop_loss and entry_price:
         try:
             from app.services.config.trading_config import get_effective_sizing
-            _min_sl_pct = get_effective_sizing().get("min_sl_distance_pct", 0.05)
+            _min_sl_pct = get_effective_sizing(decision_mode).get("min_sl_distance_pct", 0.05)
         except Exception:
             _min_sl_pct = 0.05
         if sl_distance_pct < _min_sl_pct:
@@ -1311,11 +1312,12 @@ def trade_sizing(
     price: float = 0.0,
     atr: float = 0.0,
     decision_side: str = "BUY",
+    decision_mode: str = "balanced",
 ) -> dict:
     """Compute entry, stop-loss, and take-profit from ATR (with runtime DB overrides)."""
     try:
         from app.services.config.trading_config import get_effective_sizing
-        sizing = get_effective_sizing()
+        sizing = get_effective_sizing(decision_mode)
         _sl_mult = sizing["sl_atr_multiplier"]
         _tp_mult = sizing["tp_atr_multiplier"]
     except Exception:
@@ -1392,6 +1394,7 @@ def portfolio_risk_evaluation(
 
     trader_decision = trader_decision or {}
     resolved_mode = str(trader_decision.get("mode") or mode or "simulation").strip().lower()
+    resolved_decision_mode = str(trader_decision.get("decision_mode") or "balanced").strip().lower()
     resolved_pair = trader_decision.get("pair") or trader_decision.get("symbol")
     decision = trader_decision.get("decision", "HOLD")
 
@@ -1430,7 +1433,7 @@ def portfolio_risk_evaluation(
             logger.warning("portfolio_risk_evaluation: state fetch failed: %s", exc)
             state = PortfolioStateService.build_defaults()
 
-    limits = get_risk_limits(resolved_mode)
+    limits = get_risk_limits(resolved_mode, resolved_decision_mode)
 
     proposed = ProposedTrade(
         decision=decision,

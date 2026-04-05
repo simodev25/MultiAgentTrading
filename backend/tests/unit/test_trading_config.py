@@ -1,5 +1,6 @@
 """Unit tests for runtime trading configuration."""
 
+from app.services.config import trading_config as trading_config_module
 from app.services.config.trading_config import (
     get_current_values,
     get_effective_gating_policy,
@@ -24,6 +25,14 @@ def test_catalog_params_have_descriptions() -> None:
             assert "label" in param, f"Missing label in {section}/{param.get('key')}"
             assert "description" in param, f"Missing description in {section}/{param.get('key')}"
             assert len(param["description"]) > 10, f"Description too short for {section}/{param['key']}"
+
+
+def test_currency_notional_block_catalog_max_supports_high_concentration_books() -> None:
+    catalog = get_param_catalog()
+    warn_field = next(param for param in catalog["risk_limits"] if param["key"] == "max_currency_notional_exposure_pct_warn")
+    block_field = next(param for param in catalog["risk_limits"] if param["key"] == "max_currency_notional_exposure_pct_block")
+    assert warn_field["max"] == 2000.0
+    assert block_field["max"] == 2000.0
 
 
 def test_gating_defaults_match_constants() -> None:
@@ -52,6 +61,37 @@ def test_sizing_defaults_match() -> None:
     sizing = get_effective_sizing()
     assert sizing["sl_atr_multiplier"] == 1.5
     assert sizing["tp_atr_multiplier"] == 2.5
+
+
+def test_decision_mode_changes_risk_limits_and_sizing() -> None:
+    conservative = get_current_values("conservative", "live")
+    balanced = get_current_values("balanced", "live")
+    permissive = get_current_values("permissive", "live")
+
+    assert conservative["risk_limits"]["max_risk_per_trade_pct"] < balanced["risk_limits"]["max_risk_per_trade_pct"]
+    assert permissive["risk_limits"]["max_risk_per_trade_pct"] > balanced["risk_limits"]["max_risk_per_trade_pct"]
+    assert conservative["risk_limits"]["max_open_risk_pct"] < balanced["risk_limits"]["max_open_risk_pct"]
+    assert permissive["risk_limits"]["max_open_risk_pct"] > balanced["risk_limits"]["max_open_risk_pct"]
+    assert conservative["sizing"]["sl_atr_multiplier"] > balanced["sizing"]["sl_atr_multiplier"]
+    assert permissive["sizing"]["sl_atr_multiplier"] < balanced["sizing"]["sl_atr_multiplier"]
+    assert conservative["sizing"]["min_sl_distance_pct"] > balanced["sizing"]["min_sl_distance_pct"]
+    assert permissive["sizing"]["min_sl_distance_pct"] < balanced["sizing"]["min_sl_distance_pct"]
+
+
+def test_runtime_overrides_take_precedence_over_decision_mode_presets(monkeypatch) -> None:
+    monkeypatch.setattr(
+        trading_config_module,
+        "_get_runtime_settings",
+        lambda: {
+            "risk_limits": {"max_open_risk_pct": 11.5},
+            "sizing": {"sl_atr_multiplier": 1.9},
+        },
+    )
+
+    values = get_current_values("conservative", "live")
+
+    assert values["risk_limits"]["max_open_risk_pct"] == 11.5
+    assert values["sizing"]["sl_atr_multiplier"] == 1.9
 
 
 def test_current_values_structure() -> None:

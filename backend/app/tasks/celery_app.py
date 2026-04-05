@@ -2,10 +2,11 @@ import logging
 import os
 
 from celery import Celery
-from celery.signals import after_setup_logger, worker_process_shutdown, worker_ready
+from celery.signals import after_setup_logger, worker_process_init, worker_process_shutdown, worker_ready
 
 from app.core.config import get_settings
 from app.observability.prometheus import mark_worker_process_dead, start_worker_metrics_server
+from app.tasks.worker_tracing import init_agentscope_tracing_for_current_process
 
 settings = get_settings()
 
@@ -92,21 +93,16 @@ def _start_prometheus_worker_metrics_server(**_: object) -> None:
     start_worker_metrics_server(settings.prometheus_worker_port)
 
 
+@worker_process_init.connect(weak=False)
+def _init_agentscope_tracing_in_worker_process(**_: object) -> None:
+    """Initialize tracing in each forked Celery worker process."""
+    init_agentscope_tracing_for_current_process()
+
+
 @worker_ready.connect(weak=False)
-def _init_agentscope_tracing(**_: object) -> None:
-    """Initialize AgentScope tracing with OpenTelemetry → Tempo."""
-    tracing_url = os.environ.get('AGENTSCOPE_TRACING_URL', 'http://tempo:4318/v1/traces')
-    try:
-        import agentscope
-        agentscope.init(
-            project="MultiAgentTrading",
-            name="trading_worker",
-            logging_level="INFO",
-            tracing_url=tracing_url,
-        )
-        logging.getLogger('app').info("AgentScope tracing enabled → %s", tracing_url)
-    except Exception as exc:
-        logging.getLogger('app').warning("AgentScope tracing init failed: %s", exc)
+def _init_agentscope_tracing_in_main_process(**_: object) -> None:
+    """Initialize tracing in main process for embedded beat / process-local diagnostics."""
+    init_agentscope_tracing_for_current_process()
 
 
 @worker_process_shutdown.connect(weak=False)

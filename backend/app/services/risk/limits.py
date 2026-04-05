@@ -86,10 +86,10 @@ RISK_LIMITS: dict[str, RiskLimits] = {
 }
 
 
-def get_risk_limits(mode: str) -> RiskLimits:
-    """Return RiskLimits for the given mode, with runtime DB overrides if available."""
+def get_risk_limits(mode: str, decision_mode: str = "balanced") -> RiskLimits:
+    """Return RiskLimits for the given mode and decision profile."""
     try:
         from app.services.config.trading_config import get_effective_risk_limits
-        return get_effective_risk_limits(mode)
+        return get_effective_risk_limits(mode, decision_mode)
     except Exception:
         return RISK_LIMITS.get(mode, RISK_LIMITS["live"])
