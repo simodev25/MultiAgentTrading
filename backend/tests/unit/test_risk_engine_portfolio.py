@@ -1,5 +1,7 @@
 """Unit tests for RiskEngine.evaluate_portfolio() — portfolio-level risk checks."""
 
+from types import SimpleNamespace
+
 from app.services.risk.limits import RiskLimits, get_risk_limits
 from app.services.risk.portfolio_state import OpenPosition, PortfolioState
 from app.services.risk.rules import ProposedTrade, RiskEngine
@@ -57,6 +59,7 @@ def test_reject_daily_loss_exceeded() -> None:
     result = engine.evaluate_portfolio(portfolio, LIVE_LIMITS, trade)
     assert result.accepted is False
     assert "daily loss limit reached" in result.reasons[0]
+    assert result.primary_rejection_reason == "daily_drawdown_pct"
 
 
 def test_reject_risk_budget_exceeded() -> None:
@@ -67,6 +70,7 @@ def test_reject_risk_budget_exceeded() -> None:
     result = engine.evaluate_portfolio(portfolio, LIVE_LIMITS, trade)
     assert result.accepted is False
     assert "risk budget exceeded" in result.reasons[0]
+    assert result.primary_rejection_reason == "portfolio_open_risk_pct"
 
 
 def test_reject_max_positions() -> None:
@@ -87,6 +91,7 @@ def test_reject_max_positions() -> None:
     result = engine.evaluate_portfolio(portfolio, LIVE_LIMITS, trade)
     assert result.accepted is False
     assert "max positions reached" in result.reasons[0]
+    assert result.primary_rejection_reason == "max_positions"
 
 
 def test_reject_max_per_symbol() -> None:
@@ -106,6 +111,7 @@ def test_reject_max_per_symbol() -> None:
     result = engine.evaluate_portfolio(portfolio, LIVE_LIMITS, trade)
     assert result.accepted is False
     assert "max positions on EURUSD.PRO reached" in result.reasons[0]
+    assert result.primary_rejection_reason == "max_positions_per_symbol"
 
 
 def test_reject_insufficient_margin() -> None:
@@ -119,6 +125,7 @@ def test_reject_insufficient_margin() -> None:
     result = engine.evaluate_portfolio(portfolio, LIVE_LIMITS, trade)
     assert result.accepted is False
     assert "insufficient free margin" in result.reasons[0]
+    assert result.primary_rejection_reason == "free_margin_pct"
 
 
 def test_accept_within_limits() -> None:
@@ -202,3 +209,56 @@ def test_degraded_data_handling() -> None:
     result = engine.evaluate_portfolio(portfolio, LIVE_LIMITS, trade)
     assert isinstance(result.accepted, bool)
     assert len(result.reasons) > 0
+
+
+def test_high_currency_notional_exposure_is_collected_in_breached_limits_without_auto_reject() -> None:
+    """Notional concentration is observable and explicit, not silently treated as stop-risk."""
+    engine = RiskEngine()
+    positions = [
+        OpenPosition(
+            symbol="USDJPY.pro", side="SELL", volume=1.0,
+            entry_price=160.0, current_price=159.0, unrealized_pnl=0.0, risk_pct=1.0,
+        )
+    ]
+    portfolio = _make_portfolio(
+        equity=50000.0,
+        free_margin=40000.0,
+        open_positions=positions,
+        open_position_count=1,
+        open_risk_total_pct=1.0,
+    )
+    limits = RiskLimits(**{
+        **LIVE_LIMITS.__dict__,
+        "max_positions": 5,
+        "max_positions_per_symbol": 2,
+        "max_open_risk_pct": 6.0,
+        "max_currency_notional_exposure_pct_warn": 150.0,
+        "max_currency_notional_exposure_pct_block": 500.0,
+        "max_currency_open_risk_pct": 6.0,
+    })
+    trade = _make_trade(pair="ETHUSD", risk_percent=1.0, asset_class="crypto")
+    result = engine.evaluate_portfolio(portfolio, limits, trade)
+    assert result.accepted is True
+    assert any(item["metric"] == "currency_notional_exposure_pct[USD]" for item in result.breached_limits)
+    assert result.primary_rejection_reason is None
+
+
+def test_stress_test_critical_causes_rejection(monkeypatch) -> None:
+    """Stress-test critical remains a hard block."""
+    engine = RiskEngine()
+    portfolio = _make_portfolio(
+        equity=10000.0,
+        free_margin=8000.0,
+        open_risk_total_pct=1.0,
+        daily_drawdown_pct=0.5,
+    )
+    trade = _make_trade(risk_percent=1.0)
+
+    def _fake_stress_test(*args, **kwargs):
+        return SimpleNamespace(worst_case_pnl_pct=-42.0, recommendation="critical")
+
+    monkeypatch.setattr("app.services.risk.stress_test.run_stress_test", _fake_stress_test)
+    result = engine.evaluate_portfolio(portfolio, LIVE_LIMITS, trade)
+    assert result.accepted is False
+    assert result.primary_rejection_reason == "stress_test_worst_case_pct"
+    assert any(item["metric"] == "stress_test_worst_case_pct" for item in result.breached_limits)

@@ -15,7 +15,9 @@ class RiskLimits:
     max_positions_per_symbol: int     # Max positions per symbol
     min_free_margin_pct: float        # Min free margin percentage
     # Tier 2
-    max_currency_exposure_pct: float = 40.0   # Max exposure per currency (% equity)
+    max_currency_notional_exposure_pct_warn: float = 40.0
+    max_currency_notional_exposure_pct_block: float = 40.0
+    max_currency_open_risk_pct: float = 15.0
     max_gross_exposure_pct: float = 100.0      # Max total gross exposure
     max_correlation_risk_multiplier: float = 3.0  # Max effective risk multiplier from correlation
     max_weekly_loss_pct: float = 15.0          # Max weekly loss
@@ -34,7 +36,9 @@ RISK_LIMITS: dict[str, RiskLimits] = {
         max_positions=10,
         max_positions_per_symbol=3,
         min_free_margin_pct=20.0,
-        max_currency_exposure_pct=40.0,
+        max_currency_notional_exposure_pct_warn=30.0,
+        max_currency_notional_exposure_pct_block=40.0,
+        max_currency_open_risk_pct=15.0,
         max_gross_exposure_pct=100.0,
         max_correlation_risk_multiplier=3.0,
         max_weekly_loss_pct=15.0,
@@ -50,7 +54,9 @@ RISK_LIMITS: dict[str, RiskLimits] = {
         max_positions=5,
         max_positions_per_symbol=2,
         min_free_margin_pct=30.0,
-        max_currency_exposure_pct=25.0,
+        max_currency_notional_exposure_pct_warn=20.0,
+        max_currency_notional_exposure_pct_block=25.0,
+        max_currency_open_risk_pct=10.0,
         max_gross_exposure_pct=60.0,
         max_correlation_risk_multiplier=2.0,
         max_weekly_loss_pct=10.0,
@@ -66,7 +72,9 @@ RISK_LIMITS: dict[str, RiskLimits] = {
         max_positions=3,
         max_positions_per_symbol=1,
         min_free_margin_pct=50.0,
-        max_currency_exposure_pct=15.0,
+        max_currency_notional_exposure_pct_warn=12.0,
+        max_currency_notional_exposure_pct_block=15.0,
+        max_currency_open_risk_pct=6.0,
         max_gross_exposure_pct=40.0,
         max_correlation_risk_multiplier=1.5,
         max_weekly_loss_pct=5.0,

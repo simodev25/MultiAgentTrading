@@ -423,7 +423,10 @@ async def portfolio_stream_socket(websocket: WebSocket) -> None:
         while True:
             db: Session = SessionLocal()
             try:
-                from app.services.risk.currency_exposure import compute_currency_exposure
+                from app.services.risk.currency_exposure import (
+                    compute_currency_exposure,
+                    serialize_currency_exposure_report,
+                )
                 from app.services.risk.limits import get_risk_limits
                 from app.services.risk.portfolio_state import PortfolioStateService
 
@@ -434,13 +437,7 @@ async def portfolio_stream_socket(websocket: WebSocket) -> None:
                 currency_exposure = {}
                 try:
                     report = compute_currency_exposure(state.open_positions, equity)
-                    currency_exposure = {
-                        ce.currency: {
-                            "net_lots": ce.net_exposure_lots,
-                            "exposure_pct": ce.exposure_pct,
-                        }
-                        for ce in report.exposures.values()
-                    }
+                    currency_exposure = serialize_currency_exposure_report(report)
                 except Exception:
                     pass
 
@@ -466,7 +463,9 @@ async def portfolio_stream_socket(websocket: WebSocket) -> None:
                         "max_open_risk_pct": limits.max_open_risk_pct,
                         "max_positions": limits.max_positions,
                         "min_free_margin_pct": limits.min_free_margin_pct,
-                        "max_currency_exposure_pct": limits.max_currency_exposure_pct,
+                        "max_currency_notional_exposure_pct_warn": limits.max_currency_notional_exposure_pct_warn,
+                        "max_currency_notional_exposure_pct_block": limits.max_currency_notional_exposure_pct_block,
+                        "max_currency_open_risk_pct": limits.max_currency_open_risk_pct,
                     },
                     "currency_exposure": currency_exposure,
                     "open_positions": [

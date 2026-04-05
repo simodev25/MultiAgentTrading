@@ -1391,6 +1391,8 @@ def portfolio_risk_evaluation(
     from app.services.risk.rules import ProposedTrade, RiskEngine
 
     trader_decision = trader_decision or {}
+    resolved_mode = str(trader_decision.get("mode") or mode or "simulation").strip().lower()
+    resolved_pair = trader_decision.get("pair") or trader_decision.get("symbol")
     decision = trader_decision.get("decision", "HOLD")
 
     if decision == "HOLD":
@@ -1428,16 +1430,16 @@ def portfolio_risk_evaluation(
             logger.warning("portfolio_risk_evaluation: state fetch failed: %s", exc)
             state = PortfolioStateService.build_defaults()
 
-    limits = get_risk_limits(mode)
+    limits = get_risk_limits(resolved_mode)
 
     proposed = ProposedTrade(
         decision=decision,
-        pair=trader_decision.get("pair"),
+        pair=resolved_pair,
         entry_price=trader_decision.get("entry", 0.0),
         stop_loss=trader_decision.get("stop_loss"),
         take_profit=trader_decision.get("take_profit"),
         risk_percent=risk_percent,
-        mode=mode,
+        mode=resolved_mode,
         asset_class=trader_decision.get("asset_class"),
     )
 
@@ -1450,6 +1452,7 @@ def portfolio_risk_evaluation(
         "equity": state.equity,
         "free_margin_pct": round((state.free_margin / equity) * 100, 1),
         "open_risk_pct": state.open_risk_total_pct,
+        "portfolio_open_risk_pct": state.open_risk_total_pct,
         "daily_drawdown_pct": state.daily_drawdown_pct,
         "weekly_drawdown_pct": state.weekly_drawdown_pct,
         "risk_budget_remaining_pct": round(
@@ -1457,25 +1460,43 @@ def portfolio_risk_evaluation(
         ),
         "open_positions": state.open_position_count,
         "max_positions": limits.max_positions,
+        "incremental_trade_risk_pct": round(risk_percent, 2),
     }
 
     # Tier 2: currency exposure
     currency_exposure_data: dict = {}
     try:
-        from app.services.risk.currency_exposure import compute_currency_exposure
+        from app.services.risk.currency_exposure import (
+            compute_currency_exposure,
+            serialize_currency_exposure_report,
+        )
         curr_report = compute_currency_exposure(state.open_positions, equity)
-        currency_exposure_data = {
-            ce.currency: {
-                "net_lots": ce.net_exposure_lots,
-                "exposure_pct": ce.exposure_pct,
-            }
-            for ce in curr_report.exposures.values()
-        }
+        currency_exposure_data = serialize_currency_exposure_report(curr_report)
         portfolio_summary["currency_exposure"] = currency_exposure_data
+        portfolio_summary["currency_notional_exposure"] = {
+            k: v["currency_notional_exposure_pct"] for k, v in currency_exposure_data.items()
+        }
+        portfolio_summary["currency_open_risk"] = {
+            k: v["currency_open_risk_pct"] for k, v in currency_exposure_data.items()
+        }
+        portfolio_summary["total_gross_notional_exposure_pct"] = curr_report.total_gross_notional_exposure_pct
         if curr_report.warnings:
             portfolio_summary["currency_warnings"] = curr_report.warnings
     except Exception as exc:
         logger.debug("Currency exposure enrichment failed: %s", exc)
+
+    incremental_currency_open_risk_pct: dict[str, float] = {}
+    try:
+        from app.services.risk.currency_exposure import _decompose_symbol
+
+        base, quote = _decompose_symbol(resolved_pair or "")
+        for currency in (base, quote):
+            if currency:
+                incremental_currency_open_risk_pct[currency] = round(risk_percent, 2)
+        if incremental_currency_open_risk_pct:
+            portfolio_summary["incremental_currency_open_risk_pct"] = incremental_currency_open_risk_pct
+    except Exception as exc:
+        logger.debug("Incremental currency open risk enrichment failed: %s", exc)
 
     # Tier 2: correlation alerts
     correlation_alerts: list[dict] = []
@@ -1502,11 +1523,17 @@ def portfolio_risk_evaluation(
     # Tier 3: stress test (advisory, non-blocking)
     stress_data: dict = {}
     try:
-        from app.services.risk.stress_test import run_stress_test
+        from app.services.risk.stress_test import SCENARIOS, run_stress_test
+        selected_scenarios = [
+            scenario
+            for scenario in SCENARIOS
+            if scenario.name in set(limits.stress_test_survival_required)
+        ] or None
         st_report = run_stress_test(
             positions=state.open_positions,
             equity=equity,
             used_margin=state.used_margin,
+            scenarios=selected_scenarios,
         )
         stress_data = {
             "worst_case_pnl_pct": st_report.worst_case_pnl_pct,
@@ -1521,10 +1548,14 @@ def portfolio_risk_evaluation(
         "accepted": assessment.accepted,
         "suggested_volume": assessment.suggested_volume,
         "reasons": assessment.reasons,
+        "breached_limits": assessment.breached_limits,
+        "primary_rejection_reason": assessment.primary_rejection_reason,
         "portfolio_summary": portfolio_summary,
         "currency_exposure": currency_exposure_data,
         "correlation_alerts": correlation_alerts,
         "stress_test": stress_data,
+        "incremental_trade_risk_pct": round(risk_percent, 2),
+        "incremental_currency_open_risk_pct": incremental_currency_open_risk_pct,
         "degraded": state.degraded,
         "degraded_reasons": state.degraded_reasons,
     }

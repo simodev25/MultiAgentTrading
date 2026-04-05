@@ -7,8 +7,7 @@ multipliers. All values can be overridden at runtime via the ConnectorConfig
 
 from __future__ import annotations
 
-import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from typing import Any
 
 from app.services.agentscope.constants import (
@@ -16,8 +15,6 @@ from app.services.agentscope.constants import (
     DecisionGatingPolicy,
 )
 from app.services.risk.limits import RISK_LIMITS, RiskLimits
-
-logger = logging.getLogger(__name__)
 
 CONNECTOR_NAME = "trading"
 
@@ -116,13 +113,31 @@ RISK_PARAMS: list[dict[str, Any]] = [
         "step": 5.0,
     },
     {
-        "key": "max_currency_exposure_pct",
-        "label": "Max Currency Exposure (%)",
-        "description": "Exposition maximale sur une seule devise. Evite la concentration (ex: tout en USD).",
+        "key": "max_currency_notional_exposure_pct_warn",
+        "label": "Max Currency Notional Exposure Warn (%)",
+        "description": "Seuil d'alerte de concentration notionnelle par devise. Mesure de concentration, pas de risque stop-based.",
         "type": "float",
         "min": 5.0,
-        "max": 100.0,
+        "max": 300.0,
         "step": 5.0,
+    },
+    {
+        "key": "max_currency_notional_exposure_pct_block",
+        "label": "Max Currency Notional Exposure Block (%)",
+        "description": "Seuil de blocage dur de concentration notionnelle par devise. A utiliser avec prudence pendant la transition.",
+        "type": "float",
+        "min": 5.0,
+        "max": 500.0,
+        "step": 5.0,
+    },
+    {
+        "key": "max_currency_open_risk_pct",
+        "label": "Max Currency Open Risk (%)",
+        "description": "Risque stop-based agrege par devise. Expose pour observabilite en phase 1, pas encore utilise comme hard gate.",
+        "type": "float",
+        "min": 1.0,
+        "max": 100.0,
+        "step": 1.0,
     },
     {
         "key": "max_weekly_loss_pct",
@@ -327,7 +342,9 @@ def get_current_values(decision_mode: str, execution_mode: str) -> dict[str, dic
             "max_positions": limits.max_positions,
             "max_positions_per_symbol": limits.max_positions_per_symbol,
             "min_free_margin_pct": limits.min_free_margin_pct,
-            "max_currency_exposure_pct": limits.max_currency_exposure_pct,
+            "max_currency_notional_exposure_pct_warn": limits.max_currency_notional_exposure_pct_warn,
+            "max_currency_notional_exposure_pct_block": limits.max_currency_notional_exposure_pct_block,
+            "max_currency_open_risk_pct": limits.max_currency_open_risk_pct,
             "max_weekly_loss_pct": limits.max_weekly_loss_pct,
         },
         "sizing": sizing,

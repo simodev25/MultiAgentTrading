@@ -111,18 +111,39 @@ def _decompose_position(pos: OpenPosition) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _estimate_position_value(pos: OpenPosition) -> float:
-    """Estimate notional value of a position."""
-    contract_size = 100_000  # default forex
+def _estimate_position_value(
+    pos: OpenPosition,
+    conversion_graph: dict[str, list[tuple[str, float]]],
+    account_currency: str = "USD",
+) -> float:
+    """Estimate position notional value in account currency.
+
+    Uses the same semantics as the currency exposure engine:
+    - base units = volume * contract_size
+    - value = abs(base units) converted to account currency
+    """
     try:
-        from app.services.market.instrument import InstrumentClassifier
-        desc = InstrumentClassifier.classify(pos.symbol)
-        ac = desc.asset_class.value.lower()
-        sizes = {"forex": 100_000, "crypto": 1, "metal": 100, "energy": 1000}
-        contract_size = sizes.get(ac, 100_000)
+        from app.services.risk.currency_exposure import (
+            _find_conversion_rate,
+            _get_contract_size,
+        )
     except Exception:
-        pass
-    return pos.volume * contract_size * pos.current_price
+        _find_conversion_rate = None
+        _get_contract_size = None
+
+    base, _quote = _decompose_position(pos)
+    contract_size = _get_contract_size(pos.symbol) if _get_contract_size else 100_000
+    if not base:
+        return pos.volume * contract_size * max(pos.current_price, 0.0)
+
+    base_units = pos.volume * contract_size
+    if not _find_conversion_rate:
+        return abs(base_units)
+
+    rate_to_account = _find_conversion_rate(conversion_graph, base, account_currency)
+    if rate_to_account is None:
+        return abs(base_units)
+    return abs(base_units) * rate_to_account
 
 
 def run_stress_test(
@@ -142,6 +163,11 @@ def run_stress_test(
     results: list[StressTestResult] = []
     worst_pnl_pct = 0.0
     surviving_count = 0
+    try:
+        from app.services.risk.currency_exposure import _build_conversion_graph
+        conversion_graph = _build_conversion_graph(positions)
+    except Exception:
+        conversion_graph = {}
 
     for scenario in test_scenarios:
         total_pnl = 0.0
@@ -163,7 +189,7 @@ def run_stress_test(
 
             # Position PnL
             side_sign = 1.0 if pos.side == "BUY" else -1.0
-            notional = _estimate_position_value(pos)
+            notional = _estimate_position_value(pos, conversion_graph)
             position_pnl = side_sign * notional * pair_shock_pct
 
             total_pnl += position_pnl

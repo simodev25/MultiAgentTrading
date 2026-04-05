@@ -43,6 +43,9 @@ def test_risk_limits_defaults_match() -> None:
     limits = get_effective_risk_limits("live")
     assert limits.max_daily_loss_pct == 3.0
     assert limits.max_positions == 3
+    assert limits.max_currency_notional_exposure_pct_warn == 12.0
+    assert limits.max_currency_notional_exposure_pct_block == 15.0
+    assert limits.max_currency_open_risk_pct == 6.0
 
 
 def test_sizing_defaults_match() -> None:
