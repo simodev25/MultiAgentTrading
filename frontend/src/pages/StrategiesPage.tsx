@@ -37,15 +37,16 @@ const STATUS_COLORS: Record<string, string> = {
   DRAFT: 'bg-border/30 text-text-dim border-border',
 };
 
-function ScoreBar({ score }: { score: number }) {
-  const color = score >= 80 ? 'bg-green-500' : score >= 50 ? 'bg-blue-500' : 'bg-red-500';
+function ScoreBar({ score }: { score: number | null | undefined }) {
+  const safeScore = score ?? 0;
+  const color = safeScore >= 80 ? 'bg-green-500' : safeScore >= 50 ? 'bg-blue-500' : 'bg-red-500';
   return (
     <div className="flex items-center gap-2">
       <span className="text-[8px] font-mono text-text-dim uppercase tracking-widest">Validation_Score</span>
       <div className="flex-1 h-1.5 rounded-full bg-border overflow-hidden">
-        <div className={`h-full rounded-full transition-all duration-700 ${color}`} style={{ width: `${score}%` }} />
+        <div className={`h-full rounded-full transition-all duration-700 ${color}`} style={{ width: `${safeScore}%` }} />
       </div>
-      <span className="text-[10px] font-mono font-bold text-text">{score}%</span>
+      <span className="text-[10px] font-mono font-bold text-text">{safeScore}%</span>
     </div>
   );
 }

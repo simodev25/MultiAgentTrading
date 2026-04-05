@@ -61,7 +61,7 @@ export function CurrencyExposureChart({ exposure, limits }: Props) {
                 )}
               </div>
               <div style={{ width: 90, fontSize: 11, textAlign: 'right', fontFamily: 'var(--font-mono)', color: overLimit ? 'var(--color-danger)' : 'var(--color-text-secondary)' }}>
-                {isLong ? '+' : ''}{entry.net_lots.toFixed(2)} ({entry.exposure_pct.toFixed(1)}%)
+                {isLong ? '+' : ''}{(entry.net_lots ?? 0).toFixed(2)} ({(entry.exposure_pct ?? 0).toFixed(1)}%)
                 {overLimit && ' !!'}
               </div>
             </div>

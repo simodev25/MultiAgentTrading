@@ -95,10 +95,10 @@ export function StressTestTable() {
                   <div style={{ fontSize: 10, color: 'var(--color-text-secondary)', marginTop: 1 }}>{r.description}</div>
                 </td>
                 <td style={{ textAlign: 'right', padding: '6px 8px', fontFamily: 'var(--font-mono)', color: pnlColor }}>
-                  {r.pnl >= 0 ? '+' : ''}{r.pnl.toFixed(0)}
+                  {r.pnl >= 0 ? '+' : ''}{(r.pnl ?? 0).toFixed(0)}
                 </td>
                 <td style={{ textAlign: 'right', padding: '6px 8px', fontFamily: 'var(--font-mono)', color: pnlColor }}>
-                  {r.pnl_pct >= 0 ? '+' : ''}{r.pnl_pct.toFixed(1)}%
+                  {r.pnl_pct >= 0 ? '+' : ''}{(r.pnl_pct ?? 0).toFixed(1)}%
                 </td>
                 <td style={{ textAlign: 'center', padding: '6px 8px' }}>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: statusColor }}>

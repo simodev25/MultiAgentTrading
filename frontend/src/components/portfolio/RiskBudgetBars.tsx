@@ -55,7 +55,7 @@ export function RiskBudgetBars({ state, limits }: Props) {
                 />
               </div>
               <div style={{ width: 100, fontSize: 12, textAlign: 'right', fontFamily: 'var(--font-mono)', color }}>
-                {bar.format === '%' ? `${bar.value.toFixed(1)}% / ${bar.max.toFixed(1)}%` : `${bar.value} / ${bar.max}`}
+                {bar.format === '%' ? `${(bar.value ?? 0).toFixed(1)}% / ${(bar.max ?? 0).toFixed(1)}%` : `${bar.value} / ${bar.max}`}
               </div>
             </div>
           );
